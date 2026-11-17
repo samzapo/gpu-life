@@ -8,8 +8,8 @@ export function makeRandomSinusoidFunction(): ThetaFunction {
   const a = 0.5 * Math.random();
   const b = Math.floor(Math.random() * 2) + 1;
   const c = Math.random() - 0.5;
-  const d = Math.random() * 2.0 * Math.pi;
-  return (theta: number) => a * Math.sin(b * theta  + d) + c;
+  const d = Math.random() * 2.0 * Math.PI;
+  return (theta: number) => a * Math.sin(b * theta + d) + c;
 }
 
 export function makeRandomMatrix(colourAmt: number): MatrixGrid {
