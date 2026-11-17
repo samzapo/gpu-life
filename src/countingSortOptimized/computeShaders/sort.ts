@@ -1,14 +1,8 @@
-export const sortComputeShader = (
-    workgroupSize: number
-) => {
-return /* wgsl */`
+import structsShader from '../../shaders/structs.wgsl?raw';
 
-struct SortParticle {
-    pos: vec2f,
-    vel: vec2f,
-    colour: f32,
-    idx: vec2u
-}
+export const sortComputeShader = (workgroupSize: number) => {
+  return /* wgsl */ `
+${structsShader}
 
 // Cell Buffer:
 @group(0) @binding(0) var<storage, read> input: array<SortParticle>;
@@ -29,4 +23,4 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     output[targetIndex] = value;
 }
 `;
-}
+};

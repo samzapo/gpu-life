@@ -5,6 +5,8 @@ import {
   setupTimestamp,
 } from '../utils';
 
+import structsShader from '../shaders/structs.wgsl?raw';
+import covalentSimShader from '../shaders/covalentSim.wgsl?raw';
 import cellShader from './cell.wgsl?raw';
 import prefixShader from './prefix.wgsl?raw';
 import sortShader from './sort.wgsl?raw';
@@ -34,7 +36,7 @@ export function setup(device2: GPUDevice) {
   device = device2;
 
   const cellModule = device.createShaderModule({
-    code: cellShader,
+    code: `${structsShader}\n${cellShader}`,
   });
 
   setupTimestamp(device, 'cell');
@@ -66,7 +68,7 @@ export function setup(device2: GPUDevice) {
   //
 
   const sortModule = device.createShaderModule({
-    code: sortShader,
+    code: `${structsShader}\n${sortShader}`,
   });
 
   setupTimestamp(device, 'sort');
@@ -82,7 +84,7 @@ export function setup(device2: GPUDevice) {
   //
 
   const simModule = device.createShaderModule({
-    code: simShader,
+    code: `${structsShader}\n${covalentSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'countSim');
@@ -108,16 +110,12 @@ export function start(
   if (!cellPipeline || !prefixPipeline || !sortPipeline || !simPipeline) return;
 
   cellBuffer = device.createBuffer({
-    size:
-      particleAmt *
-      (8 * Float32Array.BYTES_PER_ELEMENT + 1 * Uint32Array.BYTES_PER_ELEMENT),
+    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'cellBuffer',
   });
   sortedBuffer = device.createBuffer({
-    size:
-      particleAmt *
-      (8 * Float32Array.BYTES_PER_ELEMENT + 1 * Uint32Array.BYTES_PER_ELEMENT),
+    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'sortedBuffer',
   });

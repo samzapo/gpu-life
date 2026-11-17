@@ -1,3 +1,5 @@
+import structsShader from '../shaders/structs.wgsl?raw';
+import covalentSimShader from '../shaders/covalentSim.wgsl?raw';
 import constructShader from './construct.wgsl?raw';
 import simShader from './sim.wgsl?raw';
 import {
@@ -20,7 +22,7 @@ const workgroupSize = 64;
 
 export function setup(device: GPUDevice) {
   const constructModule = device.createShaderModule({
-    code: constructShader,
+    code: `${structsShader}\n${constructShader}`,
   });
 
   setupTimestamp(device, 'construct');
@@ -36,7 +38,7 @@ export function setup(device: GPUDevice) {
   //
 
   const simModule = device.createShaderModule({
-    code: simShader,
+    code: `${structsShader}\n${covalentSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'sim');
@@ -83,9 +85,7 @@ export function start(
   headsInitBuffer.unmap();
 
   const linkedListBuffer = device.createBuffer({
-    size:
-      (8 * Float32Array.BYTES_PER_ELEMENT + 1 * Uint32Array.BYTES_PER_ELEMENT) *
-      particleAmt,
+    size: 6 * Float32Array.BYTES_PER_ELEMENT * particleAmt,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'linkedListBuffer',
   });

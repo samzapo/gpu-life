@@ -1,6 +1,8 @@
 let pipeline: GPUComputePipeline | undefined;
 let bindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 
+import structsShader from '../shaders/structs.wgsl?raw';
+import covalentSimShader from '../shaders/covalentSim.wgsl?raw';
 import computeShader from './compute.wgsl?raw';
 import {
   linkComputeTimestamp,
@@ -13,7 +15,7 @@ const workgroupSize = 64;
 
 export function setup(device: GPUDevice) {
   const module = device.createShaderModule({
-    code: computeShader,
+    code: `${structsShader}\n${covalentSimShader}\n${computeShader}`,
   });
 
   setupTimestamp(device, 'compute');

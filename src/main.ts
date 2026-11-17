@@ -1,4 +1,11 @@
 import { tcamera, mouse } from './input';
+import {
+  THETA_SAMPLES,
+  makeRandomMatrix,
+  sampleMatrix,
+  type MatrixGrid,
+  type ThetaFunction,
+} from './matrix';
 import renderShaders from './render.wgsl?raw';
 import {
   hslToRgb,
@@ -29,29 +36,18 @@ const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const uniformsSize = 16;
 const uniformData = new Float32Array(uniformsSize);
 
-const simSize = 16;
+const simSize = 20;
 const simData = new Float32Array(simSize);
-
-function makeRandomMatrix() {
-  const rows = [];
-  for (let i = 0; i < colourAmt; i++) {
-    const row = [];
-    for (let j = 0; j < colourAmt; j++) {
-      row.push(Math.random() * 2 - 1);
-    }
-    rows.push(row);
-  }
-  return rows;
-}
+const frameBuf = new Float32Array(1);
 
 let colourAmt = colourAmtOptn;
 let colours: [number, number, number][] = [];
 for (let i = 0; i < colourAmt; i++) {
   colours.push(hslToRgb((i / colourAmt) * 360, 1, 0.5));
 }
-let matrix = makeRandomMatrix();
+let matrix: MatrixGrid = makeRandomMatrix(colourAmt);
 
-const particleStride = 24;
+const particleStride = 32;
 
 const multistep = 1;
 
@@ -76,6 +72,7 @@ let renderBindGroup: GPUBindGroup | undefined;
 
 let alternate = 0;
 let fpsc = 0;
+let frameCount = 0;
 
 import * as nSquared from './nSquared/main';
 import * as linkedList from './linkedList/main';
@@ -90,8 +87,90 @@ const engines: Record<
   countingSort,
 };
 
-let engine: string = 'linkedList';
+let engine: string = params.engine in engines ? params.engine : 'linkedList';
 setEngineDisplay(engine);
+
+function writeMatrixBuffer() {
+  if (!device || !matrixBuffer) return;
+  const matrixData = sampleMatrix(matrix, colourAmt, THETA_SAMPLES);
+  device.queue.writeBuffer(matrixBuffer, 0, matrixData.buffer);
+}
+
+function setMatrixFunction(c1: number, c2: number, fn: ThetaFunction) {
+  if (c1 < 0 || c1 >= colourAmt || c2 < 0 || c2 >= colourAmt) {
+    throw new RangeError(`Colour index out of range [0, ${colourAmt})`);
+  }
+  matrix[c1][c2] = fn;
+  if (!device || !matrixBuffer) return;
+  const slice = new Float32Array(THETA_SAMPLES);
+  const step = (Math.PI * 2) / THETA_SAMPLES;
+  for (let k = 0; k < THETA_SAMPLES; k++) {
+    slice[k] = fn(k * step);
+  }
+  const byteOffset =
+    (c1 * colourAmt + c2) * THETA_SAMPLES * Float32Array.BYTES_PER_ELEMENT;
+  device.queue.writeBuffer(matrixBuffer, byteOffset, slice.buffer);
+}
+
+declare global {
+  interface Window {
+    complexLife?: {
+      getMatrix: () => MatrixGrid;
+      setMatrixFunction: (c1: number, c2: number, fn: ThetaFunction) => void;
+      randomizeMatrix: () => void;
+      getThetaSamples: () => number;
+      getEngine: () => string;
+      getParticleCount: () => number;
+      getColourCount: () => number;
+      readParticles: (count?: number) => Promise<number[][]>;
+    };
+  }
+}
+
+async function readParticles(count: number = 16): Promise<number[][]> {
+  if (!device || !particleBuffers) return [];
+  const n = Math.min(count, particleAmt);
+  const byteLength = n * particleStride;
+  const activeBuf = particleBuffers[alternate];
+  const staging = device.createBuffer({
+    size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(activeBuf, 0, staging, 0, byteLength);
+  device.queue.submit([enc.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const f32 = new Float32Array(staging.getMappedRange());
+  const out: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    out.push([
+      f32[i * 8],
+      f32[i * 8 + 1],
+      f32[i * 8 + 2],
+      f32[i * 8 + 3],
+      f32[i * 8 + 4],
+      f32[i * 8 + 5],
+      f32[i * 8 + 6],
+    ]);
+  }
+  staging.unmap();
+  staging.destroy();
+  return out;
+}
+
+window.complexLife = {
+  getMatrix: () => matrix,
+  setMatrixFunction,
+  randomizeMatrix: () => {
+    matrix = makeRandomMatrix(colourAmt);
+    writeMatrixBuffer();
+  },
+  getThetaSamples: () => THETA_SAMPLES,
+  getEngine: () => engine,
+  getParticleCount: () => particleAmt,
+  getColourCount: () => colourAmt,
+  readParticles,
+};
 
 (async () => {
   const adapter = await navigator.gpu.requestAdapter({
@@ -106,6 +185,14 @@ setEngineDisplay(engine);
     engines['prefixSum'] = prefixSum;
   }
 
+  if (params.engine in engines) {
+    engine = params.engine;
+  } else {
+    engine = 'linkedList';
+    params.engine = engine;
+  }
+  setEngineDisplay(engine);
+  engineSelect.refresh();
 
   context = canvas.getContext('webgpu') ?? undefined;
 
@@ -137,8 +224,8 @@ setEngineDisplay(engine);
 
   //
 
-  for (const engine in engines) {
-    engines[engine].setup(device);
+  for (const engineName in engines) {
+    engines[engineName].setup(device);
   }
 
   const renderModule = device.createShaderModule({ code: renderShaders });
@@ -238,6 +325,13 @@ function startParticles() {
   )
     return;
 
+  if (particleBuffers) {
+    particleBuffers[0].destroy();
+    particleBuffers[1].destroy();
+  }
+  matrixBuffer?.destroy();
+  colourBuffer?.destroy();
+
   const bufferSize = particleAmt * particleStride;
   particleBuffers = [
     device.createBuffer({
@@ -245,18 +339,21 @@ function startParticles() {
       usage:
         GPUBufferUsage.STORAGE |
         GPUBufferUsage.VERTEX |
-        GPUBufferUsage.COPY_DST,
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
     }),
     device.createBuffer({
       size: bufferSize,
       usage:
         GPUBufferUsage.STORAGE |
         GPUBufferUsage.VERTEX |
-        GPUBufferUsage.COPY_DST,
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
     }),
   ];
 
   alternate = 0;
+  frameCount = 0;
   const data = new Float32Array(bufferSize / 4);
   let pi = 0;
   while (pi < particleAmt) {
@@ -268,16 +365,17 @@ function startParticles() {
 
     const x = Math.cos(a) * d;
     const y = Math.sin(a) * d;
-    for (let i = 0; i < spawnAmt; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const d = (Math.random() ** 3 / 10) * optionParams.worldSize;
-      data[pi * 6] = x + Math.cos(a) * d;
-      data[pi * 6 + 1] = y + Math.sin(a) * d;
-      data[pi * 6 + 2] = 0;
-      data[pi * 6 + 3] = 0;
-      data[pi * 6 + 4] = c;
-
-      data[pi * 6 + 5] = 0;
+    for (let i = 0; i < spawnAmt && pi < particleAmt; i++) {
+      const a2 = Math.random() * Math.PI * 2;
+      const d2 = (Math.random() ** 3 / 10) * optionParams.worldSize;
+      data[pi * 8] = x + Math.cos(a2) * d2;
+      data[pi * 8 + 1] = y + Math.sin(a2) * d2;
+      data[pi * 8 + 2] = 0;
+      data[pi * 8 + 3] = 0;
+      data[pi * 8 + 4] = c;
+      data[pi * 8 + 5] = Math.random() * Math.PI * 2;
+      data[pi * 8 + 6] = 0;
+      data[pi * 8 + 7] = 0;
 
       pi++;
     }
@@ -285,19 +383,13 @@ function startParticles() {
 
   device.queue.writeBuffer(particleBuffers[0], 0, data.buffer);
 
-  setSim(device, simData, simBuffer);
+  setSim(device, simData, simBuffer, frameCount);
 
   matrixBuffer = device.createBuffer({
-    size: colourAmt * colourAmt * 4,
+    size: colourAmt * colourAmt * THETA_SAMPLES * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  const matrixData = new Float32Array(colourAmt * colourAmt);
-  for (let c1 = 0; c1 < colourAmt; c1++) {
-    for (let c2 = 0; c2 < colourAmt; c2++) {
-      matrixData[c1 * colourAmt + c2] = matrix[c1][c2];
-    }
-  }
-  device.queue.writeBuffer(matrixBuffer, 0, matrixData.buffer);
+  writeMatrixBuffer();
 
   colourBuffer = device.createBuffer({
     size: colourAmt * 3 * 4,
@@ -311,8 +403,8 @@ function startParticles() {
   }
   device.queue.writeBuffer(colourBuffer, 0, colourData.buffer);
 
-  for (const engine in engines) {
-    engines[engine].start(
+  for (const engineName in engines) {
+    engines[engineName].start(
       device,
       uniformBuffer,
       simBuffer,
@@ -367,6 +459,13 @@ function update() {
   camera.y = lerp5(camera.y, tcamera.y, delta * 50);
   camera.zoom = lerp5(camera.zoom, tcamera.zoom, delta * 50);
 
+  frameCount = (frameCount + 1) % 1000000;
+  if (simBuffer && optionParams.temperature > 0) {
+    frameBuf[0] = frameCount;
+    simData[17] = frameCount;
+    device.queue.writeBuffer(simBuffer, 17 * 4, frameBuf);
+  }
+
   const commandEncoder = device.createCommandEncoder();
 
   if (uniformBuffer) {
@@ -400,7 +499,7 @@ function update() {
   device.queue.submit([commands]);
 
   device.popErrorScope().then((error) => {
-    if (error) {
+    if (error && !window.location.search.includes('noTimestamp')) {
       // some weird bug happened with timestamps, just disable it and restart the simulation
       window.location.href +=
         (window.location.search ? '&' : '?') + 'noTimestamp';
@@ -430,29 +529,24 @@ function update() {
 requestAnimationFrame(update);
 
 newSimBtn.on('click', () => {
-  colourAmt = optionParams.colours;
+  colourAmt = Math.max(1, Math.floor(optionParams.colours));
+  params.colours = colourAmt;
   colours = [];
   for (let i = 0; i < colourAmt; i++) {
     colours.push(hslToRgb((i / colourAmt) * 360, 1, 0.5));
   }
 
-  params.cells = optionParams.cells;
-  particleAmt = params.particles;
+  params.cells = Math.max(1, Math.floor(optionParams.cells));
+  particleAmt = Math.max(1, Math.floor(params.particles));
 
-  matrix = makeRandomMatrix();
+  matrix = makeRandomMatrix(colourAmt);
   startParticles();
 });
 
 randomizeBtn.on('click', () => {
   if (!device || !matrixBuffer) return;
-  matrix = makeRandomMatrix();
-  const matrixData = new Float32Array(colourAmt * colourAmt);
-  for (let c1 = 0; c1 < colourAmt; c1++) {
-    for (let c2 = 0; c2 < colourAmt; c2++) {
-      matrixData[c1 * colourAmt + c2] = matrix[c1][c2];
-    }
-  }
-  device.queue.writeBuffer(matrixBuffer, 0, matrixData.buffer);
+  matrix = makeRandomMatrix(colourAmt);
+  writeMatrixBuffer();
 });
 
 setInterval(() => {
@@ -461,8 +555,10 @@ setInterval(() => {
 }, 1000);
 
 engineSelect.on('change', (event) => {
-  engine = event.value;
-  setEngineDisplay(engine);
+  if (event.value in engines) {
+    engine = event.value;
+    setEngineDisplay(engine);
+  }
 });
 
 function updateTotal() {
@@ -474,9 +570,10 @@ function updateTotal() {
   if (isNaN(deltaTotal)) deltaTotal = 0;
 
   let total = 0;
-  const params = performanceParams[engine as keyof typeof performanceParams];
-  for (const pass in params) {
-    total += params[pass as keyof typeof params];
+  const enginePerf =
+    performanceParams[engine as keyof typeof performanceParams];
+  for (const pass in enginePerf) {
+    total += enginePerf[pass as keyof typeof enginePerf];
   }
   total += globalPerformanceParams.cpu;
   total += globalPerformanceParams.render;

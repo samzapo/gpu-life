@@ -94,16 +94,12 @@ export function start(
   if (!cellPipeline || !sortPipeline || !simPipeline) return;
 
   cellBuffer = device.createBuffer({
-    size:
-      particleAmt *
-      (8 * Float32Array.BYTES_PER_ELEMENT + 1 * Uint32Array.BYTES_PER_ELEMENT),
+    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'cellBuffer',
   });
   sortedBuffer = device.createBuffer({
-    size:
-      particleAmt *
-      (8 * Float32Array.BYTES_PER_ELEMENT + 1 * Uint32Array.BYTES_PER_ELEMENT),
+    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'sortedBuffer',
   });
