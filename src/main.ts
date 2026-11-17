@@ -132,6 +132,7 @@ declare global {
   interface Window {
     complexLife?: {
       getMatrix: () => MatrixGrid;
+      setMatrix: (nextMatrix: MatrixGrid) => void;
       setMatrixFunction: (c1: number, c2: number, fn: ThetaFunction) => void;
       randomizeMatrix: (seed?: string) => void;
       getSeed: () => string;
@@ -177,6 +178,10 @@ async function readParticles(count: number = 16): Promise<number[][]> {
 
 window.complexLife = {
   getMatrix: () => matrix,
+  setMatrix: (nextMatrix: MatrixGrid) => {
+    matrix = nextMatrix;
+    writeMatrixBuffer();
+  },
   setMatrixFunction,
   randomizeMatrix: (seed?: string) => {
     applyMatrixSeed(seed ?? generateRandomSeed(), true);
