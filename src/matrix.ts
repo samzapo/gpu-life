@@ -5,10 +5,11 @@ export type MatrixGrid = ThetaFunction[][];
 
 export function makeRandomSinusoidFunction(): ThetaFunction {
   // Math.random() is in [0, 1), so 1 - Math.random() is strictly in (0, 1].
-  const a = 1 - Math.random();
-  const b = Math.floor(Math.random() * 3) + 1;
+  const a = 0.5 * Math.random();
+  const b = Math.floor(Math.random() * 2) + 1;
   const c = Math.random() - 0.5;
-  return (theta: number) => a * Math.sin(b * theta) + c;
+  const d = Math.random() * 2.0 * Math.pi;
+  return (theta: number) => a * Math.sin(b * theta  + d) + c;
 }
 
 export function makeRandomMatrix(colourAmt: number): MatrixGrid {
