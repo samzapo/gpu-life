@@ -7,7 +7,8 @@ export function makeRandomSinusoidFunction(): ThetaFunction {
   // Math.random() is in [0, 1), so 1 - Math.random() is strictly in (0, 1].
   const a = 1 - Math.random();
   const b = Math.floor(Math.random() * 3) + 1;
-  return (theta: number) => a * Math.sin(b * theta);
+  const c = Math.random() - 0.5;
+  return (theta: number) => a * Math.sin(b * theta) + c;
 }
 
 export function makeRandomMatrix(colourAmt: number): MatrixGrid {
