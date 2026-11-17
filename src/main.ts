@@ -1,6 +1,8 @@
 import { tcamera, mouse } from './input';
 import {
   THETA_SAMPLES,
+  createSeededRng,
+  generateRandomSeed,
   makeRandomMatrix,
   sampleMatrix,
   type MatrixGrid,
@@ -24,6 +26,7 @@ import {
   params,
   performanceParams,
   randomizeBtn,
+  seedInput,
   setEngineDisplay,
   setSim,
   particleAmt as particleAmtOptn,
@@ -45,7 +48,7 @@ let colours: [number, number, number][] = [];
 for (let i = 0; i < colourAmt; i++) {
   colours.push(hslToRgb((i / colourAmt) * 360, 1, 0.5));
 }
-let matrix: MatrixGrid = makeRandomMatrix(colourAmt);
+let matrix: MatrixGrid = makeRandomMatrix(colourAmt, params.seed);
 
 const particleStride = 32;
 
@@ -112,12 +115,26 @@ function setMatrixFunction(c1: number, c2: number, fn: ThetaFunction) {
   device.queue.writeBuffer(matrixBuffer, byteOffset, slice.buffer);
 }
 
+let suppressSeedChange = false;
+
+function applyMatrixSeed(seed: string, updateInput: boolean = true) {
+  params.seed = seed;
+  if (updateInput) {
+    suppressSeedChange = true;
+    seedInput.refresh();
+    suppressSeedChange = false;
+  }
+  matrix = makeRandomMatrix(colourAmt, seed);
+  writeMatrixBuffer();
+}
+
 declare global {
   interface Window {
     complexLife?: {
       getMatrix: () => MatrixGrid;
       setMatrixFunction: (c1: number, c2: number, fn: ThetaFunction) => void;
-      randomizeMatrix: () => void;
+      randomizeMatrix: (seed?: string) => void;
+      getSeed: () => string;
       getThetaSamples: () => number;
       getEngine: () => string;
       getParticleCount: () => number;
@@ -161,10 +178,10 @@ async function readParticles(count: number = 16): Promise<number[][]> {
 window.complexLife = {
   getMatrix: () => matrix,
   setMatrixFunction,
-  randomizeMatrix: () => {
-    matrix = makeRandomMatrix(colourAmt);
-    writeMatrixBuffer();
+  randomizeMatrix: (seed?: string) => {
+    applyMatrixSeed(seed ?? generateRandomSeed(), true);
   },
+  getSeed: () => params.seed,
   getThetaSamples: () => THETA_SAMPLES,
   getEngine: () => engine,
   getParticleCount: () => particleAmt,
@@ -354,26 +371,27 @@ function startParticles() {
 
   alternate = 0;
   frameCount = 0;
+  const particleRng = createSeededRng(`${params.seed}:particles`);
   const data = new Float32Array(bufferSize / 4);
   let pi = 0;
   while (pi < particleAmt) {
-    const spawnAmt = ((Math.random() * (particleAmt - pi)) / colourAmt) * 5;
-    const c = Math.floor(Math.random() * colourAmt);
+    const spawnAmt = ((particleRng() * (particleAmt - pi)) / colourAmt) * 5;
+    const c = Math.floor(particleRng() * colourAmt);
 
-    const a = Math.random() * Math.PI * 2;
-    const d = Math.random() * optionParams.worldSize * 0.9;
+    const a = particleRng() * Math.PI * 2;
+    const d = particleRng() * optionParams.worldSize * 0.9;
 
     const x = Math.cos(a) * d;
     const y = Math.sin(a) * d;
     for (let i = 0; i < spawnAmt && pi < particleAmt; i++) {
-      const a2 = Math.random() * Math.PI * 2;
-      const d2 = (Math.random() ** 3 / 10) * optionParams.worldSize;
+      const a2 = particleRng() * Math.PI * 2;
+      const d2 = (particleRng() ** 3 / 10) * optionParams.worldSize;
       data[pi * 8] = x + Math.cos(a2) * d2;
       data[pi * 8 + 1] = y + Math.sin(a2) * d2;
       data[pi * 8 + 2] = 0;
       data[pi * 8 + 3] = 0;
       data[pi * 8 + 4] = c;
-      data[pi * 8 + 5] = Math.random() * Math.PI * 2;
+      data[pi * 8 + 5] = particleRng() * Math.PI * 2;
       data[pi * 8 + 6] = 0;
       data[pi * 8 + 7] = 0;
 
@@ -539,14 +557,18 @@ newSimBtn.on('click', () => {
   params.cells = Math.max(1, Math.floor(optionParams.cells));
   particleAmt = Math.max(1, Math.floor(params.particles));
 
-  matrix = makeRandomMatrix(colourAmt);
+  matrix = makeRandomMatrix(colourAmt, params.seed);
   startParticles();
 });
 
 randomizeBtn.on('click', () => {
   if (!device || !matrixBuffer) return;
-  matrix = makeRandomMatrix(colourAmt);
-  writeMatrixBuffer();
+  applyMatrixSeed(generateRandomSeed(), true);
+});
+
+seedInput.on('change', () => {
+  if (suppressSeedChange || !device || !matrixBuffer) return;
+  applyMatrixSeed(params.seed, false);
 });
 
 setInterval(() => {

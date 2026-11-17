@@ -1,4 +1,4 @@
-import { THETA_SAMPLES } from './matrix';
+import { THETA_SAMPLES, generateRandomSeed } from './matrix';
 
 const urlParams = new URLSearchParams(window.location.search);
 
@@ -36,6 +36,7 @@ const defaultTorque = validateURLParam('torque', 12);
 const defaultAngularFriction = validateURLParam('angularFriction', 0.05);
 const defaultValency = validateURLParam('valency', 0.5);
 const defaultTemperature = validateURLParam('temperature', 0);
+const defaultSeed = validateURLParam('seed', generateRandomSeed());
 
 export const params = {
   fps: 0,
@@ -43,6 +44,7 @@ export const params = {
   particles: particleAmt,
   colours: colourAmt,
   cells: cellAmt,
+  seed: defaultSeed,
 };
 
 export const optionParams = {
@@ -117,6 +119,7 @@ export const engineSelect = pane.addBinding(params, 'engine', {
 
 pane.addBinding(params, 'particles', { min: 1, step: 1 });
 
+export const seedInput = pane.addBinding(params, 'seed', { view: 'text' });
 export const newSimBtn = pane.addButton({ title: 'New Sim' });
 export const randomizeBtn = pane.addButton({ title: 'Randomize' });
 
