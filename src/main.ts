@@ -7,8 +7,11 @@ import { createSeededRng, generateRandomSeed } from './matrix';
 import {
   buildPackedChemistryBuffer,
   computeAbundanceDistribution,
+  getElementSymbol,
+  isBiogenicAtomicNumber,
   type Element2D,
 } from './periodicTable2D';
+import type { UnifiedEngineRefs } from './engineTypes';
 import structsShader from './shaders/structs.wgsl?raw';
 import projectionShader from './shaders/projection.wgsl?raw';
 import bgRenderShader from './shaders/bgRender.wgsl?raw';
@@ -80,7 +83,6 @@ import {
   oceanColourAmt as oceanColourAmtOptn,
   oceanLinesBinding,
   oceanOptionParams,
-  oceanParticleAmt as oceanParticleAmtOptn,
   oceanStatusBinding,
   optionParams,
   params,
@@ -144,9 +146,8 @@ const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
 
-const uniformsFloats = 36; // 144 bytes
+const uniformsFloats = 40; // 160 bytes
 const uniformData = new Float32Array(uniformsFloats);
-const oceanUniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
 const simData = new Float32Array(simSize);
 const oceanSimSize = 24;
@@ -175,15 +176,40 @@ let oceanSeed =
   generateRandomSeed();
 let oceanMatrixData: Float32Array<ArrayBuffer> = new Float32Array(0);
 
-function buildRandomOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
+function computeBioSeedHash(seed: string, oSeed: string): number {
+  const s = `${seed}:${oSeed}`;
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) & 0xffff;
+}
+
+const TROPHIC_PRIORS: number[][] = [
+  [0.32, -0.48, -0.12, -0.10], // Guild 0: Producer
+  [0.68, -0.22, -0.42, 0.46],  // Guild 1: Consumer
+  [-0.18, -0.52, 0.42, 0.08],  // Guild 2: Halophile
+  [0.26, -0.24, 0.18, -0.16],  // Guild 3: Decomposer
+];
+
+const SELF_STRAIN_PRIORS: number[] = [0.44, -0.10, 0.55, 0.08];
+
+function buildStructuredOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
   const rng = createSeededRng(`${seed}:oceanMatrix`);
   const mat = new Float32Array(nColours * nColours);
-  for (let i = 0; i < mat.length; i++) {
-    mat[i] = rng() * 2 - 1;
+  for (let i = 0; i < nColours; i++) {
+    const rG = i % 4;
+    for (let j = 0; j < nColours; j++) {
+      const cG = j % 4;
+      const prior = i === j ? SELF_STRAIN_PRIORS[rG] : TROPHIC_PRIORS[rG][cG];
+      const noise = (rng() * 2 - 1) * 0.24;
+      mat[i * nColours + j] = Math.max(-1, Math.min(1, prior + noise));
+    }
   }
   return mat;
 }
-oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
+oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
 
 const particleStride = 48; // 12 floats: pos(3), colour(1), vel(3), omega(1), orient(3), pad(1)
 const valenceStride = 16;
@@ -193,31 +219,24 @@ const WATERMAN_INV_W = 640;
 const WATERMAN_INV_H = 360;
 
 let particleAmt = particleAmtOptn;
-let oceanParticleAmt = oceanParticleAmtOptn;
 
 let device: GPUDevice | undefined;
 let bgContext: GPUCanvasContext | undefined;
 let context: GPUCanvasContext | undefined;
 
 let uniformBuffer: GPUBuffer | undefined;
-let oceanUniformBuffer: GPUBuffer | undefined;
 let simBuffer: GPUBuffer | undefined;
 let oceanSimBuffer: GPUBuffer | undefined;
 let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
 
-let matrixBuffer: GPUBuffer | undefined;
-let colourBuffer: GPUBuffer | undefined;
+let worldRulesBuffer: GPUBuffer | undefined;
+let worldColoursBuffer: GPUBuffer | undefined;
 let valenceBuffer: GPUBuffer | undefined;
-let airBioReactBuffer: GPUBuffer | undefined;
+let bioForceBuffer: GPUBuffer | undefined;
 let particleBuffers: [GPUBuffer, GPUBuffer] | undefined;
-
-let oceanMatrixBuffer: GPUBuffer | undefined;
-let oceanColourBuffer: GPUBuffer | undefined;
-let oceanValenceBuffer: GPUBuffer | undefined;
-let oceanSteerBuffer: GPUBuffer | undefined;
-let oceanParticleBuffers: [GPUBuffer, GPUBuffer] | undefined;
+let lifeStateBuffers: [GPUBuffer, GPUBuffer] | undefined;
 let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
@@ -227,19 +246,15 @@ let watermanInvTexture: GPUTexture | undefined;
 
 let bgBindGroup: GPUBindGroup | undefined;
 let renderBindGroup: GPUBindGroup | undefined;
-let oceanRenderBindGroup: GPUBindGroup | undefined;
 
 let lensTrackPipeline: GPUComputePipeline | undefined;
 let lensOverlayPipeline: GPURenderPipeline | undefined;
 let lensTrackUniformBuffer: GPUBuffer | undefined;
 let lensGpuStateBuffer: GPUBuffer | undefined;
 let lensOverlayBindGroup: GPUBindGroup | undefined;
-const lensTrackBindGroups: [
-  [GPUBindGroup | undefined, GPUBindGroup | undefined],
-  [GPUBindGroup | undefined, GPUBindGroup | undefined],
-] = [
-  [undefined, undefined],
-  [undefined, undefined],
+const lensTrackBindGroups: [GPUBindGroup | undefined, GPUBindGroup | undefined] = [
+  undefined,
+  undefined,
 ];
 const lensTrackUniformData = new Float32Array(12);
 let prevGpuLensGen = -1;
@@ -250,7 +265,6 @@ let lensReadbackToggle = 0;
 let pendingLensReadbackIdx: number | null = null;
 
 let alternate = 0;
-let oceanAlternate = 0;
 let fpsc = 0;
 let frameCount = 0;
 let suppressSeedChange = false;
@@ -435,7 +449,6 @@ function exportCurrentConfig(): SimConfigV1 {
       worldSize: optionParams.worldSize,
     },
     ocean: {
-      particles: oceanParticleAmt,
       colours: oceanColourAmt,
       r: oceanOptionParams.r,
       beta: oceanOptionParams.beta,
@@ -443,7 +456,6 @@ function exportCurrentConfig(): SimConfigV1 {
       delta: oceanOptionParams.delta,
       friction: oceanOptionParams.friction,
       avoidance: oceanOptionParams.avoidance,
-      cells: oceanOptionParams.cells,
     },
     earth: {
       viewLayer: earthParams.viewLayer,
@@ -520,8 +532,7 @@ function scheduleSaveConfig() {
 async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimConfigV1> {
   const cfg = parseConfigInput(rawInput);
 
-  let resetAir = false;
-  let resetOcean = false;
+  let resetWorld = false;
   let nextWindLevel: WindLevelId | null = null;
   let nextViewLayer: ViewLayerMode | null = null;
   let projUpdated = false;
@@ -534,30 +545,30 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
 
   if (cfg.particles !== undefined) {
     const p = Math.max(1, Math.floor(cfg.particles));
-    if (p !== particleAmt) resetAir = true;
+    if (p !== particleAmt) resetWorld = true;
     particleAmt = p;
     params.particles = p;
   }
   if (cfg.colours !== undefined) {
     const c = Math.max(1, Math.min(62, Math.floor(cfg.colours)));
-    if (c !== colourAmt) resetAir = true;
+    if (c !== colourAmt) resetWorld = true;
     colourAmt = c;
     params.colours = c;
     optionParams.colours = c;
   }
   if (cfg.cells !== undefined) {
     const cl = Math.max(1, Math.floor(cfg.cells));
-    if (cl !== params.cells) resetAir = true;
+    if (cl !== params.cells) resetWorld = true;
     params.cells = cl;
     optionParams.cells = cl;
   }
   if (cfg.seed !== undefined && cfg.seed !== params.seed) {
     params.seed = cfg.seed;
-    resetAir = true;
+    resetWorld = true;
   }
   if (cfg.oceanSeed !== undefined && cfg.oceanSeed !== oceanSeed) {
     oceanSeed = cfg.oceanSeed;
-    resetOcean = true;
+    resetWorld = true;
   }
 
   if (cfg.air) {
@@ -587,22 +598,11 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
 
   if (cfg.ocean) {
     const o = cfg.ocean;
-    if (o.particles !== undefined) {
-      const op = Math.max(1, Math.floor(o.particles));
-      if (op !== oceanParticleAmt) resetOcean = true;
-      oceanParticleAmt = op;
-      oceanOptionParams.particles = op;
-    }
     if (o.colours !== undefined) {
       const oc = Math.max(1, Math.min(200, Math.floor(o.colours)));
-      if (oc !== oceanColourAmt) resetOcean = true;
+      if (oc !== oceanColourAmt) resetWorld = true;
       oceanColourAmt = oc;
       oceanOptionParams.colours = oc;
-    }
-    if (o.cells !== undefined) {
-      const ocl = Math.max(1, Math.floor(o.cells));
-      if (ocl !== oceanOptionParams.cells) resetOcean = true;
-      oceanOptionParams.cells = ocl;
     }
     if (o.r !== undefined) oceanOptionParams.r = o.r;
     if (o.beta !== undefined) oceanOptionParams.beta = o.beta;
@@ -688,12 +688,9 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   }
 
   updatePeriodicLegend(colourAmt);
-  if (resetAir) {
+  if (resetWorld) {
     refreshChemistryDefinition();
-    startParticles();
-  }
-  if (resetOcean) {
-    startOceanParticles();
+    startWorld();
   }
   if (nextWindLevel) {
     await loadWindLevel(nextWindLevel);
@@ -792,31 +789,38 @@ async function loadWindLevel(levelId: WindLevelId) {
   }
 }
 
-function writeChemistryBuffers() {
-  if (!device || !matrixBuffer || !colourBuffer) return;
-  device.queue.writeBuffer(matrixBuffer, 0, chemistryData.buffer);
+const GUILD_BASE_HUES = [118, 12, 282, 46];
+const GUILD_SPREADS = [28, 24, 28, 24];
+const GUILD_SATS = [0.78, 0.86, 0.80, 0.84];
+const GUILD_LIGHTS = [0.48, 0.56, 0.58, 0.52];
 
-  const colourData = new Float32Array(colourAmt * 3);
+function writeWorldRuleAndColourBuffers() {
+  if (!device || !worldRulesBuffer || !worldColoursBuffer) return;
+  const rules = new Float32Array(chemistryData.length + oceanMatrixData.length);
+  rules.set(chemistryData, 0);
+  rules.set(oceanMatrixData, chemistryData.length);
+  device.queue.writeBuffer(worldRulesBuffer, 0, rules.buffer);
+
+  const totalPalette = colourAmt + oceanColourAmt;
+  const colourData = new Float32Array(totalPalette * 3);
   for (let c = 0; c < colourAmt; c++) {
     colourData[c * 3] = elements[c].color[0];
     colourData[c * 3 + 1] = elements[c].color[1];
     colourData[c * 3 + 2] = elements[c].color[2];
   }
-  device.queue.writeBuffer(colourBuffer, 0, colourData.buffer);
-}
-
-function writeOceanRuleBuffers() {
-  if (!device || !oceanMatrixBuffer || !oceanColourBuffer) return;
-  device.queue.writeBuffer(oceanMatrixBuffer, 0, oceanMatrixData.buffer);
-
-  const colourData = new Float32Array(oceanColourAmt * 3);
   for (let i = 0; i < oceanColourAmt; i++) {
-    const [r, g, b] = hslToRgb((i / oceanColourAmt) * 360, 1, 0.5);
-    colourData[i * 3] = r;
-    colourData[i * 3 + 1] = g;
-    colourData[i * 3 + 2] = b;
+    const guild = i % 4;
+    const strainIdx = Math.floor(i / 4);
+    const totalStrains = Math.max(1, Math.ceil((oceanColourAmt - guild) / 4));
+    const frac = totalStrains > 1 ? strainIdx / (totalStrains - 1) - 0.5 : 0;
+    const hue = (((GUILD_BASE_HUES[guild] + frac * GUILD_SPREADS[guild]) % 360) + 360) % 360;
+    const [r, g, b] = hslToRgb(hue, GUILD_SATS[guild], GUILD_LIGHTS[guild]);
+    const outIdx = (colourAmt + i) * 3;
+    colourData[outIdx] = r;
+    colourData[outIdx + 1] = g;
+    colourData[outIdx + 2] = b;
   }
-  device.queue.writeBuffer(oceanColourBuffer, 0, colourData.buffer);
+  device.queue.writeBuffer(worldColoursBuffer, 0, colourData.buffer);
 }
 
 declare global {
@@ -886,6 +890,26 @@ declare global {
       readValence: (count?: number) => Promise<number[][]>;
       readOceanState: (count?: number) => Promise<number[][]>;
       readAirBioReact: (count?: number) => Promise<number[][]>;
+      readLifeState: (count?: number) => Promise<number[][]>;
+      readBioForce: (count?: number) => Promise<number[][]>;
+      readWorldState: (count?: number) => Promise<{
+        particles: number[][];
+        valence: number[][];
+        lifeState: number[][];
+        bioForce: number[][];
+      }>;
+      getWorldStats: () => Promise<{
+        total: number;
+        chemCount: number;
+        bioCount: number;
+        guildCounts: [number, number, number, number];
+        abioticBioViolations: number;
+        chemElementCounts: Record<string, number>;
+        bioElementCounts: Record<string, number>;
+        avgBioEnergy: number;
+        oceanBioCount: number;
+        landBioCount: number;
+      }>;
     };
   }
 }
@@ -965,45 +989,41 @@ async function readVec4Buffer(
   return out;
 }
 
-async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
-  if (!device) return null;
-  const runAir = earthParams.viewLayer !== 'ocean' && particleBuffers && valenceBuffer;
-  const runOcean = earthParams.viewLayer !== 'air' && oceanParticleBuffers && oceanValenceBuffer;
-  if (!runAir && !runOcean) return null;
+async function readUnifiedWorldBuffers(
+  count: number,
+  includeExtras: boolean,
+): Promise<{
+  particles: number[][];
+  valence: number[][];
+  lifeState: number[][];
+  bioForce: number[][];
+} | null> {
+  if (!device || !particleBuffers || !lifeStateBuffers) return null;
+  const n = Math.max(0, Math.min(count, particleAmt));
+  if (n === 0) {
+    return { particles: [], valence: [], lifeState: [], bioForce: [] };
+  }
 
   const enc = device.createCommandEncoder();
   const stg: Record<string, { buf: GPUBuffer; count: number; isVec4: boolean }> = {};
-  const queueRead = (name: string, src: GPUBuffer, byteLength: number, count: number, isVec4: boolean) => {
+  const queueRead = (name: string, src: GPUBuffer, byteLength: number, isVec4: boolean) => {
     const buf = device!.createBuffer({
       size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     enc.copyBufferToBuffer(src, 0, buf, 0, byteLength);
-    stg[name] = { buf, count, isVec4 };
+    stg[name] = { buf, count: n, isVec4 };
   };
 
-  if (runAir) {
-    queueRead('air', particleBuffers![alternate], particleAmt * particleStride, particleAmt, false);
-    queueRead('valence', valenceBuffer!, particleAmt * valenceStride, particleAmt, true);
-    if (airBioReactBuffer) {
-      queueRead('bioReact', airBioReactBuffer, particleAmt * valenceStride, particleAmt, true);
+  queueRead('particles', particleBuffers[alternate], n * particleStride, false);
+  queueRead('lifeState', lifeStateBuffers[alternate], n * valenceStride, true);
+  if (includeExtras) {
+    if (valenceBuffer) {
+      queueRead('valence', valenceBuffer, n * valenceStride, true);
     }
-  }
-  if (runOcean) {
-    queueRead(
-      'ocean',
-      oceanParticleBuffers![oceanAlternate],
-      oceanParticleAmt * particleStride,
-      oceanParticleAmt,
-      false,
-    );
-    queueRead(
-      'oceanState',
-      oceanValenceBuffer!,
-      oceanParticleAmt * valenceStride,
-      oceanParticleAmt,
-      true,
-    );
+    if (bioForceBuffer) {
+      queueRead('bioForce', bioForceBuffer, n * valenceStride, true);
+    }
   }
 
   device.queue.submit([enc.finish()]);
@@ -1017,13 +1037,10 @@ async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
       return entry.isVec4 ? unpackVec4F32(f32, entry.count) : unpackParticlesF32(f32, entry.count);
     };
     return {
-      elements,
-      air: readArr('air'),
+      particles: readArr('particles'),
       valence: readArr('valence'),
-      bioReact: readArr('bioReact'),
-      ocean: readArr('ocean'),
-      oceanState: readArr('oceanState'),
-      capturedAt: performance.now(),
+      lifeState: readArr('lifeState'),
+      bioForce: readArr('bioForce'),
     };
   } finally {
     for (const k of keys) {
@@ -1037,49 +1054,107 @@ async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
   }
 }
 
-function writeNeutralOceanState() {
-  if (!device || !oceanValenceBuffer) return;
-  const neutral = new Float32Array(oceanParticleAmt * 4);
-  for (let i = 0; i < oceanParticleAmt; i++) {
-    neutral[i * 4] = 0.65;
-  }
-  device.queue.writeBuffer(oceanValenceBuffer, 0, neutral);
+async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
+  const data = await readUnifiedWorldBuffers(particleAmt, true);
+  if (!data) return null;
+  return {
+    elements,
+    particles: data.particles,
+    valence: data.valence,
+    lifeState: data.lifeState,
+    bioForce: data.bioForce,
+    capturedAt: performance.now(),
+  };
 }
 
-function resetNeutralBioBuffers(resetMetabolism: boolean = true) {
-  if (!device) return;
-  if (airBioReactBuffer) {
-    device.queue.writeBuffer(airBioReactBuffer, 0, new Float32Array(particleAmt * 4));
+async function computeWorldStats() {
+  const data = await readUnifiedWorldBuffers(particleAmt, false);
+  const guildCounts: [number, number, number, number] = [0, 0, 0, 0];
+  const chemElementCounts: Record<string, number> = {};
+  const bioElementCounts: Record<string, number> = {};
+  if (!data) {
+    return {
+      total: 0,
+      chemCount: 0,
+      bioCount: 0,
+      guildCounts,
+      abioticBioViolations: 0,
+      chemElementCounts,
+      bioElementCounts,
+      avgBioEnergy: 0,
+      oceanBioCount: 0,
+      landBioCount: 0,
+    };
   }
-  if (oceanSteerBuffer) {
-    device.queue.writeBuffer(oceanSteerBuffer, 0, new Float32Array(oceanParticleAmt * 4));
+
+  const total = data.particles.length;
+  let chemCount = 0;
+  let bioCount = 0;
+  let abioticBioViolations = 0;
+  let bioEnergySum = 0;
+  let oceanBioCount = 0;
+  let landBioCount = 0;
+  const RAD2DEG = 180 / Math.PI;
+
+  for (let i = 0; i < total; i++) {
+    const p = data.particles[i];
+    const ls = data.lifeState[i] ?? [0, 0, 0, 0];
+    const cIdx = Math.max(0, Math.min(elements.length - 1, Math.floor(p[6] ?? 0)));
+    const el = elements[cIdx];
+    const sym = getElementSymbol(el.atomicNumber);
+    const w = ls[3] ?? 0;
+    if (w >= 0.5) {
+      bioCount++;
+      const bioSp = Math.max(0, Math.round(w - 1.0));
+      guildCounts[bioSp % 4]++;
+      bioEnergySum += ls[0] ?? 0;
+      bioElementCounts[sym] = (bioElementCounts[sym] ?? 0) + 1;
+      if (!isBiogenicAtomicNumber(el.atomicNumber, el.valence)) {
+        abioticBioViolations++;
+      }
+      if (currentOceanGrid) {
+        const z = Math.max(-1, Math.min(1, p[2] ?? 0));
+        const latDeg = Math.asin(z) * RAD2DEG;
+        const lonDeg = Math.atan2(p[1] ?? 0, p[0] ?? 1) * RAD2DEG;
+        const m = sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
+        if (m >= 0.42) oceanBioCount++;
+        else landBioCount++;
+      }
+    } else {
+      chemCount++;
+      chemElementCounts[sym] = (chemElementCounts[sym] ?? 0) + 1;
+    }
   }
-  if (resetMetabolism) {
-    writeNeutralOceanState();
-  }
+
+  return {
+    total,
+    chemCount,
+    bioCount,
+    guildCounts,
+    abioticBioViolations,
+    chemElementCounts,
+    bioElementCounts,
+    avgBioEnergy: bioCount > 0 ? bioEnergySum / bioCount : 0,
+    oceanBioCount,
+    landBioCount,
+  };
 }
 
 function syncBioUniformState() {
   if (!device || !bioUniformBuffer) return;
-  const active =
-    earthParams.viewLayer === 'both' && earthParams.bioLink && earthParams.bioRate > 0;
-  setBioLink(device, bioUniformData, bioUniformBuffer, active);
-  if (!active && (bioWasActive || !earthParams.bioLink)) {
-    resetNeutralBioBuffers(!earthParams.bioLink);
+  const active = earthParams.bioLink && earthParams.bioRate > 0;
+  setBioLink(
+    device,
+    bioUniformData,
+    bioUniformBuffer,
+    active,
+    frameCount,
+    computeBioSeedHash(params.seed, oceanSeed),
+  );
+  if (!active && bioWasActive && bioForceBuffer) {
+    device.queue.writeBuffer(bioForceBuffer, 0, new Float32Array(particleAmt * 4));
   }
   bioWasActive = active;
-}
-
-function refreshEngineCrossBio() {
-  if (!device || !bioUniformBuffer || !airBioReactBuffer || !oceanSteerBuffer) return;
-  for (const engineName in engines) {
-    engines[engineName].bindCrossBio(
-      device,
-      bioUniformBuffer,
-      airBioReactBuffer,
-      oceanSteerBuffer,
-    );
-  }
 }
 
 function unitTangentFromSphere(
@@ -1112,7 +1187,7 @@ function applySeed(seed: string, updateInput: boolean = true) {
     seedInput.refresh();
     suppressSeedChange = false;
   }
-  startParticles();
+  startWorld();
 }
 
 function setViewLayerChoice(layer: ViewLayerMode) {
@@ -1184,7 +1259,7 @@ window.complexLife = {
   },
   getParticleCount: () => particleAmt,
   getColourCount: () => colourAmt,
-  getOceanParticleCount: () => oceanParticleAmt,
+  getOceanParticleCount: () => particleAmt,
   getOceanColourCount: () => oceanColourAmt,
   getViewLayer: () => earthParams.viewLayer,
   setViewLayer: setViewLayerChoice,
@@ -1262,8 +1337,9 @@ window.complexLife = {
   resetDefaultConfig: resetToFactoryDefaults,
   randomizeOceanMatrix: (seed?: string) => {
     oceanSeed = seed ?? generateRandomSeed();
-    oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
-    writeOceanRuleBuffers();
+    oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+    writeWorldRuleAndColourBuffers();
+    syncBioUniformState();
   },
   getOceanInfo: () =>
     currentOceanGrid
@@ -1307,12 +1383,24 @@ window.complexLife = {
   readParticles: (count: number = 16) =>
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readOceanParticles: (count: number = 16) =>
-    readParticleBuffer(oceanParticleBuffers, oceanAlternate, oceanParticleAmt, count),
+    readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readValence: (count: number = 16) => readVec4Buffer(valenceBuffer, particleAmt, count),
   readOceanState: (count: number = 16) =>
-    readVec4Buffer(oceanValenceBuffer, oceanParticleAmt, count),
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count),
   readAirBioReact: (count: number = 16) =>
-    readVec4Buffer(airBioReactBuffer, particleAmt, count),
+    readVec4Buffer(bioForceBuffer, particleAmt, count),
+  readLifeState: (count: number = 16) =>
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count),
+  readBioForce: (count: number = 16) =>
+    readVec4Buffer(bioForceBuffer, particleAmt, count),
+  readWorldState: async (count: number = 16) =>
+    (await readUnifiedWorldBuffers(count, true)) ?? {
+      particles: [],
+      valence: [],
+      lifeState: [],
+      bioForce: [],
+    },
+  getWorldStats: computeWorldStats,
 };
 
 function syncCanvasDimensions() {
@@ -1379,11 +1467,6 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     size: uniformsFloats * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'uniformBuffer',
-  });
-  oceanUniformBuffer = device.createBuffer({
-    size: uniformsFloats * 4,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    label: 'oceanUniformBuffer',
   });
 
   simBuffer = device.createBuffer({
@@ -1484,6 +1567,13 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
           stepMode: 'instance',
           attributes: [
             { shaderLocation: 3, offset: 0, format: 'float32x4' },
+          ],
+        },
+        {
+          arrayStride: valenceStride,
+          stepMode: 'instance',
+          attributes: [
+            { shaderLocation: 5, offset: 0, format: 'float32x4' },
           ],
         },
       ],
@@ -1608,10 +1698,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     oceanStatusBinding.refresh();
   }
 
-  startParticles();
-  startOceanParticles();
-  refreshEngineCrossBio();
-  syncBioUniformState();
+  startWorld();
   bindOptions(
     device,
     simData,
@@ -1629,59 +1716,9 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
 })();
 
 function tick(commandEncoder: GPUCommandEncoder) {
-  if (!device) return;
-  const runAir = earthParams.viewLayer !== 'ocean';
-  const runOcean = earthParams.viewLayer !== 'air';
-  const curEngine = engines[engine];
-
-  if (runAir && runOcean) {
-    curEngine.buildIndex(device, commandEncoder, alternate, particleAmt, 'air', true);
-    curEngine.buildIndex(
-      device,
-      commandEncoder,
-      oceanAlternate,
-      oceanParticleAmt,
-      'ocean',
-      false,
-    );
-    if (earthParams.bioLink && earthParams.bioRate > 0) {
-      curEngine.stepBio(
-        commandEncoder,
-        alternate,
-        oceanAlternate,
-        particleAmt,
-        oceanParticleAmt,
-      );
-    }
-    curEngine.stepSim(device, commandEncoder, alternate, particleAmt, 'air', true);
-    alternate = (alternate + 1) % 2;
-    curEngine.stepSim(
-      device,
-      commandEncoder,
-      oceanAlternate,
-      oceanParticleAmt,
-      'ocean',
-      false,
-    );
-    oceanAlternate = (oceanAlternate + 1) % 2;
-    return;
-  }
-
-  if (runAir) {
-    curEngine.tick(device, commandEncoder, alternate, particleAmt, 'air', true);
-    alternate = (alternate + 1) % 2;
-  }
-  if (runOcean) {
-    curEngine.tick(
-      device,
-      commandEncoder,
-      oceanAlternate,
-      oceanParticleAmt,
-      'ocean',
-      true,
-    );
-    oceanAlternate = (oceanAlternate + 1) % 2;
-  }
+  if (!device || !particleBuffers) return;
+  engines[engine].tick(device, commandEncoder, alternate, particleAmt);
+  alternate = (alternate + 1) % 2;
 }
 
 function rebuildLensTrackBindGroups() {
@@ -1692,26 +1729,23 @@ function rebuildLensTrackBindGroups() {
     !watermanFwdTexture ||
     !lensTrackUniformBuffer ||
     !lensGpuStateBuffer ||
-    !particleBuffers ||
-    !oceanParticleBuffers
-  )
+    !particleBuffers
+  ) {
     return;
+  }
 
   const fwdView = watermanFwdTexture.createView();
-  for (let ai = 0; ai < 2; ai++) {
-    for (let oi = 0; oi < 2; oi++) {
-      lensTrackBindGroups[ai][oi] = device.createBindGroup({
-        layout: lensTrackPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: uniformBuffer } },
-          { binding: 1, resource: fwdView },
-          { binding: 2, resource: { buffer: lensTrackUniformBuffer } },
-          { binding: 3, resource: { buffer: particleBuffers[ai] } },
-          { binding: 4, resource: { buffer: oceanParticleBuffers[oi] } },
-          { binding: 5, resource: { buffer: lensGpuStateBuffer } },
-        ],
-      });
-    }
+  for (let i = 0; i < 2; i++) {
+    lensTrackBindGroups[i] = device.createBindGroup({
+      layout: lensTrackPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: fwdView },
+        { binding: 2, resource: { buffer: lensTrackUniformBuffer } },
+        { binding: 3, resource: { buffer: particleBuffers[i] } },
+        { binding: 4, resource: { buffer: lensGpuStateBuffer } },
+      ],
+    });
   }
 }
 
@@ -1720,7 +1754,6 @@ function updateGpuLens(commandEncoder: GPUCommandEncoder, frameDtMs: number) {
   if (
     !device ||
     !uniformBuffer ||
-    !oceanUniformBuffer ||
     !lensTrackPipeline ||
     !lensTrackUniformBuffer ||
     !lensGpuStateBuffer
@@ -1728,7 +1761,7 @@ function updateGpuLens(commandEncoder: GPUCommandEncoder, frameDtMs: number) {
     return;
   }
 
-  const bg = lensTrackBindGroups[alternate]?.[oceanAlternate];
+  const bg = lensTrackBindGroups[alternate];
   if (!bg) return;
 
   const cfg = tooltipManager.getLensGpuConfig();
@@ -1761,13 +1794,6 @@ function updateGpuLens(commandEncoder: GPUCommandEncoder, frameDtMs: number) {
   cPass.end();
 
   commandEncoder.copyBufferToBuffer(lensGpuStateBuffer, 0, uniformBuffer, 32 * 4, 16);
-  commandEncoder.copyBufferToBuffer(
-    lensGpuStateBuffer,
-    0,
-    oceanUniformBuffer,
-    32 * 4,
-    16,
-  );
 
   if (cfg.kind > 0 && lensReadbackBuffers) {
     const slot = lensReadbackToggle;
@@ -1793,8 +1819,9 @@ function render(commandEncoder: GPUCommandEncoder) {
     !bgRenderPipeline ||
     !renderPipeline ||
     !bgBindGroup
-  )
+  ) {
     return;
+  }
 
   const bgPass = commandEncoder.beginRenderPass({
     colorAttachments: [
@@ -1825,30 +1852,20 @@ function render(commandEncoder: GPUCommandEncoder) {
   const passEncoder = commandEncoder.beginRenderPass(
     linkRenderTimestamp(device, renderPassDescriptor, 'render'),
   );
-  passEncoder.setPipeline(renderPipeline);
 
+  const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
+  const showLife = earthParams.viewLayer !== 'air' && earthParams.lifeOpacity > 0.001;
   if (
-    earthParams.viewLayer !== 'air' &&
-    earthParams.lifeOpacity > 0.001 &&
-    oceanRenderBindGroup &&
-    oceanParticleBuffers &&
-    oceanValenceBuffer
-  ) {
-    passEncoder.setVertexBuffer(0, oceanParticleBuffers[oceanAlternate]);
-    passEncoder.setVertexBuffer(1, oceanValenceBuffer);
-    passEncoder.setBindGroup(0, oceanRenderBindGroup);
-    passEncoder.draw(6, oceanParticleAmt, 0, 0);
-  }
-
-  if (
-    earthParams.viewLayer !== 'ocean' &&
-    earthParams.chemOpacity > 0.001 &&
+    (showChem || showLife) &&
     renderBindGroup &&
     particleBuffers &&
-    valenceBuffer
+    valenceBuffer &&
+    lifeStateBuffers
   ) {
+    passEncoder.setPipeline(renderPipeline);
     passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
     passEncoder.setVertexBuffer(1, valenceBuffer);
+    passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
     passEncoder.setBindGroup(0, renderBindGroup);
     passEncoder.draw(6, particleAmt, 0, 0);
   }
@@ -1863,27 +1880,41 @@ function render(commandEncoder: GPUCommandEncoder) {
   resolveTimestamp(commandEncoder, 'render');
 }
 
-function startParticles() {
+function pickStrainForGuild(guild: number, nBio: number, u: number): number {
+  if (nBio <= 4) {
+    return Math.min(guild, Math.max(nBio, 1) - 1);
+  }
+  const strainCount = Math.floor((nBio - guild + 3) / 4);
+  const pick = Math.max(0, Math.min(strainCount - 1, Math.floor(u * strainCount)));
+  return Math.min(pick * 4 + guild, nBio - 1);
+}
+
+function startWorld() {
   if (
     !device ||
     !uniformBuffer ||
     !renderPipeline ||
     !simBuffer ||
+    !oceanSimBuffer ||
+    !bioUniformBuffer ||
     !windTexture ||
+    !oceanTexture ||
     !watermanFwdTexture
-  )
+  ) {
     return;
-
-  if (particleBuffers) {
-    particleBuffers[0].destroy();
-    particleBuffers[1].destroy();
   }
-  matrixBuffer?.destroy();
-  colourBuffer?.destroy();
+
+  particleBuffers?.[0].destroy();
+  particleBuffers?.[1].destroy();
+  lifeStateBuffers?.[0].destroy();
+  lifeStateBuffers?.[1].destroy();
   valenceBuffer?.destroy();
-  airBioReactBuffer?.destroy();
+  bioForceBuffer?.destroy();
+  worldRulesBuffer?.destroy();
+  worldColoursBuffer?.destroy();
 
   refreshChemistryDefinition();
+  oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
 
   const bufferSize = particleAmt * particleStride;
   particleBuffers = [
@@ -1894,6 +1925,7 @@ function startParticles() {
         GPUBufferUsage.VERTEX |
         GPUBufferUsage.COPY_DST |
         GPUBufferUsage.COPY_SRC,
+      label: 'worldParticles0',
     }),
     device.createBuffer({
       size: bufferSize,
@@ -1902,6 +1934,28 @@ function startParticles() {
         GPUBufferUsage.VERTEX |
         GPUBufferUsage.COPY_DST |
         GPUBufferUsage.COPY_SRC,
+      label: 'worldParticles1',
+    }),
+  ];
+
+  lifeStateBuffers = [
+    device.createBuffer({
+      size: particleAmt * valenceStride,
+      usage:
+        GPUBufferUsage.STORAGE |
+        GPUBufferUsage.VERTEX |
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
+      label: 'lifeState0',
+    }),
+    device.createBuffer({
+      size: particleAmt * valenceStride,
+      usage:
+        GPUBufferUsage.STORAGE |
+        GPUBufferUsage.VERTEX |
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
+      label: 'lifeState1',
     }),
   ];
 
@@ -1914,15 +1968,26 @@ function startParticles() {
       GPUBufferUsage.COPY_SRC,
     label: 'valenceBuffer',
   });
-  airBioReactBuffer = device.createBuffer({
+  bioForceBuffer = device.createBuffer({
     size: particleAmt * valenceStride,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-    label: 'airBioReactBuffer',
+    label: 'bioForceBuffer',
+  });
+
+  worldRulesBuffer = device.createBuffer({
+    size: Math.max((chemistryData.length + oceanMatrixData.length) * 4, 16),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    label: 'worldRulesBuffer',
+  });
+  worldColoursBuffer = device.createBuffer({
+    size: Math.max((colourAmt + oceanColourAmt) * 3 * 4, 16),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    label: 'worldColoursBuffer',
   });
 
   alternate = 0;
   frameCount = 0;
-  const rng = createSeededRng(`${params.seed}:chem`);
+  const rng = createSeededRng(`${params.seed}:world`);
   const probs = computeAbundanceDistribution(colourAmt);
   const cdf: number[] = [];
   let accW = 0;
@@ -1939,7 +2004,10 @@ function startParticles() {
     return colourAmt - 1;
   };
 
-  const data = new Float32Array(bufferSize / 4);
+  const particleData = new Float32Array(bufferSize / 4);
+  const lifeData = new Float32Array(particleAmt * 4);
+  const RAD2DEG = 180 / Math.PI;
+
   for (let pi = 0; pi < particleAmt; pi++) {
     const z = rng() * 2 - 1;
     const lon = rng() * Math.PI * 2;
@@ -1948,201 +2016,74 @@ function startParticles() {
     const ny = rxy * Math.sin(lon);
     const nz = z;
     const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, rng() * Math.PI * 2);
+    const cIdx = pickElement();
+    const el = elements[cIdx];
 
     const b = pi * 12;
-    data[b + 0] = nx;
-    data[b + 1] = ny;
-    data[b + 2] = nz;
-    data[b + 3] = pickElement();
-    data[b + 8] = ux;
-    data[b + 9] = uy;
-    data[b + 10] = uz;
+    particleData[b + 0] = nx;
+    particleData[b + 1] = ny;
+    particleData[b + 2] = nz;
+    particleData[b + 3] = cIdx;
+    particleData[b + 8] = ux;
+    particleData[b + 9] = uy;
+    particleData[b + 10] = uz;
+
+    const lonDeg = Math.atan2(ny, nx) * RAD2DEG;
+    const latDeg = Math.asin(Math.max(-1, Math.min(1, nz))) * RAD2DEG;
+    const biogenic = isBiogenicAtomicNumber(el.atomicNumber, el.valence);
+    const inOcean = currentOceanGrid
+      ? sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3] >= 0.55
+      : rng() < 0.7;
+
+    if (biogenic && inOcean && rng() < 0.42) {
+      const gRoll = rng();
+      const guild = gRoll < 0.46 ? 0 : gRoll < 0.68 ? 1 : gRoll < 0.8 ? 2 : 3;
+      const bioSp = pickStrainForGuild(guild, oceanColourAmt, rng());
+      const lBase = pi * 4;
+      lifeData[lBase + 0] = 0.68 + 0.25 * rng();
+      lifeData[lBase + 1] = 0.05;
+      lifeData[lBase + 2] = 0.0;
+      lifeData[lBase + 3] = 1 + bioSp;
+    }
   }
 
-  device.queue.writeBuffer(particleBuffers[0], 0, data.buffer);
+  device.queue.writeBuffer(particleBuffers[0], 0, particleData.buffer);
+  device.queue.writeBuffer(lifeStateBuffers[0], 0, lifeData.buffer);
+  device.queue.writeBuffer(lifeStateBuffers[1], 0, new Float32Array(particleAmt * 4));
+  device.queue.writeBuffer(valenceBuffer, 0, new Float32Array(particleAmt * 4));
+  device.queue.writeBuffer(bioForceBuffer, 0, new Float32Array(particleAmt * 4));
+
+  writeWorldRuleAndColourBuffers();
   setSim(device, simData, simBuffer, frameCount);
-
-  matrixBuffer = device.createBuffer({
-    size: chemistryData.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  colourBuffer = device.createBuffer({
-    size: colourAmt * 3 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  writeChemistryBuffers();
-
-  const windView = windTexture.createView();
-  for (const engineName in engines) {
-    engines[engineName].start(
-      device,
-      uniformBuffer,
-      simBuffer,
-      matrixBuffer,
-      valenceBuffer,
-      particleBuffers,
-      particleAmt,
-      params.cells,
-      windView,
-      'air',
-      airBioReactBuffer,
-    );
-  }
-  refreshEngineCrossBio();
+  setOceanSim(device, oceanSimData, oceanSimBuffer);
   syncBioUniformState();
+
+  const refs: UnifiedEngineRefs = {
+    uniformBuffer,
+    simBuffer,
+    oceanSimBuffer,
+    bioUniformBuffer,
+    rulesMatrixBuffer: worldRulesBuffer,
+    particleBuffers,
+    lifeStateBuffers,
+    valenceBuffer,
+    bioForceBuffer,
+    windTexView: windTexture.createView(),
+    oceanTexView: oceanTexture.createView(),
+    particleAmt,
+    cellAmt: params.cells,
+  };
+  for (const engineName in engines) {
+    engines[engineName].start(device, refs);
+  }
 
   renderBindGroup = device.createBindGroup({
     layout: renderPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },
       { binding: 1, resource: watermanFwdTexture.createView() },
-      { binding: 2, resource: { buffer: colourBuffer } },
-      { binding: 3, resource: { buffer: matrixBuffer } },
-    ],
-  });
-  rebuildLensTrackBindGroups();
-}
-
-function startOceanParticles() {
-  if (
-    !device ||
-    !oceanUniformBuffer ||
-    !renderPipeline ||
-    !oceanSimBuffer ||
-    !oceanTexture ||
-    !watermanFwdTexture
-  )
-    return;
-
-  if (oceanParticleBuffers) {
-    oceanParticleBuffers[0].destroy();
-    oceanParticleBuffers[1].destroy();
-  }
-  oceanMatrixBuffer?.destroy();
-  oceanColourBuffer?.destroy();
-  oceanValenceBuffer?.destroy();
-  oceanSteerBuffer?.destroy();
-
-  oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
-
-  const bufferSize = oceanParticleAmt * particleStride;
-  oceanParticleBuffers = [
-    device.createBuffer({
-      size: bufferSize,
-      usage:
-        GPUBufferUsage.STORAGE |
-        GPUBufferUsage.VERTEX |
-        GPUBufferUsage.COPY_DST |
-        GPUBufferUsage.COPY_SRC,
-      label: 'oceanParticles0',
-    }),
-    device.createBuffer({
-      size: bufferSize,
-      usage:
-        GPUBufferUsage.STORAGE |
-        GPUBufferUsage.VERTEX |
-        GPUBufferUsage.COPY_DST |
-        GPUBufferUsage.COPY_SRC,
-      label: 'oceanParticles1',
-    }),
-  ];
-
-  oceanValenceBuffer = device.createBuffer({
-    size: oceanParticleAmt * valenceStride,
-    usage:
-      GPUBufferUsage.STORAGE |
-      GPUBufferUsage.VERTEX |
-      GPUBufferUsage.COPY_DST |
-      GPUBufferUsage.COPY_SRC,
-    label: 'oceanStateBuffer',
-  });
-  oceanSteerBuffer = device.createBuffer({
-    size: oceanParticleAmt * valenceStride,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-    label: 'oceanSteerBuffer',
-  });
-  writeNeutralOceanState();
-
-  oceanAlternate = 0;
-  const rng = createSeededRng(`${oceanSeed}:spawn`);
-  const data = new Float32Array(bufferSize / 4);
-  const DEG2RAD = Math.PI / 180;
-
-  for (let pi = 0; pi < oceanParticleAmt; pi++) {
-    let lonDeg = (rng() - 0.5) * 360;
-    let latDeg = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
-
-    if (currentOceanGrid) {
-      for (let t = 0; t < 40; t++) {
-        const candLon = (rng() - 0.5) * 360;
-        const candLat = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
-        if (sampleOceanLonLat(currentOceanGrid, candLon, candLat)[3] >= 0.55) {
-          lonDeg = candLon;
-          latDeg = candLat;
-          break;
-        }
-      }
-    }
-
-    const lonR = lonDeg * DEG2RAD;
-    const latR = latDeg * DEG2RAD;
-    const cLat = Math.cos(latR);
-    const nx = cLat * Math.cos(lonR);
-    const ny = cLat * Math.sin(lonR);
-    const nz = Math.sin(latR);
-    const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, rng() * Math.PI * 2);
-
-    const b = pi * 12;
-    data[b + 0] = nx;
-    data[b + 1] = ny;
-    data[b + 2] = nz;
-    data[b + 3] = Math.floor(rng() * oceanColourAmt);
-    data[b + 8] = ux;
-    data[b + 9] = uy;
-    data[b + 10] = uz;
-  }
-
-  device.queue.writeBuffer(oceanParticleBuffers[0], 0, data.buffer);
-  setOceanSim(device, oceanSimData, oceanSimBuffer);
-
-  oceanMatrixBuffer = device.createBuffer({
-    size: Math.max(oceanMatrixData.byteLength, 16),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    label: 'oceanMatrixBuffer',
-  });
-  oceanColourBuffer = device.createBuffer({
-    size: oceanColourAmt * 3 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    label: 'oceanColourBuffer',
-  });
-  writeOceanRuleBuffers();
-
-  const oceanView = oceanTexture.createView();
-  for (const engineName in engines) {
-    engines[engineName].start(
-      device,
-      oceanUniformBuffer,
-      oceanSimBuffer,
-      oceanMatrixBuffer,
-      oceanValenceBuffer,
-      oceanParticleBuffers,
-      oceanParticleAmt,
-      oceanOptionParams.cells,
-      oceanView,
-      'ocean',
-      oceanSteerBuffer,
-    );
-  }
-  refreshEngineCrossBio();
-  syncBioUniformState();
-
-  oceanRenderBindGroup = device.createBindGroup({
-    layout: renderPipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: oceanUniformBuffer } },
-      { binding: 1, resource: watermanFwdTexture.createView() },
-      { binding: 2, resource: { buffer: oceanColourBuffer } },
-      { binding: 3, resource: { buffer: oceanMatrixBuffer } },
+      { binding: 2, resource: { buffer: worldColoursBuffer } },
+      { binding: 3, resource: { buffer: worldRulesBuffer } },
     ],
   });
   rebuildLensTrackBindGroups();
@@ -2152,7 +2093,7 @@ let lastTime = 0;
 const deltaVs: number[] = [];
 
 function writeUniforms() {
-  if (!device || !uniformBuffer || !oceanUniformBuffer) return;
+  if (!device || !uniformBuffer) return;
   const spec = WIND_LEVELS[earthParams.windLevel];
   const R = Math.max(optionParams.worldSize, 0.25);
   const showAir = earthParams.viewLayer !== 'ocean';
@@ -2184,7 +2125,7 @@ function writeUniforms() {
   uniformData[28] = showOcean ? earthParams.oceanColors : 0;
   uniformData[29] = OCEAN_CURRENTS_SPEC.scaleMax;
   uniformData[30] = earthParams.oceanStrength;
-  uniformData[31] = earthParams.chemOpacity;
+  uniformData[31] = showAir ? earthParams.chemOpacity : 0;
 
   const lens = tooltipManager.getLensState();
   uniformData[32] = lens.x;
@@ -2192,15 +2133,13 @@ function writeUniforms() {
   uniformData[34] = lens.active ? lens.radius : 0;
   uniformData[35] = lens.active ? lens.mag : 1;
 
-  device.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-  // Ocean uniform copy renders classic smooth discs (`flags.x = 0`) sized to ocean interaction radius
-  oceanUniformData.set(uniformData);
   const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
-  oceanUniformData[3] = (oceanRMax / R) * Math.max(oceanOptionParams.beta, 0.25) * 0.42;
-  oceanUniformData[12] = 0;
-  oceanUniformData[31] = earthParams.lifeOpacity;
-  device.queue.writeBuffer(oceanUniformBuffer, 0, oceanUniformData);
+  uniformData[36] = (oceanRMax / R) * Math.max(oceanOptionParams.beta, 0.25) * 0.42;
+  uniformData[37] = showOcean ? earthParams.lifeOpacity : 0;
+  uniformData[38] = colourAmt;
+  uniformData[39] = oceanColourAmt;
+
+  device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
 
 function update() {
@@ -2284,10 +2223,14 @@ function update() {
   tooltipManager.tick();
 
   frameCount = (frameCount + 1) % 1000000;
-  if (simBuffer && optionParams.temperature > 0) {
-    frameBuf[0] = frameCount;
+  frameBuf[0] = frameCount;
+  if (simBuffer) {
     simData[18] = frameCount;
     device.queue.writeBuffer(simBuffer, 18 * 4, frameBuf);
+  }
+  if (bioUniformBuffer) {
+    bioUniformData[9] = frameCount;
+    device.queue.writeBuffer(bioUniformBuffer, 9 * 4, frameBuf);
   }
 
   writeUniforms();
@@ -2367,12 +2310,12 @@ newSimBtn.on('click', () => {
   params.cells = Math.max(1, Math.floor(optionParams.cells));
   particleAmt = Math.max(1, Math.floor(params.particles));
 
-  startParticles();
+  startWorld();
   saveConfigNow();
 });
 
 randomizeBtn.on('click', () => {
-  if (!device || !matrixBuffer) return;
+  if (!device || !worldRulesBuffer) return;
   applySeed(generateRandomSeed(), true);
   saveConfigNow();
 });
@@ -2522,26 +2465,26 @@ configResetBtn?.addEventListener('click', async () => {
 });
 
 seedInput.on('change', () => {
-  if (suppressPaneEvents || suppressSeedChange || !device || !matrixBuffer) return;
+  if (suppressPaneEvents || suppressSeedChange || !device || !worldRulesBuffer) return;
   applySeed(params.seed, false);
   saveConfigNow();
 });
 
 newOceanSimBtn.on('click', () => {
   oceanColourAmt = Math.max(1, Math.min(200, Math.floor(oceanOptionParams.colours)));
-  oceanParticleAmt = Math.max(1, Math.floor(oceanOptionParams.particles));
-  startOceanParticles();
+  startWorld();
   saveConfigNow();
 });
 
 randomizeOceanRulesBtn.on('click', () => {
   oceanColourAmt = Math.max(1, Math.min(200, Math.floor(oceanOptionParams.colours)));
   oceanSeed = generateRandomSeed();
-  if (!oceanMatrixBuffer || oceanMatrixData.length !== oceanColourAmt * oceanColourAmt) {
-    startOceanParticles();
+  if (!worldRulesBuffer || oceanMatrixData.length !== oceanColourAmt * oceanColourAmt) {
+    startWorld();
   } else {
-    oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
-    writeOceanRuleBuffers();
+    oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+    writeWorldRuleAndColourBuffers();
+    syncBioUniformState();
   }
   saveConfigNow();
 });

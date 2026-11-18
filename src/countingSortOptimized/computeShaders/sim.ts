@@ -2,6 +2,7 @@ import structsShader from '../../shaders/structs.wgsl?raw';
 import projectionShader from '../../shaders/projection.wgsl?raw';
 import bioChemShader from '../../shaders/bioChem.wgsl?raw';
 import valenceSimShader from '../../shaders/valenceSim.wgsl?raw';
+import oceanSimShader from '../../shaders/oceanSim.wgsl?raw';
 
 export const simComputeShader = (workgroupSize: number) => {
   return /* wgsl */ `
@@ -9,22 +10,23 @@ ${structsShader}
 ${projectionShader}
 ${bioChemShader}
 ${valenceSimShader}
+${oceanSimShader}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
-@group(0) @binding(2) var<storage, read> matrix: array<f32>;
+@group(0) @binding(2) var<uniform> oceanSim: OceanSim;
+@group(0) @binding(3) var windTex: texture_2d<f32>;
+@group(0) @binding(4) var oceanTex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> matrix: array<f32>;
+@group(0) @binding(6) var<storage, read> input: array<Particle>;
+@group(0) @binding(7) var<storage, read_write> output: array<Particle>;
+@group(0) @binding(8) var<storage, read> lifeStateNext: array<vec4f>;
+@group(0) @binding(9) var<storage, read> valence: array<vec4f>;
+@group(0) @binding(10) var<storage, read> bioForce: array<vec4f>;
+@group(0) @binding(11) var<storage, read> sorted: array<SortParticle>;
+@group(0) @binding(12) var<storage, read> prefixSumIndices: array<u32>;
 
-@group(0) @binding(3) var<storage, read> input: array<Particle>;
-@group(0) @binding(4) var<storage, read_write> output: array<Particle>;
-
-@group(0) @binding(5) var<storage, read> sorted: array<SortParticle>;
-@group(0) @binding(6) var<storage, read> counts: array<u32>;
-@group(0) @binding(7) var<storage, read> prefixSumIndices: array<u32>;
-@group(0) @binding(8) var<storage, read> valence: array<vec4f>;
-@group(0) @binding(9) var windTex: texture_2d<f32>;
-@group(0) @binding(10) var<storage, read> airBioReact: array<vec4f>;
-
-fn getCellForce(
+fn getChemCellForce(
     pi: u32,
     p: Particle,
     sP: SpeciesInfo,
@@ -35,17 +37,12 @@ fn getCellForce(
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
-    let particlesInThisCell = counts[cell];
-    if (particlesInThisCell == 0u) {
-        return;
-    }
-
     let startIdx = prefixSumIndices[cell];
-    let particleEnd = startIdx + particlesInThisCell;
+    let particleEnd = prefixSumIndices[cell + 1u];
 
     for (var i = startIdx; i < particleEnd; i++) {
         let ip = sorted[i];
-        if (ip.idx == pi) {
+        if (ip.idx == pi || ip.phase != 0u) {
             continue;
         }
         accumulateSimNeighbor(
@@ -65,8 +62,7 @@ fn getCellForce(
     }
 }
 
-fn getForce(pi: u32, actScale: f32, bioCleave: f32, shearStress: f32) -> ForceResult {
-    let p = input[pi];
+fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress: f32) -> ForceResult {
     let sP = getSpeciesInfo(u32(p.colour));
     let mySlots = valence[pi];
     var acc = ForceAccum();
@@ -80,12 +76,59 @@ fn getForce(pi: u32, actScale: f32, bioCleave: f32, shearStress: f32) -> ForceRe
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, c, &acc);
+                getChemCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, c, &acc);
             }
         }
     }
 
     return finalizeForces(acc);
+}
+
+fn getBioCellForce(
+    pi: u32,
+    p: Particle,
+    oceanBase: u32,
+    rowOffset: u32,
+    nBio: u32,
+    cell: u32,
+    acc: ptr<function, OceanForceAccum>,
+) {
+    let startIdx = prefixSumIndices[cell];
+    let particleEnd = prefixSumIndices[cell + 1u];
+
+    for (var i = startIdx; i < particleEnd; i++) {
+        let ip = sorted[i];
+        if (ip.idx == pi || ip.phase != 1u) {
+            continue;
+        }
+        let colIdx = min(ip.bioSpecies, nBio - 1u);
+        let a = matrix[oceanBase + rowOffset + colIdx];
+        accumulateOceanNeighbor(pi, p, ip.pos, a, acc, oceanSim);
+    }
+}
+
+fn getBioForce(pi: u32, p: Particle, bioSp: u32) -> vec3f {
+    let nChem = max(u32(sim.colours), 1u);
+    let nBio = max(u32(oceanSim.colours), 1u);
+    let oceanBase = nChem * SPECIES_STRIDE + nChem * nChem;
+    let rowOffset = min(bioSp, nBio - 1u) * nBio;
+    var acc = OceanForceAccum();
+
+    let worldP = p.pos * oceanSim.worldSize;
+    let cmin = vec3i(floor((worldP - oceanSim.rMax) / sim.cellSize));
+    let cmax = vec3i(floor((worldP + oceanSim.rMax) / sim.cellSize));
+    let numCells = u32(sim.cellAmt);
+
+    for (var cx = cmin.x; cx <= cmax.x; cx++) {
+        for (var cy = cmin.y; cy <= cmax.y; cy++) {
+            for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                let c = hash3i(vec3i(cx, cy, cz)) % numCells;
+                getBioCellForce(pi, p, oceanBase, rowOffset, nBio, c, &acc);
+            }
+        }
+    }
+
+    return finalizeOceanForce(acc, oceanSim);
 }
 
 @compute @workgroup_size(${workgroupSize})
@@ -94,15 +137,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (pi >= arrayLength(&output)) {
         return;
     }
+
     let p = input[pi];
+    let ls = lifeStateNext[pi];
+    let myPhase = unpackPhase(ls.w);
+
+    if (myPhase == 1u) {
+        let bioSp = unpackBioSpecies(ls.w);
+        let netForce = getBioForce(pi, p, bioSp);
+        output[pi] = integrateOceanParticle(
+            pi,
+            p,
+            netForce,
+            oceanSim,
+            oceanTex,
+            uniforms.mouseSphere,
+            ls,
+            bioForce[pi],
+        );
+        return;
+    }
+
     let mySlots = valence[pi];
-    let bioReact = airBioReact[pi];
-    let actGlow = unpackActGlow(bioReact.w);
+    let bReact = bioForce[pi];
+    let actGlow = unpackActGlow(bReact.w);
     let actScale = actGlow.x;
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
     let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
     let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
-    let res = getForce(pi, actScale, bioCleave, shearStress);
+    let res = getChemForce(pi, p, actScale, bioCleave, shearStress);
     output[pi] = integrateParticle(
         pi,
         p,
@@ -111,7 +174,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         windSample,
         shearStress,
         uniforms.mouseSphere,
-        bioReact,
+        bReact,
     );
 }
 `;

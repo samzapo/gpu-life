@@ -15,6 +15,7 @@ struct Uniforms {
     rotCol2: vec4f,
     earthFlags: vec4f,
     lensParams: vec4f,
+    renderParams: vec4f, // x: bioSize, y: lifeOpacity, z: nChemColours, w: nBioColours
 }
 
 struct Sim {
@@ -87,9 +88,9 @@ struct SortParticle {
     orient: vec3f,
     cellIdx: u32,
     idx: u32,
-    _p0: u32,
-    _p1: u32,
-    _p2: u32,
+    phase: u32,
+    bioSpecies: u32,
+    bioEnergy: f32,
 }
 
 struct ListParticle {
@@ -98,9 +99,21 @@ struct ListParticle {
     orient: vec3f,
     idx: u32,
     next: u32,
-    _p0: u32,
-    _p1: u32,
-    _p2: u32,
+    phase: u32,
+    bioSpecies: u32,
+    bioEnergy: f32,
+}
+
+fn unpackPhase(packed: f32) -> u32 {
+    return select(0u, 1u, packed >= 0.5);
+}
+
+fn unpackBioSpecies(packed: f32) -> u32 {
+    return select(0u, u32(packed + 0.5) - 1u, packed >= 0.5);
+}
+
+fn packPhaseBio(phase: u32, bioSp: u32) -> f32 {
+    return select(0.0, f32(bioSp + 1u), phase == 1u);
 }
 
 struct ForceAccum {

@@ -5,11 +5,10 @@ import type { ViewLayerMode } from './options';
 
 export interface HoverSimSnapshot {
   elements: Element2D[];
-  air: number[][];
+  particles: number[][];
   valence: number[][];
-  bioReact: number[][];
-  ocean: number[][];
-  oceanState: number[][];
+  lifeState: number[][];
+  bioForce: number[][];
   capturedAt: number;
 }
 
@@ -37,7 +36,6 @@ export type TooltipTheme =
   | 'ocean';
 
 export interface TooltipTarget {
-  type: 'air' | 'ocean';
   idx: number;
 }
 
@@ -50,7 +48,7 @@ export interface TooltipLensState {
 }
 
 export interface TooltipLensGpuConfig {
-  kind: 0 | 1 | 2;
+  kind: 0 | 1;
   idx: number;
   radius: number;
   mag: number;
@@ -87,7 +85,7 @@ export interface TooltipContent {
   body: string;
   meta?: string;
   element?: TooltipSelectedElement;
-  targetType?: 'air' | 'ocean';
+  targetPhase?: 0 | 1;
   targetIdx?: number;
   targetX?: number;
   targetY?: number;
@@ -168,7 +166,14 @@ const OCEAN_ROLE_NAMES = [
   'Autotroph (Producer)',
   'Consumer (Heterotroph)',
   'Halophile (Detoxifier)',
-  'Decomposer (Symbiont)',
+  'Decomposer (Remineralizer)',
+];
+
+const OCEAN_ROLE_SHORT = [
+  'Producer',
+  'Consumer',
+  'Halophile',
+  'Decomposer',
 ];
 
 function unitDistChord2(a: number[], b: number[]): number {
@@ -194,6 +199,12 @@ function projectUnitVecToScreen(
   return [pt[0], pt[1]];
 }
 
+function unpackLifeTuple(ls: number[] | undefined): [0 | 1, number] {
+  const w = ls?.[3] ?? 0;
+  if (w < 0.5) return [0, 0];
+  return [1, Math.max(0, Math.round(w - 1.0))];
+}
+
 export function analyzeReactionAt(
   clientX: number,
   clientY: number,
@@ -207,8 +218,8 @@ export function analyzeReactionAt(
   if (!proj?.invert) return null;
 
   const viewLayer = cfg.getViewLayer();
-  const showAir = viewLayer !== 'ocean';
-  const showOcean = viewLayer !== 'air';
+  const showChem = viewLayer !== 'ocean';
+  const showLife = viewLayer !== 'air';
   const R = Math.max(cfg.getWorldSize(), 0.25);
   const airRMax = cfg.getAirRMax();
   const oceanRMax = cfg.getOceanRMax();
@@ -218,40 +229,35 @@ export function analyzeReactionAt(
 
   // Pick radius in unit-sphere chord units matching pointer target size on screen & physical interaction radius
   const pxChord = pickPx / scalePx;
-  const airPickChord = Math.min(0.18, Math.max((airRMax / R) * 1.05, pxChord));
-  const airPickChord2 = airPickChord * airPickChord;
-  const oceanPickChord = Math.min(0.16, Math.max((oceanRMax / R) * 1.3, pxChord));
-  const oceanPickChord2 = oceanPickChord * oceanPickChord;
+  const chemPickChord = Math.min(0.18, Math.max((airRMax / R) * 1.05, pxChord));
+  const chemPickChord2 = chemPickChord * chemPickChord;
+  const lifePickChord = Math.min(0.16, Math.max((oceanRMax / R) * 1.3, pxChord));
+  const lifePickChord2 = lifePickChord * lifePickChord;
+  const maxPickChord = Math.max(chemPickChord, lifePickChord);
 
   let uCur: [number, number, number] | null = null;
-  let bestAir = -1;
-  let bestAirD2 = airPickChord2;
-  let bestOcean = -1;
-  let bestOceanD2 = oceanPickChord2;
+  let bestIdx = -1;
+  let bestPhase: 0 | 1 = 0;
+  let bestBioSp = 0;
+  let bestScore = 1.0;
   let pinnedPt: [number, number] | null = null;
 
+  const nParticles = snap.particles.length;
   if (pinnedTarget) {
-    if (pinnedTarget.type === 'air' && showAir && pinnedTarget.idx < snap.air.length) {
-      const p = snap.air[pinnedTarget.idx];
-      pinnedPt = projectUnitVecToScreen(p, proj);
-      if (!pinnedPt) return null;
-      uCur = [p[0], p[1], p[2]];
-      bestAir = pinnedTarget.idx;
-      bestAirD2 = 0;
-    } else if (
-      pinnedTarget.type === 'ocean' &&
-      showOcean &&
-      pinnedTarget.idx < snap.ocean.length
-    ) {
-      const op = snap.ocean[pinnedTarget.idx];
-      pinnedPt = projectUnitVecToScreen(op, proj);
-      if (!pinnedPt) return null;
-      uCur = [op[0], op[1], op[2]];
-      bestOcean = pinnedTarget.idx;
-      bestOceanD2 = 0;
-    } else {
+    if (pinnedTarget.idx < 0 || pinnedTarget.idx >= nParticles) {
       return null;
     }
+    const p = snap.particles[pinnedTarget.idx];
+    const [phase, bioSp] = unpackLifeTuple(snap.lifeState[pinnedTarget.idx]);
+    if ((phase === 0 && !showChem) || (phase === 1 && !showLife)) {
+      return null;
+    }
+    pinnedPt = projectUnitVecToScreen(p, proj);
+    if (!pinnedPt) return null;
+    uCur = [p[0], p[1], p[2]];
+    bestIdx = pinnedTarget.idx;
+    bestPhase = phase;
+    bestBioSp = bioSp;
   }
 
   if (!uCur) {
@@ -269,82 +275,91 @@ export function analyzeReactionAt(
     uCur = lonLatToUnitVec(ll[0], ll[1]);
   }
 
-  const localAirIdx: number[] = [];
-  const localPatchR = Math.max((airRMax * 3.0) / R, airPickChord * 2.4);
+  const localChemIdx: number[] = [];
+  const localPatchR = Math.max((airRMax * 3.0) / R, maxPickChord * 2.4);
   const localPatchR2 = localPatchR * localPatchR;
 
-  if (showAir && snap.air.length > 0 && bestOcean < 0) {
-    for (let i = 0; i < snap.air.length; i++) {
-      const p = snap.air[i];
+  if (!pinnedTarget) {
+    for (let i = 0; i < nParticles; i++) {
+      const [phase, bioSp] = unpackLifeTuple(snap.lifeState[i]);
+      if ((phase === 0 && !showChem) || (phase === 1 && !showLife)) {
+        continue;
+      }
+      const p = snap.particles[i];
       const d2 = unitDistChord2(p, uCur);
-      if (d2 < localPatchR2) {
-        localAirIdx.push(i);
-        if (!pinnedTarget && d2 < bestAirD2) {
-          bestAirD2 = d2;
-          bestAir = i;
+      const thr2 = phase === 0 ? chemPickChord2 : lifePickChord2;
+      if (d2 < thr2) {
+        const score = d2 / Math.max(thr2, 1e-12);
+        if (score < bestScore) {
+          bestScore = score;
+          bestIdx = i;
+          bestPhase = phase;
+          bestBioSp = bioSp;
         }
       }
     }
   }
 
-  const nearbyOcean: number[] = [];
+  if (bestIdx < 0) {
+    return null;
+  }
+
+  const centerRef = snap.particles[bestIdx];
   const catChord = catRadius / R;
-  const catRef = bestAir >= 0 ? snap.air[bestAir] : uCur;
-  const catRef2 = Math.max(catChord * catChord, oceanPickChord2);
+  const catRef2 = Math.max(catChord * catChord, lifePickChord2);
+  const nearbyLife: number[] = [];
 
-  if (showOcean && snap.ocean.length > 0) {
-    for (let i = 0; i < snap.ocean.length; i++) {
-      const p = snap.ocean[i];
-      if (!pinnedTarget) {
-        const dc2 = unitDistChord2(p, uCur);
-        if (dc2 < bestOceanD2) {
-          bestOceanD2 = dc2;
-          bestOcean = i;
-        }
+  for (let i = 0; i < nParticles; i++) {
+    const [phase] = unpackLifeTuple(snap.lifeState[i]);
+    if (phase === 0 && showChem) {
+      if (unitDistChord2(snap.particles[i], centerRef) < localPatchR2) {
+        localChemIdx.push(i);
       }
-      if (unitDistChord2(p, catRef) < catRef2) {
-        nearbyOcean.push(i);
+    } else if (phase === 1 && showLife) {
+      if (unitDistChord2(snap.particles[i], centerRef) < catRef2) {
+        nearbyLife.push(i);
       }
     }
   }
 
-  if (bestAir >= 0) {
-    const p0 = snap.air[bestAir];
-    const airPt = pinnedPt ?? projectUnitVecToScreen(p0, proj);
-    const targetX = airPt?.[0] ?? clientX;
-    const targetY = airPt?.[1] ?? clientY;
-    const els = snap.elements;
-    const c0 = Math.max(0, Math.min(els.length - 1, Math.floor(p0[6])));
-    const el0 = els[c0];
-    const selectedElement = buildSelectedElement(el0);
-    const sym0 = selectedElement.symbol;
-    const valVec = snap.valence[bestAir] ?? [0, 0, 0, 0];
+  const els = snap.elements;
+  const p0 = snap.particles[bestIdx];
+  const targetPt = pinnedPt ?? projectUnitVecToScreen(p0, proj);
+  const targetX = targetPt?.[0] ?? clientX;
+  const targetY = targetPt?.[1] ?? clientY;
+  const c0 = Math.max(0, Math.min(els.length - 1, Math.floor(p0[6] ?? 0)));
+  const el0 = els[c0];
+  const selectedElement = buildSelectedElement(el0);
+  const sym0 = selectedElement.symbol;
+
+  if (bestPhase === 0) {
+    const valVec = snap.valence[bestIdx] ?? [0, 0, 0, 0];
     const atomLoad = (valVec[0] ?? 0) + (valVec[1] ?? 0) + (valVec[2] ?? 0);
 
-    // Build connected component & direct neighbors inside local patch
+    // Build connected component & direct neighbors inside local Chemistry patch
     const bondChord = (airRMax * 0.78) / R;
     const bondChord2 = bondChord * bondChord;
     const maxChord = airRMax / R;
     const maxChord2 = maxChord * maxChord;
 
-    const compIds = [bestAir];
-    const visited = new Set<number>([bestAir]);
+    const compIds = [bestIdx];
+    const visited = new Set<number>([bestIdx]);
     const directInteract: { idx: number; dist: number; vRelDot: number }[] = [];
 
     if (el0.valence > 0) {
       let head = 0;
       while (head < compIds.length && compIds.length < 18) {
         const u = compIds[head++];
-        const pu = snap.air[u];
-        const eu = els[Math.max(0, Math.min(els.length - 1, Math.floor(pu[6])))];
+        const pu = snap.particles[u];
+        const eu = els[Math.max(0, Math.min(els.length - 1, Math.floor(pu[6] ?? 0)))];
         if (!eu || eu.valence === 0) continue;
 
-        for (const j of localAirIdx) {
-          const pj = snap.air[j];
-          const ej = els[Math.max(0, Math.min(els.length - 1, Math.floor(pj[6])))];
+        for (const j of localChemIdx) {
+          const pj = snap.particles[j];
+          const ej = els[Math.max(0, Math.min(els.length - 1, Math.floor(pj[6] ?? 0)))];
           if (!ej || ej.valence === 0) continue;
           const d2 = unitDistChord2(pu, pj);
-          if (u === bestAir && j !== bestAir && d2 < maxChord2) {
+          if (u === bestIdx && j !== bestIdx && d2 < maxChord2) {
             const dist = 2 * R * Math.asin(Math.min(1, 0.5 * Math.sqrt(d2)));
             const dx = pj[0] - pu[0];
             const dy = pj[1] - pu[1];
@@ -379,8 +394,8 @@ export function analyzeReactionAt(
     let hasAcceptor = false;
     let hasCovalent = false;
     for (const id of compIds) {
-      const pi = snap.air[id];
-      const ei = els[Math.max(0, Math.min(els.length - 1, Math.floor(pi[6])))];
+      const pi = snap.particles[id];
+      const ei = els[Math.max(0, Math.min(els.length - 1, Math.floor(pi[6] ?? 0)))];
       const s = getElementSymbol(ei.atomicNumber);
       formulaCounts.set(s, (formulaCounts.get(s) ?? 0) + 1);
       if (ei.role > 0) hasDonor = true;
@@ -389,33 +404,32 @@ export function analyzeReactionAt(
     }
 
     const formula = formatFormula(formulaCounts);
-    const bio = snap.bioReact[bestAir] ?? [0, 0, 0, 0];
+    const bio = snap.bioForce[bestIdx] ?? [0, 0, 0, 0];
     const [actScale, glow] = unpackActGlow(bio[3] ?? 0);
     const kickMag = Math.hypot(bio[0] ?? 0, bio[1] ?? 0, bio[2] ?? 0);
     const bioActive =
       cfg.isBioLinked() &&
-      showOcean &&
+      showLife &&
       (kickMag > 0.02 || actScale < 0.985 || Math.abs(glow) > 0.06);
 
     const roleCounts = [0, 0, 0, 0];
     let avgE = 0;
     let avgVit = 0;
     let avgPoi = 0;
-    for (const oi of nearbyOcean) {
-      const op = snap.ocean[oi];
-      const os = snap.oceanState[oi] ?? [0.65, 0, 0, 0];
-      roleCounts[Math.floor(Math.max(0, op[6])) % 4]++;
-      avgE += os[0];
-      avgVit += os[1];
-      avgPoi += os[2];
+    for (const oi of nearbyLife) {
+      const lsO = snap.lifeState[oi] ?? [0.65, 0, 0, 1];
+      const [, oiSp] = unpackLifeTuple(lsO);
+      roleCounts[oiSp % 4]++;
+      avgE += lsO[0] ?? 0;
+      avgVit += lsO[1] ?? 0;
+      avgPoi += lsO[2] ?? 0;
     }
-    if (nearbyOcean.length > 0) {
-      avgE /= nearbyOcean.length;
-      avgVit /= nearbyOcean.length;
-      avgPoi /= nearbyOcean.length;
+    if (nearbyLife.length > 0) {
+      avgE /= nearbyLife.length;
+      avgVit /= nearbyLife.length;
+      avgPoi /= nearbyLife.length;
     }
 
-    // Check if an actual reaction, bonded complex, or bio-catalysis is occurring here
     const hasOngoingChem = compIds.length >= 2 || directInteract.length > 0;
     if (bioActive) {
       const kind = bioKind(el0.atomicNumber, el0.valence);
@@ -433,32 +447,32 @@ export function analyzeReactionAt(
       if (kind === 3) {
         theme = 'cofactor';
         badge = 'VITAMIN COFACTOR';
-        body = `Trace ${sym0} stabilizing nearby marine enzymes (${nearbyOcean.length} organisms), calming thermal jitter and boosting halide detox (+vit ${(avgVit * 100).toFixed(0)}%).`;
+        body = `Abiotic ${sym0} cofactor stabilizing nearby marine enzymes (${nearbyLife.length} organisms), calming thermal jitter and boosting halide detox (+vit ${(avgVit * 100).toFixed(0)}%).`;
       } else if (kind === 4) {
         if (roleCounts[2] > 0 && glow < -0.05) {
           theme = 'cofactor';
           badge = 'HALOPHILE DETOX';
-          body = `Detoxifying halophiles catalyzing ${sym0} halide into benign salts; barrier lowered ${dropPct}%.`;
+          body = `Detoxifying halophiles catalyzing abiotic ${sym0} halide into benign salts; barrier lowered ${dropPct}%.`;
         } else {
           theme = 'toxic';
           badge = 'HALOGEN TOXIN';
-          body = `Reactive ${sym0} stressing nearby Ocean Life (avg poison ${(avgPoi * 100).toFixed(0)}%, draining vitality).`;
+          body = `Abiotic ${sym0} stressing nearby Ocean Life (avg poison ${(avgPoi * 100).toFixed(0)}%, draining vitality).`;
         }
       } else if (kind === 2) {
         if (glow >= 0) {
           theme = 'anabolic';
           badge = 'CARBON FIXATION';
-          body = `Autotrophs fixing ${radicalSuffix}: barrier cut ${dropPct}% and thermal noise damped to assemble organic chains.`;
+          body = `Producers fixing biogenic ${radicalSuffix}: barrier cut ${dropPct}% while recruiting carbon toward living Producer biomass.`;
         } else {
           theme = 'catabolic';
           badge = 'CARBON METABOLISM';
-          body = `Heterotrophs cleaving ${radicalSuffix} carbon bonds, harvesting chemical energy (+ΔE) from food substrate.`;
+          body = `Consumers cleaving ${radicalSuffix} carbon bonds, harvesting chemical energy (+ΔE) near living biomass.`;
         }
       } else if (kind === 1) {
         if (glow >= 0) {
           theme = 'anabolic';
-          badge = 'HYDRIDE SYNTHESIS';
-          body = `Autotrophs funneling ${sym0} fuel into lowered-barrier bond synthesis (-${dropPct}% activation).`;
+          badge = 'HYDRIDE FIXATION';
+          body = `Producers funneling biogenic ${sym0} fuel into lowered-barrier bond synthesis (-${dropPct}% activation).`;
         } else {
           theme = 'catabolic';
           badge = 'FUEL HARVEST';
@@ -470,10 +484,10 @@ export function analyzeReactionAt(
         body =
           glow < -0.05 && atomLoad >= 1.35
             ? `Autotrophs stripping excess bound ${sym0} from saturated oxides to free reactive bonding sites.`
-            : `Marine symbionts guiding ${sym0} hydroxyl radicals toward stable H₂O equilibrium.`;
+            : `Marine symbionts guiding ${sym0} radicals toward stable aqueous equilibrium.`;
       }
 
-      const meta = `Species nearby: ${OCEAN_ROLE_NAMES[dominantRoleIdx]} · Ocean avg E=${avgE.toFixed(2)} · Valence load ${atomLoad.toFixed(2)}/${el0.valence}`;
+      const meta = `Species nearby: ${OCEAN_ROLE_NAMES[dominantRoleIdx]} · Biomass avg E=${avgE.toFixed(2)} · Valence load ${atomLoad.toFixed(2)}/${el0.valence}`;
       return {
         theme,
         badge,
@@ -481,8 +495,8 @@ export function analyzeReactionAt(
         body,
         meta,
         element: selectedElement,
-        targetType: 'air',
-        targetIdx: bestAir,
+        targetPhase: 0,
+        targetIdx: bestIdx,
         targetX,
         targetY,
       };
@@ -504,8 +518,8 @@ export function analyzeReactionAt(
       let body = '';
 
       if (bondingCount === 1) {
-        const nb = snap.air[directInteract[0].idx];
-        const eNb = els[Math.max(0, Math.min(els.length - 1, Math.floor(nb[6])))];
+        const nb = snap.particles[directInteract[0].idx];
+        const eNb = els[Math.max(0, Math.min(els.length - 1, Math.floor(nb[6] ?? 0)))];
         const symNb = getElementSymbol(eNb.atomicNumber);
         const pairCounts = new Map<string, number>([[sym0, 1]]);
         pairCounts.set(symNb, (pairCounts.get(symNb) ?? 0) + 1);
@@ -544,8 +558,8 @@ export function analyzeReactionAt(
         body,
         meta: `Shell [${el0.outerElectrons}/${el0.outerCapacity}] · Valence load ${atomLoad.toFixed(2)}/${el0.valence} · Nearby pairs: ${directInteract.length}`,
         element: selectedElement,
-        targetType: 'air',
-        targetIdx: bestAir,
+        targetPhase: 0,
+        targetIdx: bestIdx,
         targetX,
         targetY,
       };
@@ -558,68 +572,75 @@ export function analyzeReactionAt(
         badge: inert ? 'NOBLE GAS' : 'FREE ATOM',
         title: `${selectedElement.name} (${sym0}) Atom`,
         body: inert
-          ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents with filled outer shell.`
-          : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'}, drifting until meeting a reaction partner.`,
-        meta: `Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localAirIdx.length - 1)}`,
+          ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents; permanently abiotic (filled outer shell).`
+          : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'}, drifting in Chemistry phase.`,
+        meta: `Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localChemIdx.length - 1)}`,
         element: selectedElement,
-        targetType: 'air',
-        targetIdx: bestAir,
+        targetPhase: 0,
+        targetIdx: bestIdx,
         targetX,
         targetY,
       };
     }
+
+    return null;
   }
 
-  // Fallback check: hovering over active Ocean Life swarm/metabolism
-  if (bestOcean >= 0) {
-    const op = snap.ocean[bestOcean];
-    const oceanPt = pinnedPt ?? projectUnitVecToScreen(op, proj);
-    const targetX = oceanPt?.[0] ?? clientX;
-    const targetY = oceanPt?.[1] ?? clientY;
-    const os = snap.oceanState[bestOcean] ?? [0.65, 0, 0, 0];
-    const sp = Math.floor(Math.max(0, op[6]));
-    const roleIdx = sp % 4;
-    const energy = os[0];
-    const vit = os[1];
-    const poi = os[2];
-    const flux = os[3];
-    const hasActivity =
-      nearbyOcean.length >= 2 ||
-      Math.abs(flux) > 0.015 ||
-      vit > 0.04 ||
-      poi > 0.04;
-    if (hasActivity || includeSingletons) {
-      let theme: TooltipTheme = 'ocean';
-      let statusDesc = 'Foraging along ocean current filaments.';
-      if (poi > 0.15) {
-        theme = 'toxic';
-        statusDesc =
-          roleIdx === 2
-            ? 'Halophile organism actively detoxifying local chloride/fluoride halides.'
-            : 'Organism stressed by dissolved halogen toxins (reduced motility).';
-      } else if (flux > 0.04) {
-        theme = 'anabolic';
-        statusDesc = 'Actively harvesting dissolved carbon & hydride chemical energy (+ΔE).';
-      } else if (vit > 0.12) {
-        theme = 'cofactor';
-        statusDesc = 'Stabilized by trace Mg/Li/Be cofactors (enhanced toxin clearance).';
-      } else if (energy < 0.25) {
-        theme = 'catabolic';
-        statusDesc = 'Low energy reserve — seeking atmospheric H/C/S nutrient pockets.';
-      }
+  // Living Biomass (phase === 1): conserved biogenic element currently fixed in a living guild
+  const ls = snap.lifeState[bestIdx] ?? [0.65, 0, 0, 1];
+  const energy = ls[0] ?? 0;
+  const vit = ls[1] ?? 0;
+  const poi = ls[2] ?? 0;
+  const roleIdx = bestBioSp % 4;
+  const hasActivity =
+    nearbyLife.length >= 2 ||
+    vit > 0.04 ||
+    poi > 0.04 ||
+    energy < 0.35 ||
+    energy > 0.65;
 
-      return {
-        theme,
-        badge: OCEAN_ROLE_NAMES[roleIdx].toUpperCase(),
-        title: `Ocean Species #${sp}`,
-        body: statusDesc,
-        meta: `Energy ${energy.toFixed(2)} · Vitamin ${(vit * 100).toFixed(0)}% · Poison ${(poi * 100).toFixed(0)}% · Cluster: ${nearbyOcean.length}`,
-        targetType: 'ocean',
-        targetIdx: bestOcean,
-        targetX,
-        targetY,
-      };
+  if (hasActivity || includeSingletons) {
+    let theme: TooltipTheme = 'ocean';
+    let statusDesc = `Conserved ${selectedElement.name} (${sym0}) cycling in ${OCEAN_ROLE_NAMES[roleIdx]} biomass.`;
+
+    if (poi > 0.15) {
+      theme = roleIdx === 2 ? 'cofactor' : 'toxic';
+      statusDesc =
+        roleIdx === 2
+          ? `Halophile clearing dissolved halide toxins while protecting embodied ${sym0} biomass.`
+          : `Biomass containing ${sym0} stressed by halogen toxins (halide injury increases decomposition susceptibility).`;
+    } else if (vit > 0.12) {
+      theme = 'cofactor';
+      statusDesc = `Cofactor-stabilized ${OCEAN_ROLE_SHORT[roleIdx].toLowerCase()} holding conserved ${sym0} with elevated halide resilience.`;
+    } else if (energy < 0.25) {
+      theme = 'catabolic';
+      statusDesc = `Low-energy ${sym0} biomass — vulnerable to Decomposer remineralization back into free ${sym0} atoms.`;
+    } else if (roleIdx === 0) {
+      theme = 'anabolic';
+      statusDesc = `Autotroph harvesting solar & coastal upwelling energy to fix nearby C/H/O/S atoms alongside bound ${sym0}.`;
+    } else if (roleIdx === 1) {
+      theme = 'catabolic';
+      statusDesc = `Consumer grazing Producer & Decomposer biomass (~65% assimilated, ~35% respired back to free chemistry).`;
+    } else if (roleIdx === 2) {
+      theme = 'ocean';
+      statusDesc = `Halophile extremophile thriving inside saline halogen refuges around ${sym0} biopolymer.`;
+    } else {
+      theme = 'cofactor';
+      statusDesc = `Decomposer remineralizing stressed/dense biomass (~80% returned as free atoms, ~20% Decomposer biomass).`;
     }
+
+    return {
+      theme,
+      badge: `${OCEAN_ROLE_NAMES[roleIdx].toUpperCase()} · LIVING`,
+      title: `${OCEAN_ROLE_SHORT[roleIdx]} #${bestBioSp} · Living ${selectedElement.name} (${sym0})`,
+      body: statusDesc,
+      meta: `Atom #${bestIdx} (${sym0}) · Energy ${energy.toFixed(2)} · Vitamin ${(vit * 100).toFixed(0)}% · Poison ${(poi * 100).toFixed(0)}% · Cluster: ${nearbyLife.length}`,
+      element: selectedElement,
+      targetPhase: 1,
+      targetIdx: bestIdx,
+      targetX,
+      targetY,
+    };
   }
 
   return null;
@@ -690,12 +711,7 @@ export class TooltipManager {
   }
 
   public getLensGpuConfig(): TooltipLensGpuConfig {
-    const kind: 0 | 1 | 2 =
-      !this.lensActive || !this.pinnedTarget
-        ? 0
-        : this.pinnedTarget.type === 'air'
-          ? 1
-          : 2;
+    const kind: 0 | 1 = !this.lensActive || !this.pinnedTarget ? 0 : 1;
     return {
       kind,
       idx: this.pinnedTarget?.idx ?? 0,
@@ -978,9 +994,7 @@ export class TooltipManager {
     this.mode = 'canvas';
     this.touchPinned = true;
     this.pinnedTarget =
-      info.targetType !== undefined && info.targetIdx !== undefined
-        ? { type: info.targetType, idx: info.targetIdx }
-        : null;
+      info.targetIdx !== undefined ? { idx: info.targetIdx } : null;
     this.lensRadius = this.computeLensRadius();
     this.lensX = cx;
     this.lensY = cy;
@@ -1107,8 +1121,8 @@ export class TooltipManager {
         true,
         null,
       );
-      if (info && info.targetType !== undefined && info.targetIdx !== undefined) {
-        this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+      if (info && info.targetIdx !== undefined) {
+        this.pinnedTarget = { idx: info.targetIdx };
         this.lensGeneration++;
       }
     }
@@ -1130,13 +1144,9 @@ export class TooltipManager {
         this.hoverY = this.lensY;
       }
       this.lensActive = true;
-      if (info.targetType !== undefined && info.targetIdx !== undefined) {
-        if (
-          !this.pinnedTarget ||
-          this.pinnedTarget.type !== info.targetType ||
-          this.pinnedTarget.idx !== info.targetIdx
-        ) {
-          this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+      if (info.targetIdx !== undefined) {
+        if (!this.pinnedTarget || this.pinnedTarget.idx !== info.targetIdx) {
+          this.pinnedTarget = { idx: info.targetIdx };
           this.lensGeneration++;
         }
       }

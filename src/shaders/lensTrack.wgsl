@@ -1,5 +1,5 @@
 struct LensTrackUniform {
-    targetSpec: vec4f, // x: kind (0=off, 1=air, 2=ocean), y: idx, z: radiusPx, w: mag
+    targetSpec: vec4f, // x: active (0=off, 1=on), y: particleIdx, z: radiusPx, w: mag
     ctrl: vec4f,       // x: resetFlag (>0.5 snap), y: smoothAlpha, z: pad, w: pad
     ringColor: vec4f,  // rgba
 }
@@ -7,30 +7,23 @@ struct LensTrackUniform {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var watermanFwdTex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> track: LensTrackUniform;
-@group(0) @binding(3) var<storage, read> airParticles: array<Particle>;
-@group(0) @binding(4) var<storage, read> oceanParticles: array<Particle>;
-@group(0) @binding(5) var<storage, read_write> lensOut: array<vec4f>;
+@group(0) @binding(3) var<storage, read> particles: array<Particle>;
+@group(0) @binding(4) var<storage, read_write> lensOut: array<vec4f>;
 
 @compute @workgroup_size(1)
 fn main() {
-    let kind = track.targetSpec.x;
+    let isActive = track.targetSpec.x;
     let radius = track.targetSpec.z;
     let mag = track.targetSpec.w;
-    if (kind < 0.5 || radius <= 1.0) {
+    if (isActive < 0.5 || radius <= 1.0) {
         lensOut[0] = vec4f(0.0, 0.0, 0.0, 1.0);
         lensOut[1] = track.ringColor;
         return;
     }
 
+    let nTotal = arrayLength(&particles);
     let rawIdx = u32(max(track.targetSpec.y, 0.0) + 0.5);
-    var worldPos: vec3f;
-    if (kind < 1.5) {
-        let nAir = arrayLength(&airParticles);
-        worldPos = airParticles[min(rawIdx, max(nAir, 1u) - 1u)].pos;
-    } else {
-        let nOcean = arrayLength(&oceanParticles);
-        worldPos = oceanParticles[min(rawIdx, max(nOcean, 1u) - 1u)].pos;
-    }
+    let worldPos = particles[min(rawIdx, max(nTotal, 1u) - 1u)].pos;
 
     let pLen = length(worldPos);
     if (pLen < 1e-6) {

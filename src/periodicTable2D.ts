@@ -165,6 +165,12 @@ export function getElementName(atomicNumber: number): string {
   return ELEMENT_NAMES_P1_TO_P3[atomicNumber] ?? `Element Z=${atomicNumber}`;
 }
 
+/** Biogenic atmospheric elements eligible to cycle into Producer/Consumer/Halophile/Decomposer biomass (`C, H, O, S`). */
+export function isBiogenicAtomicNumber(atomicNumber: number, valence: number): boolean {
+  if (valence <= 0) return false;
+  return atomicNumber === 1 || atomicNumber === 5 || atomicNumber === 6 || atomicNumber === 12;
+}
+
 export function getElement2D(speciesIndex: number): Element2D {
   const z = (Math.max(0, Math.floor(speciesIndex)) % 62) + 1;
   let remaining = z;

@@ -4,15 +4,19 @@ struct ParticleVert {
     @location(2) orient: vec3f,
     @location(3) slots: vec4f,
     @location(4) chemGlow: f32,
+    @location(5) lifeState: vec4f,
 }
 
 struct VertexOutput {
     @builtin(position) pos: vec4f,
     @location(0) uv: vec2f,
-    @location(1) colour: f32,
+    @location(1) chemSpecies: f32,
     @location(2) slots: vec4f,
     @location(3) chemGlow: f32,
     @location(4) limbFade: f32,
+    @location(5) phaseF: f32,
+    @location(6) bioSpeciesF: f32,
+    @location(7) lifeState: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -57,17 +61,26 @@ fn vertex(
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
     );
 
+    let phase = unpackPhase(particle.lifeState.w);
+    let bioSp = unpackBioSpecies(particle.lifeState.w);
+    let phaseF = select(0.0, 1.0, phase == 1u);
+    let bioSpeciesF = f32(bioSp);
+    let layerOpacity = select(uniforms.earthFlags.w, uniforms.renderParams.y, phase == 1u);
+
     let n = normalize(particle.pos);
     let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
 
     var output: VertexOutput;
-    if (p0.z < 0.5) {
+    if (p0.z < 0.5 || layerOpacity <= 0.001) {
         output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
         output.uv = vec2f(0.0);
-        output.colour = particle.colour;
+        output.chemSpecies = particle.colour;
         output.slots = particle.slots;
         output.chemGlow = particle.chemGlow;
         output.limbFade = 0.0;
+        output.phaseF = phaseF;
+        output.bioSpeciesF = bioSpeciesF;
+        output.lifeState = particle.lifeState;
         return output;
     }
 
@@ -125,7 +138,9 @@ fn vertex(
 
     let scalePx = max(uniforms.viewParams.x, 1.0);
     let orbScale = select(1.0, 1.68, uniforms.flags.x > 0.5);
-    let angR = max(uniforms.size * orbScale, 1.55 / scalePx);
+    let chemAngR = max(uniforms.size * orbScale, 1.55 / scalePx);
+    let bioAngR = max(uniforms.renderParams.x, 1.75 / scalePx);
+    let angR = select(chemAngR, bioAngR, phase == 1u);
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
 
@@ -147,39 +162,55 @@ fn vertex(
 
     output.pos = vec4f(ndcX, ndcY, 0.0, 1.0);
     output.uv = corner;
-    output.colour = particle.colour;
+    output.chemSpecies = particle.colour;
     output.slots = particle.slots;
     output.chemGlow = particle.chemGlow;
     output.limbFade = limbFade;
+    output.phaseF = phaseF;
+    output.bioSpeciesF = bioSpeciesF;
+    output.lifeState = particle.lifeState;
     return output;
 }
 
 @fragment
 fn fragment(
     @location(0) uv: vec2f,
-    @location(1) colour: f32,
+    @location(1) chemSpecies: f32,
     @location(2) slots: vec4f,
     @location(3) chemGlow: f32,
     @location(4) limbFade: f32,
+    @location(5) phaseF: f32,
+    @location(6) bioSpeciesF: f32,
+    @location(7) lifeState: vec4f,
 ) -> @location(0) vec4f {
     let uvStep = length(fwidth(uv));
     let delta = clamp(uvStep, 0.025, 0.32);
     let deltaDot = clamp(uvStep, 0.045, 0.42);
-    let cIdx = u32(colour);
-    let baseCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
+    let nChem = max(u32(uniforms.renderParams.z + 0.5), 1u);
+    let nBio = max(u32(uniforms.renderParams.w + 0.5), 1u);
+    let cIdx = min(u32(max(chemSpecies, 0.0)), nChem - 1u);
+    let chemCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
     let d = length(uv);
-    let layerOpacity = clamp(uniforms.earthFlags.w, 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
+    let isBio = phaseF > 0.5;
+    let layerOpacity = clamp(select(uniforms.earthFlags.w, uniforms.renderParams.y, isBio), 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
     if (d > 1.0 || layerOpacity <= 0.001) {
         discard;
     }
 
-    if (uniforms.flags.x <= 0.5) {
+    if (isBio) {
+        let bIdx = nChem + min(u32(max(bioSpeciesF, 0.0) + 0.5), nBio - 1u);
+        let bioCol = vec3f(colours[bIdx * 3u], colours[bIdx * 3u + 1u], colours[bIdx * 3u + 2u]);
         let alpha = 1.0 - smoothstep(1.0 - delta, 1.0, d);
-        let energy = clamp(slots.x, 0.0, 1.5);
-        let vit = clamp(slots.y, 0.0, 1.0);
-        let poi = clamp(slots.z, 0.0, 1.0);
-        let vitalityBright = clamp(0.675 + 0.50 * energy + 0.15 * vit, 0.45, 1.35);
-        var lifeCol = min(baseCol * vitalityBright, vec3f(1.0));
+        let energy = clamp(lifeState.x, 0.0, 1.55);
+        let vit = clamp(lifeState.y, 0.0, 1.0);
+        let poi = clamp(lifeState.z, 0.0, 1.0);
+        let vitalityBright = clamp(0.675 + 0.48 * energy + 0.14 * vit, 0.45, 1.35);
+        var lifeCol = min(bioCol * vitalityBright, vec3f(1.0));
+        // Subtle inner tracer dot revealing the conserved chemical element carried inside this organism
+        if (d < 0.28 + delta) {
+            let coreMix = (1.0 - smoothstep(0.18, 0.28 + delta, d)) * 0.42;
+            lifeCol = mix(lifeCol, chemCol, coreMix);
+        }
         if (poi > 0.15) {
             let rim = smoothstep(0.62, 0.92, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
             lifeCol = mix(lifeCol, vec3f(0.88, 0.25, 0.96), rim);
@@ -199,23 +230,22 @@ fn fragment(
     var outCol = vec3f(0.0);
     var outAlpha = 0.0;
 
-    // Core atom circle sized so equilibrium bonded partners leave crisp overlapping valence rings/dots
-    let coreR = 0.45;
+    let coreR = select(0.92, 0.45, uniforms.flags.x > 0.5);
     if (d < coreR + delta) {
         let coreA = 1.0 - smoothstep(coreR - delta, coreR + delta, d);
         let shade = 0.85 + 0.22 * (1.0 - min(d / coreR, 1.0));
-        outCol = min(baseCol * shade, vec3f(1.0));
+        outCol = min(chemCol * shade, vec3f(1.0));
         outAlpha = coreA;
     }
 
-    if (valence == 0u) {
+    if (valence == 0u && uniforms.flags.x > 0.5) {
         let ringDist = abs(d - 0.80);
         let ringA = (1.0 - smoothstep(0.04, 0.04 + delta, ringDist)) * 0.45;
         if (ringA > outAlpha) {
-            outCol = mix(baseCol, vec3f(0.85, 0.9, 1.0), 0.35);
+            outCol = mix(chemCol, vec3f(0.85, 0.9, 1.0), 0.35);
             outAlpha = ringA;
         }
-    } else {
+    } else if (uniforms.flags.x > 0.5) {
         for (var k = 0u; k < valence; k++) {
             let slotAngle = matrix[sBase + 4u + k];
             let dotPos = vec2f(cos(slotAngle), sin(slotAngle)) * 0.80;
@@ -227,14 +257,14 @@ fn fragment(
                 let fillA = (1.0 - smoothstep(0.12 - deltaDot, 0.12 + deltaDot, distDot)) * occ;
                 let slotA = max(ringA * 0.88, fillA);
                 if (slotA > outAlpha) {
-                    outCol = mix(baseCol, vec3f(1.0, 0.96, 0.82), 0.55 + 0.45 * occ);
+                    outCol = mix(chemCol, vec3f(1.0, 0.96, 0.82), 0.55 + 0.45 * occ);
                     outAlpha = slotA;
                 }
             } else {
                 let dotR = 0.13 + 0.03 * occ;
                 let dotA = 1.0 - smoothstep(dotR - deltaDot, dotR + deltaDot, distDot);
                 if (dotA > outAlpha) {
-                    outCol = mix(baseCol, vec3f(1.0, 0.98, 0.88), 0.65 + 0.35 * occ);
+                    outCol = mix(chemCol, vec3f(1.0, 0.98, 0.88), 0.65 + 0.35 * occ);
                     outAlpha = dotA;
                 }
             }

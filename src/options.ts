@@ -138,10 +138,6 @@ const initialViewLayer: ViewLayerMode =
       ? parsedHash.mode
       : (effectiveCachedConfig?.earth?.viewLayer ?? FACTORY_DEFAULTS.earth.viewLayer);
 
-export const oceanParticleAmt = Math.max(
-  1,
-  Math.floor(resolveNumber('oceanParticles', effectiveCachedConfig?.ocean?.particles, FACTORY_DEFAULTS.ocean.particles, 1)),
-);
 export const oceanColourAmt = Math.max(
   1,
   Math.floor(resolveNumber('oceanColours', effectiveCachedConfig?.ocean?.colours, FACTORY_DEFAULTS.ocean.colours, 1)),
@@ -208,7 +204,6 @@ setMouseToolMode(earthParams.mouseTool);
 
 // Classic Particle Life parameters preserved from the original fork (51bc381)
 export const oceanOptionParams = {
-  particles: oceanParticleAmt,
   colours: oceanColourAmt,
   r: resolveNumber('oceanR', effectiveCachedConfig?.ocean?.r, FACTORY_DEFAULTS.ocean.r),
   force: resolveNumber('oceanForce', effectiveCachedConfig?.ocean?.force, FACTORY_DEFAULTS.ocean.force),
@@ -216,9 +211,15 @@ export const oceanOptionParams = {
   delta: resolveNumber('oceanDelta', effectiveCachedConfig?.ocean?.delta, FACTORY_DEFAULTS.ocean.delta),
   friction: resolveNumber('oceanFriction', effectiveCachedConfig?.ocean?.friction, FACTORY_DEFAULTS.ocean.friction),
   avoidance: resolveNumber('oceanAvoidance', effectiveCachedConfig?.ocean?.avoidance, FACTORY_DEFAULTS.ocean.avoidance),
-  cells: Math.max(1, Math.floor(resolveNumber('oceanCells', effectiveCachedConfig?.ocean?.cells, cellAmt, 1))),
   worldSize: defaultWorldSize,
 };
+
+export function getUnifiedCellSize(): number {
+  const airRMax = 1 / Math.max(optionParams.r, 0.5);
+  const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
+  const catRadius = Math.max(oceanRMax * 1.35, 0.065);
+  return Math.max(airRMax, oceanRMax, catRadius) * 2;
+}
 
 export function setOceanSim(
   device: GPUDevice,
@@ -235,8 +236,8 @@ export function setOceanSim(
   oceanSimData[3] = oceanOptionParams.force / rMax;
   oceanSimData[4] = Math.pow(0.5, dt / fric);
   oceanSimData[5] = dt;
-  oceanSimData[6] = rMax * 2;
-  oceanSimData[7] = oceanOptionParams.cells;
+  oceanSimData[6] = getUnifiedCellSize();
+  oceanSimData[7] = params.cells;
   oceanSimData[8] = oceanOptionParams.avoidance;
   oceanSimData[9] = optionParams.worldSize;
   oceanSimData[10] = earthParams.oceanStrength;
@@ -249,9 +250,10 @@ export function setBioLink(
   bioData: Float32Array<ArrayBuffer>,
   bioBuffer: GPUBuffer,
   enabled: boolean,
+  frameCount: number = 0,
+  seedHash: number = 0,
 ) {
   const worldSize = Math.max(optionParams.worldSize, 0.25);
-  const airRMax = 1 / Math.max(optionParams.r, 0.5);
   const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
   const catRadius = Math.max(oceanRMax * 1.35, 0.065);
   const dt = Math.min(Math.max(optionParams.delta, 1e-4), Math.max(oceanOptionParams.delta, 1e-4));
@@ -260,13 +262,13 @@ export function setBioLink(
   bioData[1] = earthParams.bioRate;
   bioData[2] = catRadius;
   bioData[3] = worldSize;
-  bioData[4] = airRMax * 2;
+  bioData[4] = getUnifiedCellSize();
   bioData[5] = params.cells;
-  bioData[6] = oceanRMax * 2;
-  bioData[7] = oceanOptionParams.cells;
-  bioData[8] = params.colours;
-  bioData[9] = oceanOptionParams.colours;
-  bioData[10] = dt;
+  bioData[6] = params.colours;
+  bioData[7] = oceanOptionParams.colours;
+  bioData[8] = dt;
+  bioData[9] = frameCount;
+  bioData[10] = seedHash;
   bioData[11] = 0;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
@@ -310,7 +312,7 @@ export function setSim(
   simData[3] = optionParams.force / (1 / optionParams.r);
   simData[4] = Math.pow(0.5, dt / linFriction);
   simData[5] = dt;
-  simData[6] = (1 / optionParams.r) * 2;
+  simData[6] = getUnifiedCellSize();
   simData[7] = params.cells;
   simData[8] = optionParams.avoidance;
   simData[9] = optionParams.worldSize;
@@ -384,18 +386,18 @@ export const engineSelect = withTooltip(
 
 export const particlesBinding = withTooltip(
   pane.addBinding(params, 'particles', { min: 1, step: 1 }),
-  'Chemistry Particle Count',
-  'Total atmospheric & surface chemistry atoms simulated on the globe (takes effect on New Sim).',
+  'World Particle Pool (N)',
+  'Total conserved particles cycling between Chemistry (phase 0) and Living Biomass (phase 1); takes effect on New Sim.',
 );
 export const seedInput = withTooltip(
   pane.addBinding(params, 'seed', { view: 'text' }),
   'Simulation Seed',
-  'Deterministic PRNG seed controlling initial chemical positions and element placement.',
+  'Deterministic PRNG seed controlling initial chemical placement and initial ocean biomass seeding.',
 );
 export const newSimBtn = withTooltip(
   pane.addButton({ title: 'New Sim' }),
-  'New Chemistry Sim',
-  'Respawn atmospheric chemistry particles using the current particle count and seed.',
+  'New Unified World Sim',
+  'Respawn the conserved-mass world pool using the current N, seed, and element/species settings.',
 );
 export const randomizeBtn = withTooltip(
   pane.addButton({ title: 'Randomize' }),
@@ -620,16 +622,6 @@ const oceanLifeFolder = withTooltip(
   'Ocean Life Parameters',
   'Species attraction matrix and physical Swarm parameters for marine Particle Life on Earth oceans.',
 );
-export const oceanCountBinding = withTooltip(
-  oceanLifeFolder.addBinding(oceanOptionParams, 'particles', {
-    label: 'oceanCount',
-    min: 500,
-    max: 40000,
-    step: 500,
-  }),
-  'Ocean Life Count',
-  'Number of marine Particle Life organisms simulated inside ocean basins (takes effect on Respawn).',
-);
 export const oceanColoursBinding = withTooltip(
   oceanLifeFolder.addBinding(oceanOptionParams, 'colours', {
     label: 'species',
@@ -647,7 +639,6 @@ const oceanParamSpecs: Record<string, BindingParams> = {
   delta: { label: 'dt', min: 0.002, max: 0.06, step: 0.002 },
   friction: { min: 0.005, max: 0.4, step: 0.005 },
   avoidance: { min: 0, max: 20, step: 0.5 },
-  cells: { min: 1, step: 1 },
 };
 const oceanParamTips: Record<string, [string, string]> = {
   r: ['Ocean Radius Divisor (r)', 'Inverse interaction cutoff for marine Particle Life (cutoff = 1 / r).'],
@@ -656,7 +647,6 @@ const oceanParamTips: Record<string, [string, string]> = {
   delta: ['Ocean Time Step (dt)', 'Integration timestep size for ocean Particle Life motion and metabolism.'],
   friction: ['Ocean Viscous Friction', 'Velocity half-life damping marine organism motion through seawater.'],
   avoidance: ['Ocean Crowding Avoidance', 'Divisor damping net forces inside high-density marine clusters.'],
-  cells: ['Ocean Grid Cells', 'Spatial hash cell count for Ocean Life neighbor lookups (takes effect on Respawn).'],
 };
 const oceanParamBindings: BindingApi[] = [];
 for (const key in oceanParamSpecs) {
@@ -674,9 +664,9 @@ for (const key in oceanParamSpecs) {
   );
 }
 export const newOceanSimBtn = withTooltip(
-  oceanLifeFolder.addButton({ title: 'Respawn Ocean Life' }),
-  'Respawn Ocean Life',
-  'Re-initialize all marine Particle Life positions inside ocean basins with current count & species.',
+  oceanLifeFolder.addButton({ title: 'Reseed Biomass' }),
+  'Reseed World Biomass',
+  'Re-seed the unified conserved-mass world pool using the current species count and ocean matrix.',
 );
 export const randomizeOceanRulesBtn = withTooltip(
   oceanLifeFolder.addButton({ title: 'Randomize Ocean Matrix' }),
@@ -792,7 +782,7 @@ export function bindOptions(
   for (const param in optionBindings) {
     optionBindings[param].on('change', () => {
       setSim(device, simData, simBuffer);
-      if (param === 'worldSize') {
+      if (param === 'worldSize' || param === 'r') {
         setOceanSim(device, oceanSimData, oceanSimBuffer);
       }
       onBioSync?.();
@@ -803,6 +793,7 @@ export function bindOptions(
 
   for (const b of oceanParamBindings) {
     b.on('change', () => {
+      setSim(device, simData, simBuffer);
       setOceanSim(device, oceanSimData, oceanSimBuffer);
       onBioSync?.();
     });
@@ -866,7 +857,6 @@ export function bindConfigPersistence(onChange: () => void) {
     bioRateBinding,
     tooltipsBinding,
     mouseToolBinding,
-    oceanCountBinding,
     oceanColoursBinding,
     ...oceanParamBindings,
     ...Object.values(optionBindings),

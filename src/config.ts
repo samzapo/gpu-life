@@ -9,7 +9,7 @@ export const CONFIG_STORAGE_KEY = 'complexLife:config:v1';
 
 export const FACTORY_DEFAULTS = {
   engine: 'prefixSum',
-  particles: 20000,
+  particles: 28000,
   colours: 14,
   cells: 4096,
   air: {
@@ -33,7 +33,6 @@ export const FACTORY_DEFAULTS = {
     worldSize: 1.8,
   },
   ocean: {
-    particles: 12000,
     colours: 12,
     r: 20,
     force: 1.0,
@@ -41,7 +40,6 @@ export const FACTORY_DEFAULTS = {
     delta: 0.02,
     friction: 0.04,
     avoidance: 4.0,
-    cells: 4096,
   },
   earth: {
     viewLayer: 'both' as ConfigViewLayerMode,
@@ -331,7 +329,6 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.air!.avoidance = numParam('avoidance') ?? FACTORY_DEFAULTS.air.avoidance;
     cfg.air!.worldSize = numParam('worldSize') ?? FACTORY_DEFAULTS.air.worldSize;
 
-    cfg.ocean!.particles = numParam('oceanParticles') ?? FACTORY_DEFAULTS.ocean.particles;
     cfg.ocean!.colours = numParam('oceanColours') ?? FACTORY_DEFAULTS.ocean.colours;
     cfg.ocean!.r = numParam('oceanR') ?? FACTORY_DEFAULTS.ocean.r;
     cfg.ocean!.beta = numParam('oceanBeta') ?? FACTORY_DEFAULTS.ocean.beta;
@@ -339,7 +336,6 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.ocean!.delta = numParam('oceanDelta') ?? FACTORY_DEFAULTS.ocean.delta;
     cfg.ocean!.friction = numParam('oceanFriction') ?? FACTORY_DEFAULTS.ocean.friction;
     cfg.ocean!.avoidance = numParam('oceanAvoidance') ?? FACTORY_DEFAULTS.ocean.avoidance;
-    cfg.ocean!.cells = numParam('oceanCells') ?? FACTORY_DEFAULTS.ocean.cells;
 
     if (sp.has('windMix')) cfg.earth!.vortex = sp.get('windMix') !== 'false';
     else if (sp.has('vortex')) cfg.earth!.vortex = sp.get('vortex') !== 'false';
@@ -456,7 +452,6 @@ export function buildUrlPartsFromConfig(
 
   const o = cfg.ocean;
   if (o) {
-    setNum('oceanParticles', o.particles, FACTORY_DEFAULTS.ocean.particles);
     setNum('oceanColours', o.colours, FACTORY_DEFAULTS.ocean.colours);
     setNum('oceanR', o.r, FACTORY_DEFAULTS.ocean.r);
     setNum('oceanBeta', o.beta, FACTORY_DEFAULTS.ocean.beta);
@@ -464,7 +459,6 @@ export function buildUrlPartsFromConfig(
     setNum('oceanDelta', o.delta, FACTORY_DEFAULTS.ocean.delta);
     setNum('oceanFriction', o.friction, FACTORY_DEFAULTS.ocean.friction);
     setNum('oceanAvoidance', o.avoidance, FACTORY_DEFAULTS.ocean.avoidance);
-    setNum('oceanCells', o.cells, FACTORY_DEFAULTS.ocean.cells);
   }
 
   const e = cfg.earth;

@@ -12,12 +12,10 @@ ${valenceSimShader}
 
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
-
 @group(0) @binding(3) var<storage, read> input: array<Particle>;
-@group(0) @binding(4) var<storage, read_write> valenceOut: array<vec4f>;
-
-@group(0) @binding(5) var<storage, read> sorted: array<SortParticle>;
-@group(0) @binding(6) var<storage, read> counts: array<u32>;
+@group(0) @binding(4) var<storage, read> lifeState: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> valenceOut: array<vec4f>;
+@group(0) @binding(6) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(7) var<storage, read> prefixSumIndices: array<u32>;
 
 fn getCellValence(
@@ -27,16 +25,11 @@ fn getCellValence(
     cell: u32,
     slotAcc: ptr<function, vec4f>,
 ) {
-    let particlesInThisCell = counts[cell];
-    if (particlesInThisCell == 0u) {
-        return;
-    }
-
     let startIdx = prefixSumIndices[cell];
-    let endIdx = startIdx + particlesInThisCell;
+    let endIdx = prefixSumIndices[cell + 1u];
     for (var i = startIdx; i < endIdx; i++) {
         let ip = sorted[i];
-        if (ip.idx == pi) {
+        if (ip.idx == pi || ip.phase != 0u) {
             continue;
         }
         accumulateValenceNeighbor(p, sP, ip.pos, ip.colour, ip.orient, slotAcc);
@@ -49,6 +42,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (pi >= arrayLength(&valenceOut)) {
         return;
     }
+    if (unpackPhase(lifeState[pi].w) != 0u) {
+        valenceOut[pi] = vec4f(0.0);
+        return;
+    }
+
     let p = input[pi];
     let sP = getSpeciesInfo(u32(p.colour));
     if (u32(sP.valence) == 0u) {
