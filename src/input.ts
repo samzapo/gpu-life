@@ -77,7 +77,7 @@ function updateMouseSphere(clientX: number, clientY: number) {
 
 function isUiTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn'));
+  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn, #configModal'));
 }
 
 function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
@@ -274,7 +274,9 @@ for (const evName of ['touchstart', 'touchmove', 'gesturestart', 'gesturechange'
 }
 
 window.addEventListener('contextmenu', (event) => {
-  event.preventDefault();
+  if (!isUiTarget(event.target)) {
+    event.preventDefault();
+  }
 });
 
 window.addEventListener(

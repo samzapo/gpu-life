@@ -2122,27 +2122,65 @@ function setModalStatus(msg: string, isErr = false) {
 
 function openConfigModal(initialMsg = '') {
   if (!configModal || !configTextarea) return;
+  tooltipManager.hide();
   configTextarea.value = JSON.stringify(exportCurrentConfig(), null, 2);
   setModalStatus(initialMsg, false);
   configModal.hidden = false;
-  configTextarea.focus();
-  configTextarea.select();
+  if (window.matchMedia('(pointer: coarse)').matches) {
+    configTextarea.scrollTop = 0;
+  } else {
+    configTextarea.focus();
+    configTextarea.select();
+  }
 }
 
 function closeConfigModal() {
   if (configModal) configModal.hidden = true;
 }
 
+async function copyConfigTextWithFallback(text: string): Promise<boolean> {
+  let syncCopied = false;
+  if (configTextarea) {
+    const prevVal = configTextarea.value;
+    if (prevVal !== text) configTextarea.value = text;
+    configTextarea.focus();
+    configTextarea.select();
+    configTextarea.setSelectionRange(0, configTextarea.value.length);
+    try {
+      syncCopied = Boolean(document.execCommand?.('copy'));
+    } catch {
+      syncCopied = false;
+    }
+  }
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return syncCopied;
+    }
+  }
+  return syncCopied;
+}
+
 copyConfigBtn.on('click', async () => {
   const json = JSON.stringify(exportCurrentConfig(), null, 2);
-  try {
-    await navigator.clipboard.writeText(json);
+  let copied = false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(json);
+      copied = true;
+    } catch {
+      copied = false;
+    }
+  }
+  if (copied) {
     copyConfigBtn.title = 'Copied ✓';
     if (copyBtnResetTimer !== undefined) window.clearTimeout(copyBtnResetTimer);
     copyBtnResetTimer = window.setTimeout(() => {
       copyConfigBtn.title = 'Copy Config';
     }, 1500);
-  } catch {
+  } else {
     openConfigModal('Clipboard permission unavailable — copy the selected JSON below.');
   }
 });
@@ -2155,21 +2193,27 @@ configCloseBtn?.addEventListener('click', closeConfigModal);
 configModal?.addEventListener('click', (ev) => {
   if (ev.target === configModal) closeConfigModal();
 });
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && configModal && !configModal.hidden) {
+    closeConfigModal();
+  }
+});
 
 configCopyBtn?.addEventListener('click', async () => {
   if (!configTextarea) return;
   const text = configTextarea.value.trim() || JSON.stringify(exportCurrentConfig(), null, 2);
-  try {
-    await navigator.clipboard.writeText(text);
+  const copied = await copyConfigTextWithFallback(text);
+  if (copied) {
     setModalStatus('Copied JSON configuration to clipboard.');
-  } catch {
+  } else {
     configTextarea.select();
-    setModalStatus('Press Ctrl+C / Cmd+C to copy selected JSON.');
+    setModalStatus('Tap & hold selected JSON to Copy.');
   }
 });
 
 configApplyBtn?.addEventListener('click', async () => {
   if (!configTextarea) return;
+  setModalStatus('Applying configuration…');
   try {
     await importConfiguration(configTextarea.value);
     setModalStatus('Configuration applied & cached cleanly.');
@@ -2179,6 +2223,7 @@ configApplyBtn?.addEventListener('click', async () => {
 });
 
 configResetBtn?.addEventListener('click', async () => {
+  setModalStatus('Restoring factory defaults…');
   await resetToFactoryDefaults();
   if (configTextarea) {
     configTextarea.value = JSON.stringify(exportCurrentConfig(), null, 2);
