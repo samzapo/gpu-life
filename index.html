@@ -3,22 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Complex Life</title>
+    <title>Complex Life · Earth Wind Chemistry</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/style.css">
   </head>
   <body>
+    <canvas id="bgCanvas"></canvas>
+    <svg id="mapSvg" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <clipPath id="sphereClip">
+          <path id="sphereClipPath" />
+        </clipPath>
+      </defs>
+      <g clip-path="url(#sphereClip)" fill="none">
+        <path id="graticulePath" stroke="rgba(140, 165, 190, 0.25)" stroke-width="0.8" />
+        <path id="hemispherePath" stroke="rgba(165, 190, 215, 0.34)" stroke-width="1.0" />
+        <path id="coastlinePath" stroke="rgba(245, 248, 255, 0.82)" stroke-width="1.15" />
+        <path id="lakesPath" stroke="rgba(220, 232, 245, 0.62)" stroke-width="0.95" />
+      </g>
+      <path id="sphereRimPath" fill="none" />
+    </svg>
+    <canvas id="windCanvas"></canvas>
+    <canvas id="canvas"></canvas>
+
     <div id="controls">
-      <h2>Controls</h2>
+      <div id="earthMeta">
+        <span id="windLevelBadge">Wind @ Sfc (10m)</span>
+        <span id="windTimeBadge">GFS · loading…</span>
+      </div>
+      <div id="scaleWrap">
+        <span class="scaleTick">0</span>
+        <div id="scaleBar"></div>
+        <span id="scaleMaxLabel" class="scaleTick">100 m/s</span>
+      </div>
       <p>
-        Left mouse down - attract particles <br>
-        Shift + Left mouse down - detract particles <br>
-        <br>
-        Scroll / Right mouse drag - move camera <br>
-        Ctrl + Scroll - zoom camera
+        Drag — rotate / pan Earth &nbsp;·&nbsp; Scroll — zoom<br>
+        Shift + Drag — attract atoms &nbsp;·&nbsp; Alt + Drag — repel atoms
       </p>
     </div>
-    <canvas id="canvas"></canvas>
+
     <a id="githubBtn" href="https://github.com/samzapo/gpu-life" target="_blank"></a>
     <script type="module" src="/src/main.ts"></script>
   </body>

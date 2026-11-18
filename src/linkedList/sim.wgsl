@@ -17,6 +17,7 @@ struct LinkedList {
 @group(0) @binding(5) var<storage, read> heads: Heads;
 @group(0) @binding(6) var<storage, read> linkedList: LinkedList;
 @group(0) @binding(7) var<storage, read> valence: array<vec4f>;
+@group(0) @binding(8) var windTex: texture_2d<f32>;
 
 fn getCellForce(
     pi: u32,
@@ -41,7 +42,7 @@ fn getCellForce(
                 mySlots,
                 ip.pos,
                 ip.colour,
-                ip.theta,
+                ip.orient,
                 valence[ip.idx],
                 acc,
             );
@@ -58,16 +59,17 @@ fn getForce(pi: u32) -> ForceResult {
     let mySlots = valence[pi];
     var acc = ForceAccum();
 
-    let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
-    let cymin = i32(floor((p.pos.y - sim.rMax) / sim.cellSize));
-    let cxmax = i32(floor((p.pos.x + sim.rMax) / sim.cellSize));
-    let cymax = i32(floor((p.pos.y + sim.rMax) / sim.cellSize));
+    let worldP = p.pos * sim.worldSize;
+    let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
+    let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
     let headCount = arrayLength(&heads.data);
 
-    for (var cx = cxmin; cx <= cxmax; cx++) {
-        for (var cy = cymin; cy <= cymax; cy++) {
-            let c = hash3i(vec3i(cx, cy, 0)) % headCount;
-            getCellForce(pi, p, sP, mySlots, c, &acc);
+    for (var cx = cmin.x; cx <= cmax.x; cx++) {
+        for (var cy = cmin.y; cy <= cmax.y; cy++) {
+            for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                let c = hash3i(vec3i(cx, cy, cz)) % headCount;
+                getCellForce(pi, p, sP, mySlots, c, &acc);
+            }
         }
     }
 
@@ -76,10 +78,19 @@ fn getForce(pi: u32) -> ForceResult {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x >= arrayLength(&output)) {
+    let pi = global_id.x;
+    if (pi >= arrayLength(&output)) {
         return;
     }
-    let p = input[global_id.x];
-    let res = getForce(global_id.x);
-    output[global_id.x] = integrateParticle(global_id.x, p, res);
+    let p = input[pi];
+    let res = getForce(pi);
+    let windUv = sampleWindTexture(windTex, p.pos);
+    output[pi] = integrateParticle(
+        pi,
+        p,
+        res,
+        windUv,
+        uniforms.flags.w,
+        uniforms.mouseSphere,
+    );
 }

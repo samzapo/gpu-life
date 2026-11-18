@@ -6,7 +6,6 @@ export const valenceComputeShader = (workgroupSize: number) => {
 ${structsShader}
 ${valenceSimShader}
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
 
@@ -33,10 +32,10 @@ fn getCellValence(
     let endIdx = startIdx + particlesInThisCell;
     for (var i = startIdx; i < endIdx; i++) {
         let ip = sorted[i];
-        if (ip.idx.y == pi) {
+        if (ip.idx == pi) {
             continue;
         }
-        accumulateValenceNeighbor(p, sP, ip.pos, ip.colour, ip.theta, slotAcc);
+        accumulateValenceNeighbor(p, sP, ip.pos, ip.colour, ip.orient, slotAcc);
     }
 }
 
@@ -54,16 +53,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var slotAcc = vec4f(0.0);
-    let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
-    let cymin = i32(floor((p.pos.y - sim.rMax) / sim.cellSize));
-    let cxmax = i32(floor((p.pos.x + sim.rMax) / sim.cellSize));
-    let cymax = i32(floor((p.pos.y + sim.rMax) / sim.cellSize));
+    let worldP = p.pos * sim.worldSize;
+    let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
+    let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
     let numCells = u32(sim.cellAmt);
 
-    for (var cx = cxmin; cx <= cxmax; cx++) {
-        for (var cy = cymin; cy <= cymax; cy++) {
-            let c = hash3i(vec3i(cx, cy, 0)) % numCells;
-            getCellValence(pi, p, sP, c, &slotAcc);
+    for (var cx = cmin.x; cx <= cmax.x; cx++) {
+        for (var cy = cmin.y; cy <= cmax.y; cy++) {
+            for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                let c = hash3i(vec3i(cx, cy, cz)) % numCells;
+                getCellValence(pi, p, sP, c, &slotAcc);
+            }
         }
     }
 

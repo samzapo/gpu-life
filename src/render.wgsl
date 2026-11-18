@@ -1,73 +1,95 @@
-const SPECIES_STRIDE: u32 = 8u;
-
-struct Uniforms {
-    aspect: f32,
-    mouse: vec4<f32>,
-    size: f32,
-    showOrbitals: f32,
-    _pad0: f32,
-    _pad1: f32,
-}
-
-struct Camera {
-    pos: vec2f,
-    zoom: f32,
-}
-
-struct Particle {
-    @location(0) pos: vec2f,
-    @location(1) vel: vec2f,
-    @location(2) colour: f32,
-    @location(3) theta: f32,
-    @location(4) slots: vec4f,
+struct ParticleVert {
+    @location(0) pos: vec3f,
+    @location(1) colour: f32,
+    @location(2) orient: vec3f,
+    @location(3) slots: vec4f,
 }
 
 struct VertexOutput {
     @builtin(position) pos: vec4f,
     @location(0) uv: vec2f,
     @location(1) colour: f32,
-    @location(2) theta: f32,
-    @location(3) slots: vec4f,
+    @location(2) slots: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var<uniform> camera: Camera;
+@group(0) @binding(1) var watermanFwdTex: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read> colours: array<f32>;
+@group(0) @binding(3) var<storage, read> matrix: array<f32>;
 
 @vertex
 fn vertex(
-    particle: Particle,
-    @builtin(vertex_index) vertexIndex: u32
+    particle: ParticleVert,
+    @builtin(vertex_index) vertexIndex: u32,
 ) -> VertexOutput {
-    let a = uniforms.aspect;
-
     var positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
-        vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
+        vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
     );
 
-    let baseSize = max(uniforms.size, 0.005 / camera.zoom);
-    let scale = select(1.0, 1.45, uniforms.showOrbitals > 0.5);
-    let offset = positions[vertexIndex] * baseSize * scale;
-    let worldPos = particle.pos + offset;
+    let n = normalize(particle.pos);
+    let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
 
     var output: VertexOutput;
-    output.pos = vec4f((worldPos.x - camera.pos.x) * camera.zoom / a, (worldPos.y - camera.pos.y) * camera.zoom, 0.0, 1.0);
-    output.uv = positions[vertexIndex];
+    if (p0.z < 0.5) {
+        output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
+        output.uv = vec2f(0.0);
+        output.colour = particle.colour;
+        output.slots = particle.slots;
+        return output;
+    }
+
+    var uHat = particle.orient - dot(particle.orient, n) * n;
+    let uLen = length(uHat);
+    if (uLen > 1e-5) {
+        uHat /= uLen;
+    } else {
+        let refA = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(n.z) > 0.9);
+        uHat = normalize(cross(refA, n));
+    }
+    let bHat = normalize(cross(n, uHat));
+
+    let eps = 0.004;
+    let pu = projectUnitPos(uniforms, watermanFwdTex, normalize(n + eps * uHat));
+    let pb = projectUnitPos(uniforms, watermanFwdTex, normalize(n + eps * bHat));
+
+    var dU = vec2f(1.0, 0.0);
+    var dB = vec2f(0.0, -1.0);
+    if (pu.z > 0.5 && pb.z > 0.5) {
+        let cu = (pu.xy - p0.xy) / eps;
+        let cb = (pb.xy - p0.xy) / eps;
+        let lu = length(cu);
+        let lb = length(cb);
+        if (lu > 0.04 && lu < 8.0 && lb > 0.04 && lb < 8.0) {
+            dU = cu;
+            dB = cb;
+        }
+    }
+
+    let scalePx = max(uniforms.viewParams.x, 1.0);
+    let orbScale = select(1.0, 1.45, uniforms.flags.x > 0.5);
+    let angR = max(uniforms.size * orbScale, 1.45 / scalePx);
+    let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
+    let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
+
+    let corner = positions[vertexIndex];
+    let pScreen = p0.xy * scalePx + vec2f(cx, cy) + (corner.x * dU + corner.y * dB) * (angR * scalePx);
+
+    let ndcX = (pScreen.x / max(uniforms.viewSize.x, 1.0)) * 2.0 - 1.0;
+    let ndcY = 1.0 - (pScreen.y / max(uniforms.viewSize.y, 1.0)) * 2.0;
+
+    output.pos = vec4f(ndcX, ndcY, 0.0, 1.0);
+    output.uv = corner;
     output.colour = particle.colour;
-    output.theta = particle.theta;
     output.slots = particle.slots;
     return output;
 }
-
-@group(0) @binding(2) var<storage, read> colours: array<f32>;
-@group(0) @binding(3) var<storage, read> matrix: array<f32>;
 
 @fragment
 fn fragment(
     @location(0) uv: vec2f,
     @location(1) colour: f32,
-    @location(2) theta: f32,
-    @location(3) slots: vec4f,
+    @location(2) slots: vec4f,
 ) -> @location(0) vec4f {
     let cIdx = u32(colour);
     let baseCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
@@ -76,13 +98,13 @@ fn fragment(
         discard;
     }
 
-    if (uniforms.showOrbitals <= 0.5) {
-        let delta = fwidth(d);
+    if (uniforms.flags.x <= 0.5) {
+        let delta = max(fwidth(d), 0.03);
         let alpha = 1.0 - smoothstep(1.0 - delta, 1.0, d);
-        return vec4f(baseCol, alpha);
+        return vec4f(baseCol * alpha, alpha);
     }
 
-    let delta = max(fwidth(d), 0.02);
+    let delta = max(fwidth(d), 0.025);
     let sBase = cIdx * SPECIES_STRIDE;
     let valence = u32(matrix[sBase + 0u]);
     let role = matrix[sBase + 1u];
@@ -100,7 +122,6 @@ fn fragment(
     }
 
     if (valence == 0u) {
-        // Noble gas: closed complete outer shell ring
         let ringDist = abs(d - 0.80);
         let ringA = (1.0 - smoothstep(0.04, 0.04 + delta, ringDist)) * 0.45;
         if (ringA > outAlpha) {
@@ -110,13 +131,11 @@ fn fragment(
     } else {
         for (var k = 0u; k < valence; k++) {
             let slotAngle = matrix[sBase + 4u + k];
-            let ang = theta + slotAngle;
-            let dotPos = vec2f(cos(ang), sin(ang)) * 0.80;
+            let dotPos = vec2f(cos(slotAngle), sin(slotAngle)) * 0.80;
             let distDot = length(uv - dotPos);
             let occ = clamp(select(select(slots.z, slots.y, k == 1u), slots.x, k == 0u), 0.0, 1.0);
 
             if (role < -0.5) {
-                // Acceptor: hollow slot ring when unfilled, fills bright as electrons complete it
                 let ringA = 1.0 - smoothstep(0.04, 0.04 + delta, abs(distDot - 0.12));
                 let fillA = (1.0 - smoothstep(0.11 - delta, 0.11 + delta, distDot)) * occ;
                 let slotA = max(ringA * 0.85, fillA);
@@ -125,7 +144,6 @@ fn fragment(
                     outAlpha = slotA;
                 }
             } else {
-                // Donor or half-shell covalent: bright outer electron dot (glows stronger when shared)
                 let dotR = 0.12 + 0.03 * occ;
                 let dotA = 1.0 - smoothstep(dotR - delta, dotR + delta, distDot);
                 if (dotA > outAlpha) {
@@ -139,5 +157,5 @@ fn fragment(
     if (outAlpha <= 0.001) {
         discard;
     }
-    return vec4f(outCol, outAlpha);
+    return vec4f(outCol * outAlpha, outAlpha);
 }

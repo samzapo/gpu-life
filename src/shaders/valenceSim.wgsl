@@ -1,6 +1,6 @@
-// Shared chemistry helpers reading packed `matrix` buffer:
-// [0 .. colours*8 - 1] = SpeciesInfo per species
-// [colours*8 ..]       = pairwise affinity E(c1, c2)
+// Shared sphere-surface (S^2) 2D Periodic Table orbital chemistry helpers.
+// Particle positions `pos`, tangent velocities `vel`, and body slot-0 directions `orient`
+// live on the unit sphere S^2 with physical surface radius R = sim.worldSize.
 
 fn getSpeciesInfo(c: u32) -> SpeciesInfo {
     let nColours = max(u32(sim.colours), 1u);
@@ -38,7 +38,6 @@ fn evalLobe(delta: f32, p: f32) -> vec2f {
 }
 
 // Finds best-aligned active valence slot on species `s` for body-frame bearing `alpha`.
-// Returns vec3f(slotIdxF, L, dL_dDelta).
 fn bestSlotLobe(s: SpeciesInfo, alpha: f32, p: f32) -> vec3f {
     let v = u32(s.valence);
     if (v == 0u) {
@@ -76,20 +75,29 @@ fn radPresence(rNorm: f32) -> f32 {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
+fn orthoBasis(n: vec3f, uRaw: vec3f) -> vec3f {
+    var u = uRaw - dot(uRaw, n) * n;
+    let l = length(u);
+    if (l > 1e-6) {
+        return u / l;
+    }
+    let refV = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(n.z) > 0.9);
+    return normalize(cross(refV, n));
+}
+
 fn accumulateValenceNeighbor(
     p: Particle,
     sP: SpeciesInfo,
-    ipPos: vec2f,
+    ipPos: vec3f,
     ipColour: f32,
-    ipTheta: f32,
+    ipOrient: vec3f,
     slotAcc: ptr<function, vec4f>,
 ) {
-    let rx = ipPos.x - p.pos.x;
-    let ry = ipPos.y - p.pos.y;
-    let rs = rx * rx + ry * ry;
-    let mrs = sim.rMax * sim.rMax;
-
-    if (rs <= 0.0 || rs >= mrs) {
+    let R = max(sim.worldSize, 0.25);
+    let chordVec = ipPos - p.pos;
+    let chord2 = dot(chordVec, chordVec);
+    let maxAng = sim.rMax / R;
+    if (chord2 <= 1e-12 || chord2 >= maxAng * maxAng) {
         return;
     }
 
@@ -104,18 +112,32 @@ fn accumulateValenceNeighbor(
         return;
     }
 
-    let r = sqrt(rs);
-    let rNorm = r / sim.rMax;
+    let theta = 2.0 * asin(clamp(0.5 * sqrt(chord2), 0.0, 1.0));
+    let rNorm = (R * theta) / sim.rMax;
     let pres = radPresence(rNorm);
     if (pres <= 0.0) {
         return;
     }
 
-    let phi = atan2(ry, rx);
-    let alphaI = phi - p.theta;
-    let alphaJ = phi + PI - ipTheta;
-    let sharp = max(sim.orbitalSharpness, 1.0);
+    let tIraw = ipPos - dot(ipPos, p.pos) * p.pos;
+    let tJraw = p.pos - dot(p.pos, ipPos) * ipPos;
+    let lenI = length(tIraw);
+    let lenJ = length(tJraw);
+    if (lenI <= 1e-6 || lenJ <= 1e-6) {
+        return;
+    }
+    let dI = tIraw / lenI;
+    let dJ = tJraw / lenJ;
 
+    let uI = orthoBasis(p.pos, p.orient);
+    let bI = cross(p.pos, uI);
+    let alphaI = atan2(dot(dI, bI), dot(dI, uI));
+
+    let uJ = orthoBasis(ipPos, ipOrient);
+    let bJ = cross(ipPos, uJ);
+    let alphaJ = atan2(dot(dJ, bJ), dot(dJ, uJ));
+
+    let sharp = max(sim.orbitalSharpness, 1.0);
     let lobeI = bestSlotLobe(sP, alphaI, sharp);
     let lobeJ = bestSlotLobe(sIp, alphaJ, sharp);
     let w = pres * lobeI.y * lobeJ.y;
@@ -145,37 +167,49 @@ fn accumulateSimNeighbor(
     p: Particle,
     sP: SpeciesInfo,
     mySlots: vec4f,
-    ipPos: vec2f,
+    ipPos: vec3f,
     ipColour: f32,
-    ipTheta: f32,
+    ipOrient: vec3f,
     nbSlots: vec4f,
     acc: ptr<function, ForceAccum>,
 ) {
-    let rx = ipPos.x - p.pos.x;
-    let ry = ipPos.y - p.pos.y;
-    let rs = rx * rx + ry * ry;
-    let mrs = sim.rMax * sim.rMax;
+    let R = max(sim.worldSize, 0.25);
+    let chordVec = ipPos - p.pos;
+    let chord2 = dot(chordVec, chordVec);
+    let maxAng = sim.rMax / R;
 
-    if (rs == 0.0) {
-        (*acc).avoidForce.x += (f32(pi) * 20293.302 % 4932.329) / 100000.0;
+    if (chord2 <= 1e-12) {
+        let uFallback = orthoBasis(p.pos, p.orient);
+        let rnd = (f32(pi) * 20293.302 % 4932.329) / 100000.0;
+        (*acc).avoidForce += uFallback * rnd;
         return;
     }
-    if (rs >= mrs) {
+    if (chord2 >= maxAng * maxAng) {
         return;
     }
 
-    let r = sqrt(rs);
+    let theta = 2.0 * asin(clamp(0.5 * sqrt(chord2), 0.0, 1.0));
+    let r = R * theta;
     let rNorm = r / sim.rMax;
-    let invR = 1.0 / r;
-    let dx = rx * invR;
-    let dy = ry * invR;
+    if (rNorm >= 1.0) {
+        return;
+    }
+
+    let tIraw = ipPos - dot(ipPos, p.pos) * p.pos;
+    let tJraw = p.pos - dot(p.pos, ipPos) * ipPos;
+    let lenI = length(tIraw);
+    let lenJ = length(tJraw);
+    if (lenI <= 1e-6 || lenJ <= 1e-6) {
+        return;
+    }
+    let dI = tIraw / lenI;
+    let dJ = tJraw / lenJ;
 
     // 1. Hard Pauli core repulsion below equilibrium bond radius beta
     let beta = clamp(sim.beta, 0.05, 0.7);
     if (rNorm < beta) {
         let fCore = (rNorm / beta - 1.0) * 1.6;
-        (*acc).avoidForce.x += dx * fCore;
-        (*acc).avoidForce.y += dy * fCore;
+        (*acc).avoidForce += dI * fCore;
         (*acc).div += max(0.0, -fCore) / 10.0 * sim.avoidance;
     }
 
@@ -184,11 +218,9 @@ fn accumulateSimNeighbor(
     let aff = getPairAffinity(cP, cIp);
     let sIp = getSpeciesInfo(cIp);
 
-    // Noble gases or same-polarity incompatible pairs
     if (aff < 0.0) {
         let fRep = aff * (1.0 - rNorm) * 0.65;
-        (*acc).repelForce.x += dx * fRep;
-        (*acc).repelForce.y += dy * fRep;
+        (*acc).repelForce += dI * fRep;
         return;
     }
     if (aff == 0.0 || u32(sP.valence) == 0u || u32(sIp.valence) == 0u) {
@@ -198,21 +230,23 @@ fn accumulateSimNeighbor(
     // 2. Outer valence slot alignment & completion availability
     let wellEnd = 0.78;
     if (rNorm >= wellEnd) {
-        // Repulsive activation-energy shoulder outside the covalent bond well
         if (sim.activation > 0.0) {
             let u = (rNorm - wellEnd) / max(1.0 - wellEnd, 1e-4);
             let fAct = -sim.activation * sin(PI * u);
-            (*acc).repelForce.x += dx * fAct;
-            (*acc).repelForce.y += dy * fAct;
+            (*acc).repelForce += dI * fAct;
         }
         return;
     }
 
-    let phi = atan2(ry, rx);
-    let alphaI = phi - p.theta;
-    let alphaJ = phi + PI - ipTheta;
-    let sharp = max(sim.orbitalSharpness, 1.0);
+    let uI = orthoBasis(p.pos, p.orient);
+    let bI = cross(p.pos, uI);
+    let alphaI = atan2(dot(dI, bI), dot(dI, uI));
 
+    let uJ = orthoBasis(ipPos, ipOrient);
+    let bJ = cross(ipPos, uJ);
+    let alphaJ = atan2(dot(dJ, bJ), dot(dJ, uJ));
+
+    let sharp = max(sim.orbitalSharpness, 1.0);
     let lobeI = bestSlotLobe(sP, alphaI, sharp);
     let lobeJ = bestSlotLobe(sIp, alphaJ, sharp);
     let lI = lobeI.y;
@@ -229,36 +263,28 @@ fn accumulateSimNeighbor(
     let otherJ = max(0.0, getSlotValue(nbSlots, m) - w);
     let avail = max(0.0, 1.0 - sim.valency * otherI) * max(0.0, 1.0 - sim.valency * otherJ);
 
-    // Occupied-slot steric shell repulsion: prevents completed molecules from merging into blobs
     if (avail <= 0.05) {
         if (rNorm > beta) {
             let fSteric = -0.35 * (1.0 - rNorm / wellEnd);
-            (*acc).repelForce.x += dx * fSteric;
-            (*acc).repelForce.y += dy * fSteric;
+            (*acc).repelForce += dI * fSteric;
         }
         return;
     }
 
-    // Attractive radial well in [beta, wellEnd]
     if (rNorm >= beta) {
         let mid = 0.5 * (beta + wellEnd);
         let halfW = max(0.5 * (wellEnd - beta), 1e-4);
         let fWell = max(0.0, 1.0 - abs(rNorm - mid) / halfW);
         let fPull = aff * avail * fWell * lI * lJ;
-        (*acc).bondForce.x += dx * fPull;
-        (*acc).bondForce.y += dy * fPull;
+        (*acc).bondForce += dI * fPull;
     }
 
-    // Tangential bond-angle restoring force + orbital alignment torque
     let bondStrength = aff * avail * pres;
     if (bondStrength > 0.0) {
-        let tx = -dy;
-        let ty = dx;
+        let tHat = cross(p.pos, dI);
         let invRClamped = 1.0 / max(r, 0.35 * sim.rMax);
         let fTan = -bondStrength * (dlI * lJ + lI * dlJ) * sim.rMax * invRClamped * 0.45;
-        (*acc).bondForce.x += tx * fTan;
-        (*acc).bondForce.y += ty * fTan;
-
+        (*acc).bondForce += tHat * fTan;
         (*acc).torque += -bondStrength * dlI * lJ;
     }
 }
@@ -270,14 +296,24 @@ fn finalizeForces(acc: ForceAccum) -> ForceResult {
     return ForceResult(netForce, netTorque);
 }
 
-fn integrateParticle(pi: u32, pIn: Particle, res: ForceResult) -> Particle {
+fn integrateParticle(
+    pi: u32,
+    pIn: Particle,
+    res: ForceResult,
+    windUv: vec3f,
+    windStreamMax: f32,
+    mouseSphere: vec4f,
+) -> Particle {
     var p = pIn;
+    let R = max(sim.worldSize, 0.25);
 
-    p.vel *= sim.friction;
-    p.vel += res.force * sim.dt;
+    p.vel -= dot(p.vel, p.pos) * p.pos;
+    p.vel = p.vel * sim.friction + res.force * sim.dt;
 
-    p.omega *= sim.angularFriction;
-    p.omega += res.torque * sim.dt;
+    p.omega = p.omega * sim.angularFriction + res.torque * sim.dt;
+
+    let uBody = orthoBasis(p.pos, p.orient);
+    let bBody = cross(p.pos, uBody);
 
     if (sim.temperature > 0.0) {
         let frame = u32(sim.frame);
@@ -285,42 +321,76 @@ fn integrateParticle(pi: u32, pIn: Particle, res: ForceResult) -> Particle {
         let h2 = hashFloat(pi, frame, 1u) * 2.0 - 1.0;
         let h3 = hashFloat(pi, frame, 2u) * 2.0 - 1.0;
         let sqrtDt = sqrt(sim.dt);
-        p.vel.x += sim.temperature * sim.rMax * h1 * sqrtDt * 2.2;
-        p.vel.y += sim.temperature * sim.rMax * h2 * sqrtDt * 2.2;
+        p.vel += (uBody * h1 + bBody * h2) * (sim.temperature * sim.rMax * sqrtDt * 2.2);
         p.omega += sim.temperature * h3 * sqrtDt * 12.0;
     }
 
-    let d = sqrt(p.pos.x * p.pos.x + p.pos.y * p.pos.y) / sim.worldSize;
-
-    if (sim.vortex > 0.0) {
-        let s = getSpeciesInfo(u32(p.colour));
-        let tag = max(s.atomicNumber * 0.17, 0.25);
-        p.vel.x -= p.pos.x * sim.dt * 4.0 * cos(d * 20.0 * p.pos.x * p.pos.y / tag) * sin(p.pos.x * 8.0 * tag);
-        p.vel.y -= p.pos.y * sim.dt * 4.0 * cos(d * 20.0 * p.pos.y * p.pos.x / tag) * cos(p.pos.y * 8.0 * tag);
-
-        p.vel.x -= p.pos.y * sim.dt * 4.0 * pow(d / 0.5, 2.0) * sin(d * 10.0 + tag);
-        p.vel.y += p.pos.x * sim.dt * 4.0 * pow(d / 0.5, 2.0) * sin(d * 10.0 + tag);
+    // Live global atmospheric wind force field ("vortex" mixing across the sphere)
+    if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
+        let horiz = length(p.pos.xy);
+        var eEast = vec3f(0.0, 1.0, 0.0);
+        if (horiz > 1e-4) {
+            eEast = vec3f(-p.pos.y / horiz, p.pos.x / horiz, 0.0);
+        } else {
+            eEast = normalize(cross(vec3f(1.0, 0.0, 0.0), p.pos));
+        }
+        let eNorth = normalize(cross(p.pos, eEast));
+        let wind3D = windUv.x * eEast + windUv.y * eNorth;
+        let refSpeed = max(windStreamMax, 10.0);
+        var wTarget = (wind3D / refSpeed) * (0.45 * sim.windStrength);
+        let wLen = length(wTarget);
+        if (wLen > 1.35) {
+            wTarget *= 1.35 / wLen;
+        }
+        p.vel += (wTarget - p.vel) * clamp(14.0 * sim.dt, 0.0, 0.45);
     }
 
-    if (uniforms.mouse.z != 0.0) {
-        let dx = uniforms.mouse.x - p.pos.x;
-        let dy = uniforms.mouse.y - p.pos.y;
-        let md = sqrt(dx * dx + dy * dy);
-        if (md < sim.rMax * 2.0) {
-            let sign = select(-1.0, 1.0, uniforms.mouse.z == 1.0);
-            p.vel.x += dx * 3.0 * sign;
-            p.vel.y += dy * 3.0 * sign;
+    // Mouse attraction / repulsion projected onto local sphere tangent plane
+    if (mouseSphere.w != 0.0) {
+        let mPos = normalize(mouseSphere.xyz);
+        let mChord = length(mPos - p.pos);
+        let mDist = R * 2.0 * asin(clamp(0.5 * mChord, 0.0, 1.0));
+        if (mDist > 1e-5 && mDist < sim.rMax * 2.5) {
+            let mTan = mPos - dot(mPos, p.pos) * p.pos;
+            let mLen = length(mTan);
+            if (mLen > 1e-5) {
+                let sign = select(-1.0, 1.0, mouseSphere.w > 0.0);
+                p.vel += (mTan / mLen) * (mDist * 3.0 * sign);
+            }
         }
     }
 
-    if (sim.border > 0.0 && d > 0.9) {
-        let f = (d - 0.9) * 10.0;
-        p.vel.x -= p.pos.x * f;
-        p.vel.y -= p.pos.y * f;
+    p.vel -= dot(p.vel, p.pos) * p.pos;
+    let maxStepSpeed = min(sim.cellSize / max(sim.dt, 1e-4) * 0.45, R * 0.5 / max(sim.dt, 1e-4));
+    let speed = length(p.vel);
+    if (speed > maxStepSpeed && speed > 1e-6) {
+        p.vel *= maxStepSpeed / speed;
     }
 
-    p.pos += p.vel * sim.dt;
-    p.theta = wrapAngle(p.theta + p.omega * sim.dt);
+    // Exact great-circle geodesic advance & parallel transport (zero pole gimbal lock)
+    let clampedSpeed = length(p.vel);
+    let phi = (clampedSpeed * sim.dt) / R;
+    var nNew = p.pos;
+    var vNew = p.vel;
+    var uNew = uBody;
+    if (phi > 1e-7) {
+        let kHat = p.vel / clampedSpeed;
+        let cPhi = cos(phi);
+        let sPhi = sin(phi);
+        nNew = normalize(cPhi * p.pos + sPhi * kHat);
+        vNew = clampedSpeed * (cPhi * kHat - sPhi * p.pos);
+        vNew -= dot(vNew, nNew) * nNew;
+        let uk = dot(uBody, kHat);
+        uNew = uBody - uk * ((1.0 - cPhi) * kHat + sPhi * p.pos);
+    }
+
+    let dTheta = p.omega * sim.dt;
+    let cT = cos(dTheta);
+    let sT = sin(dTheta);
+    uNew = cT * uNew + sT * cross(nNew, uNew);
+    p.pos = nNew;
+    p.vel = vNew;
+    p.orient = orthoBasis(nNew, uNew);
 
     return p;
 }

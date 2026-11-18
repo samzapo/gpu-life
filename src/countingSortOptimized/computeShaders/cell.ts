@@ -20,14 +20,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let p = input[global_id.x];
-    let gridPos = vec2i(floor(p.pos / sim.cellSize));
-    let cellHash = hash3i(vec3i(gridPos, 0)) % u32(sim.cellAmt);
+    let gridPos = vec3i(floor((p.pos * sim.worldSize) / sim.cellSize));
+    let cellHash = hash3i(gridPos) % u32(sim.cellAmt);
 
     var op = SortParticle();
-    op.idx = vec2u(cellHash, global_id.x);
+    op.cellIdx = cellHash;
+    op.idx = global_id.x;
     op.pos = p.pos;
     op.colour = p.colour;
-    op.theta = p.theta;
+    op.orient = p.orient;
 
     output[global_id.x] = op;
 

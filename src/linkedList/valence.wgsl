@@ -7,7 +7,6 @@ struct LinkedList {
     data: array<ListParticle>
 }
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
 
@@ -26,7 +25,7 @@ fn getCellValence(pi: u32, p: Particle, sP: SpeciesInfo, cell: u32, slotAcc: ptr
     while (elementIndex != 0xFFFFFFFFu && numParticles < maxParticles) {
         let ip = linkedList.data[elementIndex];
         if (ip.idx != pi) {
-            accumulateValenceNeighbor(p, sP, ip.pos, ip.colour, ip.theta, slotAcc);
+            accumulateValenceNeighbor(p, sP, ip.pos, ip.colour, ip.orient, slotAcc);
         }
         numParticles++;
         elementIndex = ip.next;
@@ -47,16 +46,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var slotAcc = vec4f(0.0);
-    let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
-    let cymin = i32(floor((p.pos.y - sim.rMax) / sim.cellSize));
-    let cxmax = i32(floor((p.pos.x + sim.rMax) / sim.cellSize));
-    let cymax = i32(floor((p.pos.y + sim.rMax) / sim.cellSize));
+    let worldP = p.pos * sim.worldSize;
+    let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
+    let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
     let headCount = arrayLength(&heads.data);
 
-    for (var cx = cxmin; cx <= cxmax; cx++) {
-        for (var cy = cymin; cy <= cymax; cy++) {
-            let c = hash3i(vec3i(cx, cy, 0)) % headCount;
-            getCellValence(pi, p, sP, c, &slotAcc);
+    for (var cx = cmin.x; cx <= cmax.x; cx++) {
+        for (var cy = cmin.y; cy <= cmax.y; cy++) {
+            for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                let c = hash3i(vec3i(cx, cy, cz)) % headCount;
+                getCellValence(pi, p, sP, c, &slotAcc);
+            }
         }
     }
 

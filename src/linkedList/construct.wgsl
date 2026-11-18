@@ -21,15 +21,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let p = input[global_id.x];
 
-    let gridPos = vec2i(floor(p.pos / sim.cellSize));
-    let cellHash = hash3i(vec3i(gridPos, 0)) % arrayLength(&heads.data);
+    let gridPos = vec3i(floor((p.pos * sim.worldSize) / sim.cellSize));
+    let cellHash = hash3i(gridPos) % arrayLength(&heads.data);
     let listIndex = atomicAdd(&heads.num, 1u);
 
     if (listIndex < arrayLength(&input)) {
         let lastHead = atomicExchange(&heads.data[cellHash], listIndex);
         linkedList.data[listIndex].pos = p.pos;
         linkedList.data[listIndex].colour = p.colour;
-        linkedList.data[listIndex].theta = p.theta;
+        linkedList.data[listIndex].orient = p.orient;
         linkedList.data[listIndex].idx = global_id.x;
         linkedList.data[listIndex].next = lastHead;
     }

@@ -1,14 +1,18 @@
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
+const HALF_PI: f32 = 1.57079632679;
 const SPECIES_STRIDE: u32 = 8u;
 
 struct Uniforms {
+    viewSize: vec2f,
     aspect: f32,
-    mouse: vec4<f32>,
     size: f32,
-    showOrbitals: f32,
-    _pad0: f32,
-    _pad1: f32,
+    mouseSphere: vec4f,
+    viewParams: vec4f,
+    flags: vec4f,
+    rotCol0: vec4f,
+    rotCol1: vec4f,
+    rotCol2: vec4f,
 }
 
 struct Sim {
@@ -31,7 +35,7 @@ struct Sim {
     activation: f32,
     orbitalSharpness: f32,
     frame: f32,
-    _pad: f32,
+    windStrength: f32,
 }
 
 struct SpeciesInfo {
@@ -46,39 +50,46 @@ struct SpeciesInfo {
 }
 
 struct Particle {
-    pos: vec2f,
-    vel: vec2f,
+    pos: vec3f,
     colour: f32,
-    theta: f32,
+    vel: vec3f,
     omega: f32,
+    orient: vec3f,
     _pad: f32,
 }
 
 struct SortParticle {
-    pos: vec2f,
-    idx: vec2u,
+    pos: vec3f,
     colour: f32,
-    theta: f32,
+    orient: vec3f,
+    cellIdx: u32,
+    idx: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
 }
 
 struct ListParticle {
-    pos: vec2f,
+    pos: vec3f,
     colour: f32,
-    theta: f32,
+    orient: vec3f,
     idx: u32,
     next: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
 }
 
 struct ForceAccum {
-    bondForce: vec2f,
-    repelForce: vec2f,
-    avoidForce: vec2f,
+    bondForce: vec3f,
+    repelForce: vec3f,
+    avoidForce: vec3f,
     div: f32,
     torque: f32,
 }
 
 struct ForceResult {
-    force: vec2f,
+    force: vec3f,
     torque: f32,
 }
 

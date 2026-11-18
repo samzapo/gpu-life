@@ -8,6 +8,7 @@
 @group(0) @binding(5) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(6) var<storage, read> indices: array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read> valence: array<vec4f>;
+@group(0) @binding(8) var windTex: texture_2d<f32>;
 
 fn getCellForce(
     pi: u32,
@@ -18,14 +19,13 @@ fn getCellForce(
     acc: ptr<function, ForceAccum>,
 ) {
     let index = indices[cell];
-
     if (index.y == 0u) {
         return;
     }
 
     for (var i = index.x; i < index.x + index.y; i++) {
         let ip = sorted[i];
-        if (ip.idx.y == pi) {
+        if (ip.idx == pi) {
             continue;
         }
         accumulateSimNeighbor(
@@ -35,8 +35,8 @@ fn getCellForce(
             mySlots,
             ip.pos,
             ip.colour,
-            ip.theta,
-            valence[ip.idx.y],
+            ip.orient,
+            valence[ip.idx],
             acc,
         );
     }
@@ -48,16 +48,17 @@ fn getForce(pi: u32) -> ForceResult {
     let mySlots = valence[pi];
     var acc = ForceAccum();
 
-    let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
-    let cymin = i32(floor((p.pos.y - sim.rMax) / sim.cellSize));
-    let cxmax = i32(floor((p.pos.x + sim.rMax) / sim.cellSize));
-    let cymax = i32(floor((p.pos.y + sim.rMax) / sim.cellSize));
+    let worldP = p.pos * sim.worldSize;
+    let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
+    let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
     let numCells = u32(sim.cellAmt);
 
-    for (var cx = cxmin; cx <= cxmax; cx++) {
-        for (var cy = cymin; cy <= cymax; cy++) {
-            let c = hash3i(vec3i(cx, cy, 0)) % numCells;
-            getCellForce(pi, p, sP, mySlots, c, &acc);
+    for (var cx = cmin.x; cx <= cmax.x; cx++) {
+        for (var cy = cmin.y; cy <= cmax.y; cy++) {
+            for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                let c = hash3i(vec3i(cx, cy, cz)) % numCells;
+                getCellForce(pi, p, sP, mySlots, c, &acc);
+            }
         }
     }
 
@@ -66,10 +67,19 @@ fn getForce(pi: u32) -> ForceResult {
 
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x >= arrayLength(&output)) {
+    let pi = global_id.x;
+    if (pi >= arrayLength(&output)) {
         return;
     }
-    let p = input[global_id.x];
-    let res = getForce(global_id.x);
-    output[global_id.x] = integrateParticle(global_id.x, p, res);
+    let p = input[pi];
+    let res = getForce(pi);
+    let windUv = sampleWindTexture(windTex, p.pos);
+    output[pi] = integrateParticle(
+        pi,
+        p,
+        res,
+        windUv,
+        uniforms.flags.w,
+        uniforms.mouseSphere,
+    );
 }

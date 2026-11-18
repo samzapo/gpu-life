@@ -6,6 +6,7 @@ import {
 } from '../utils';
 
 import structsShader from '../shaders/structs.wgsl?raw';
+import projectionShader from '../shaders/projection.wgsl?raw';
 import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
 import cellShader from './cell.wgsl?raw';
 import prefixShader from './prefix.wgsl?raw';
@@ -91,7 +92,7 @@ export function setup(device: GPUDevice) {
   });
 
   const simModule = device.createShaderModule({
-    code: `${structsShader}\n${valenceSimShader}\n${simShader}`,
+    code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'countSim');
@@ -114,6 +115,7 @@ export function start(
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
+  windTexView: GPUTextureView,
 ) {
   if (
     !cellPipeline ||
@@ -131,12 +133,12 @@ export function start(
   zeroBuffer?.destroy();
 
   cellBuffer = device.createBuffer({
-    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
+    size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'cellBuffer',
   });
   sortedBuffer = device.createBuffer({
-    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
+    size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'sortedBuffer',
   });
@@ -223,6 +225,7 @@ export function start(
           { binding: 5, resource: { buffer: sortedBuffer } },
           { binding: 6, resource: { buffer: indicesBuffer } },
           { binding: 7, resource: { buffer: valenceBuffer } },
+          { binding: 8, resource: windTexView },
         ],
       }),
     );

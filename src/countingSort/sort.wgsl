@@ -9,6 +9,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let value = input[global_id.x];
-    let targetIndex = atomicAdd(&offsets[value.idx.x], 1u);
+    let targetIndex = atomicAdd(&offsets[value.cellIdx], 1u);
     output[targetIndex] = value;
 }

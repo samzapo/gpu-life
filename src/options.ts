@@ -1,7 +1,21 @@
+import { Pane } from 'tweakpane';
+import {
+  BindingApi,
+  type BindingParams,
+  type FolderApi,
+} from '@tweakpane/core';
 import { generateRandomSeed } from './matrix';
 import { computeAbundanceDistribution, getElement2D } from './periodicTable2D';
+import {
+  parseNullschoolHash,
+  PROJECTIONS,
+  type ProjectionId,
+} from './earth/projections';
+import { WIND_LEVELS, type WindLevelId } from './earth/windData';
+import { setMouseToolMode } from './input';
 
 const urlParams = new URLSearchParams(window.location.search);
+const parsedHash = parseNullschoolHash(window.location.hash);
 
 function validateURLParam(key: string, defaultValue: number): number;
 function validateURLParam(key: string, defaultValue: string): string;
@@ -28,18 +42,36 @@ export const colourAmt = Math.max(
 );
 const cellAmt = Math.max(
   1,
-  Math.floor(validateURLParam('cellCount', 2000)),
+  Math.floor(validateURLParam('cellCount', 4096)),
 );
 const defaultEngine = validateURLParam('engine', 'prefixSum');
 const defaultRadius = validateURLParam('radius', 12);
-const defaultWorldSize = validateURLParam('worldSize', 4.0);
+const defaultWorldSize = validateURLParam('worldSize', 1.8);
 const defaultTorque = validateURLParam('torque', 22);
 const defaultAngularFriction = validateURLParam('angularFriction', 0.04);
 const defaultValency = validateURLParam('valency', 1.15);
-const defaultTemperature = validateURLParam('temperature', 0.2);
+const defaultTemperature = validateURLParam('temperature', 0.12);
 const defaultActivation = validateURLParam('activation', 0.15);
 const defaultOrbitalSharpness = validateURLParam('orbitalSharpness', 4);
 const defaultSeed = validateURLParam('seed', generateRandomSeed());
+
+const urlProj = validateURLParam('projection', '');
+const initialProjection: ProjectionId =
+  urlProj in PROJECTIONS
+    ? (urlProj as ProjectionId)
+    : parsedHash.projection && parsedHash.projection in PROJECTIONS
+      ? parsedHash.projection
+      : 'orthographic';
+
+const urlLevel = validateURLParam('windLevel', '');
+const initialLevel: WindLevelId =
+  urlLevel in WIND_LEVELS
+    ? (urlLevel as WindLevelId)
+    : parsedHash.level && parsedHash.level in WIND_LEVELS
+      ? (parsedHash.level as WindLevelId)
+      : 'surface';
+
+export const initialOrientation = parsedHash.orientation;
 
 export const params = {
   fps: 0,
@@ -48,6 +80,18 @@ export const params = {
   colours: colourAmt,
   cells: cellAmt,
   seed: defaultSeed,
+};
+
+export const earthParams = {
+  projection: initialProjection,
+  windLevel: initialLevel,
+  vortex: true,
+  windStrength: validateURLParam('windStrength', 1.0),
+  windLines: urlParams.get('windLines') !== 'false',
+  windColors: urlParams.get('windColors') !== 'false',
+  coastlines: urlParams.get('coastlines') !== 'false',
+  mouseTool: 'globe' as 'globe' | 'attract' | 'repel',
+  windStatus: 'Loading GFS…',
 };
 
 export const optionParams = {
@@ -67,8 +111,6 @@ export const optionParams = {
   cells: cellAmt,
   avoidance: 4,
   worldSize: defaultWorldSize,
-  border: true,
-  vortex: false,
 };
 
 export function setSim(
@@ -91,8 +133,8 @@ export function setSim(
   simData[7] = params.cells;
   simData[8] = optionParams.avoidance;
   simData[9] = optionParams.worldSize;
-  simData[10] = optionParams.border ? 1 : 0;
-  simData[11] = optionParams.vortex ? 1 : 0;
+  simData[10] = 0; // border unused on closed sphere
+  simData[11] = earthParams.vortex ? 1 : 0;
   simData[12] = optionParams.torque;
   simData[13] = Math.pow(0.5, dt / angFriction);
   simData[14] = optionParams.valency;
@@ -100,19 +142,11 @@ export function setSim(
   simData[16] = optionParams.activation;
   simData[17] = optionParams.orbitalSharpness;
   simData[18] = frameCount;
-  simData[19] = 0;
+  simData[19] = earthParams.windStrength;
   device.queue.writeBuffer(simBuffer, 0, simData);
 }
 
-import { Pane } from 'tweakpane';
-import {
-  BindingApi,
-  type BindingParams,
-  type FolderApi,
-} from '@tweakpane/core';
-import { isSample } from './input';
-
-const pane = new Pane({ title: 'Complex Life · 2D Chemistry' });
+const pane = new Pane({ title: 'Complex Life · Earth Wind' });
 
 pane.addBinding(params, 'fps', { readonly: true });
 
@@ -125,13 +159,71 @@ export const engineSelect = pane.addBinding(params, 'engine', {
 });
 
 pane.addBinding(params, 'particles', { min: 1, step: 1 });
-
 export const seedInput = pane.addBinding(params, 'seed', { view: 'text' });
 export const newSimBtn = pane.addButton({ title: 'New Sim' });
 export const randomizeBtn = pane.addButton({ title: 'Randomize' });
 
-const constantOptions = ['colours', 'cells'];
+// Earth & Wind folder (emulating earth.nullschool.net projection & wind controls)
+const earthFolder = pane.addFolder({
+  title: 'Earth & Wind',
+  expanded: true,
+});
 
+const projectionOptions: Record<string, ProjectionId> = {};
+for (const key of Object.keys(PROJECTIONS) as ProjectionId[]) {
+  projectionOptions[PROJECTIONS[key].label] = key;
+}
+
+const windLevelOptions: Record<string, WindLevelId> = {};
+for (const key of Object.keys(WIND_LEVELS) as WindLevelId[]) {
+  windLevelOptions[WIND_LEVELS[key].label] = key;
+}
+
+export const projectionSelect = earthFolder.addBinding(earthParams, 'projection', {
+  label: 'proj',
+  options: projectionOptions,
+});
+export const windLevelSelect = earthFolder.addBinding(earthParams, 'windLevel', {
+  label: 'level',
+  options: windLevelOptions,
+});
+export const windMixBinding = earthFolder.addBinding(earthParams, 'vortex', {
+  label: 'windMix',
+});
+export const windStrengthBinding = earthFolder.addBinding(
+  earthParams,
+  'windStrength',
+  { label: 'windForce', min: 0, max: 4, step: 0.05 },
+);
+export const windLinesBinding = earthFolder.addBinding(earthParams, 'windLines');
+export const windColorsBinding = earthFolder.addBinding(
+  earthParams,
+  'windColors',
+);
+export const coastlinesBinding = earthFolder.addBinding(
+  earthParams,
+  'coastlines',
+);
+const mouseToolBinding = earthFolder.addBinding(earthParams, 'mouseTool', {
+  label: 'tool',
+  options: {
+    'Rotate / Pan': 'globe',
+    'Attract Atoms': 'attract',
+    'Repel Atoms': 'repel',
+  },
+});
+mouseToolBinding.on('change', (ev) => {
+  setMouseToolMode(ev.value);
+});
+
+export const windStatusBinding = earthFolder.addBinding(
+  earthParams,
+  'windStatus',
+  { readonly: true, label: 'source' },
+);
+export const resetViewBtn = earthFolder.addButton({ title: 'Reset Globe View' });
+
+const constantOptions = ['colours', 'cells'];
 const constants: Record<string, BindingParams> = {
   colours: { min: 1, max: 62, step: 1 },
   cells: { min: 1, step: 1 },
@@ -149,7 +241,10 @@ for (const param in optionParams) {
   optionBindings[param] = binding;
 }
 
-const optionsFolder = pane.addFolder({ title: 'Options' });
+const optionsFolder = pane.addFolder({
+  title: 'Chemistry Options',
+  expanded: false,
+});
 
 const options: Record<string, BindingParams> = {
   beta: { min: 0.05, max: 0.7 },
@@ -165,7 +260,7 @@ const options: Record<string, BindingParams> = {
   orbitalSharpness: { label: 'lobeFocus', min: 1, max: 12, step: 0.5 },
   showOrbitals: { label: 'showValence' },
   avoidance: { min: 0 },
-  worldSize: { min: 0.01 },
+  worldSize: { label: 'sphereRadius', min: 0.5, max: 5.0 },
 };
 
 for (const param in optionParams) {
@@ -183,10 +278,13 @@ export function bindOptions(
   simData: Float32Array<ArrayBuffer>,
   simBuffer: GPUBuffer,
 ) {
-  for (const param in optionBindings)
+  for (const param in optionBindings) {
     optionBindings[param].on('change', () => {
       setSim(device, simData, simBuffer);
     });
+  }
+  windMixBinding.on('change', () => setSim(device, simData, simBuffer));
+  windStrengthBinding.on('change', () => setSim(device, simData, simBuffer));
 }
 
 // 2D Periodic Table legend folder
@@ -216,8 +314,6 @@ export function updatePeriodicLegend(colourCount: number) {
 }
 
 updatePeriodicLegend(colourAmt);
-
-//
 
 export const performanceParams = {
   countingSort: {
@@ -250,7 +346,7 @@ export const globalPerformanceParams = {
 
 const performanceTimes = pane.addFolder({
   title: 'Performance Times',
-  expanded: !isSample,
+  expanded: false,
 });
 const engineFolders: Record<string, FolderApi> = {};
 

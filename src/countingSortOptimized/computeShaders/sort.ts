@@ -19,7 +19,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Get the current sortParticle
     let value = input[global_id.x];
     // Write at an offset of 1 so result in sim.wgsl is true exclusive prefix sum
-    let targetIndex = atomicAdd(&prefixSumIndices[value.idx.x + 1u], 1u);
+    let targetIndex = atomicAdd(&prefixSumIndices[value.cellIdx + 1u], 1u);
     output[targetIndex] = value;
 }
 `;

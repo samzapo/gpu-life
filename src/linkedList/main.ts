@@ -1,4 +1,5 @@
 import structsShader from '../shaders/structs.wgsl?raw';
+import projectionShader from '../shaders/projection.wgsl?raw';
 import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
 import constructShader from './construct.wgsl?raw';
 import valenceShader from './valence.wgsl?raw';
@@ -54,7 +55,7 @@ export function setup(device: GPUDevice) {
   });
 
   const simModule = device.createShaderModule({
-    code: `${structsShader}\n${valenceSimShader}\n${simShader}`,
+    code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'sim');
@@ -77,6 +78,7 @@ export function start(
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
+  windTexView: GPUTextureView,
 ) {
   if (!constructPipeline || !valencePipeline || !simPipeline) return;
 
@@ -106,7 +108,7 @@ export function start(
   headsInitBuffer.unmap();
 
   linkedListBuffer = device.createBuffer({
-    size: 6 * Float32Array.BYTES_PER_ELEMENT * particleAmt,
+    size: 12 * Float32Array.BYTES_PER_ELEMENT * particleAmt,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'linkedListBuffer',
   });
@@ -153,6 +155,7 @@ export function start(
           { binding: 5, resource: { buffer: headsBuffer } },
           { binding: 6, resource: { buffer: linkedListBuffer } },
           { binding: 7, resource: { buffer: valenceBuffer } },
+          { binding: 8, resource: windTexView },
         ],
       }),
     );

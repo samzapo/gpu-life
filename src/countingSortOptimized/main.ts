@@ -100,6 +100,7 @@ export function start(
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
+  windTexView: GPUTextureView,
 ) {
   if (!cellPipeline || !sortPipeline || !valencePipeline || !simPipeline)
     return;
@@ -111,12 +112,12 @@ export function start(
   zeroBuffer?.destroy();
 
   cellBuffer = device.createBuffer({
-    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
+    size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'cellBuffer',
   });
   sortedBuffer = device.createBuffer({
-    size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
+    size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'sortedBuffer',
   });
@@ -203,6 +204,7 @@ export function start(
           { binding: 6, resource: { buffer: countBuffer } },
           { binding: 7, resource: { buffer: prefixSumBuffer } },
           { binding: 8, resource: { buffer: valenceBuffer } },
+          { binding: 9, resource: windTexView },
         ],
       }),
     );
