@@ -161,6 +161,7 @@ fn accumulateSimNeighbor(
     ipColour: f32,
     ipOrient: vec3f,
     nbSlots: vec4f,
+    actScale: f32,
     acc: ptr<function, ForceAccum>,
 ) {
     let R = max(sim.worldSize, 0.25);
@@ -222,7 +223,7 @@ fn accumulateSimNeighbor(
     if (rNorm >= wellEnd) {
         if (sim.activation > 0.0) {
             let u = (rNorm - wellEnd) / max(1.0 - wellEnd, 1e-4);
-            let fAct = -sim.activation * sin(PI * u);
+            let fAct = -(sim.activation * clamp(actScale, 0.05, 1.0)) * sin(PI * u);
             (*acc).repelForce += dI * fAct;
         }
         return;
@@ -293,26 +294,30 @@ fn integrateParticle(
     windUv: vec3f,
     windStreamMax: f32,
     mouseSphere: vec4f,
+    bioReact: vec4f,
 ) -> Particle {
     var p = pIn;
     let R = max(sim.worldSize, 0.25);
 
     p.vel -= dot(p.vel, p.pos) * p.pos;
     p.vel = p.vel * sim.friction + res.force * sim.dt;
+    p.vel += bioReact.xyz * sim.dt;
 
     p.omega = p.omega * sim.angularFriction + res.torque * sim.dt;
 
     let uBody = orthoBasis(p.pos, p.orient);
     let bBody = cross(p.pos, uBody);
 
+    let actGlow = unpackActGlow(bioReact.w);
+    let tempScale = mix(0.28, 1.0, actGlow.x);
     if (sim.temperature > 0.0) {
         let frame = u32(sim.frame);
         let h1 = hashFloat(pi, frame, 0u) * 2.0 - 1.0;
         let h2 = hashFloat(pi, frame, 1u) * 2.0 - 1.0;
         let h3 = hashFloat(pi, frame, 2u) * 2.0 - 1.0;
         let sqrtDt = sqrt(sim.dt);
-        p.vel += (uBody * h1 + bBody * h2) * (sim.temperature * sim.rMax * sqrtDt * 2.2);
-        p.omega += sim.temperature * h3 * sqrtDt * 12.0;
+        p.vel += (uBody * h1 + bBody * h2) * (sim.temperature * tempScale * sim.rMax * sqrtDt * 2.2);
+        p.omega += sim.temperature * tempScale * h3 * sqrtDt * 12.0;
     }
 
     // Live global atmospheric wind force field ("vortex" mixing across the sphere)
@@ -343,6 +348,7 @@ fn integrateParticle(
     p.pos = stepRes.pos;
     p.vel = stepRes.vel;
     p.orient = stepRes.orient;
+    p._pad = actGlow.y;
 
     return p;
 }

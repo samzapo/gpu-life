@@ -3,6 +3,7 @@ struct ParticleVert {
     @location(1) colour: f32,
     @location(2) orient: vec3f,
     @location(3) slots: vec4f,
+    @location(4) chemGlow: f32,
 }
 
 struct VertexOutput {
@@ -10,6 +11,7 @@ struct VertexOutput {
     @location(0) uv: vec2f,
     @location(1) colour: f32,
     @location(2) slots: vec4f,
+    @location(3) chemGlow: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -36,6 +38,7 @@ fn vertex(
         output.uv = vec2f(0.0);
         output.colour = particle.colour;
         output.slots = particle.slots;
+        output.chemGlow = particle.chemGlow;
         return output;
     }
 
@@ -81,6 +84,7 @@ fn vertex(
     output.uv = corner;
     output.colour = particle.colour;
     output.slots = particle.slots;
+    output.chemGlow = particle.chemGlow;
     return output;
 }
 
@@ -89,6 +93,7 @@ fn fragment(
     @location(0) uv: vec2f,
     @location(1) colour: f32,
     @location(2) slots: vec4f,
+    @location(3) chemGlow: f32,
 ) -> @location(0) vec4f {
     let cIdx = u32(colour);
     let baseCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
@@ -100,7 +105,20 @@ fn fragment(
     if (uniforms.flags.x <= 0.5) {
         let delta = max(fwidth(d), 0.03);
         let alpha = 1.0 - smoothstep(1.0 - delta, 1.0, d);
-        return vec4f(baseCol * alpha, alpha);
+        let energy = clamp(slots.x, 0.0, 1.5);
+        let vit = clamp(slots.y, 0.0, 1.0);
+        let poi = clamp(slots.z, 0.0, 1.0);
+        let vitalityBright = clamp(0.675 + 0.50 * energy + 0.15 * vit, 0.45, 1.35);
+        var lifeCol = min(baseCol * vitalityBright, vec3f(1.0));
+        if (poi > 0.15) {
+            let rim = smoothstep(0.62, 0.92, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
+            lifeCol = mix(lifeCol, vec3f(0.88, 0.25, 0.96), rim);
+        }
+        if (vit > 0.25) {
+            let glowRim = smoothstep(0.70, 0.95, d) * clamp((vit - 0.25) * 0.6, 0.0, 0.45);
+            lifeCol = mix(lifeCol, vec3f(0.32, 0.98, 0.78), glowRim);
+        }
+        return vec4f(lifeCol * alpha, alpha);
     }
 
     let delta = max(fwidth(d), 0.025);
@@ -153,8 +171,18 @@ fn fragment(
         }
     }
 
-    if (outAlpha <= 0.001) {
+    var premulCol = outCol * outAlpha;
+    var finalAlpha = outAlpha;
+    if (abs(chemGlow) > 0.06) {
+        let auraCol = select(vec3f(1.0, 0.50, 0.20), vec3f(0.20, 0.96, 0.78), chemGlow > 0.0);
+        let auraBand = smoothstep(0.42, 0.66, d) * (1.0 - smoothstep(0.66, 0.99, d));
+        let auraA = auraBand * 0.55 * clamp(abs(chemGlow), 0.0, 1.0);
+        premulCol = premulCol + auraCol * auraA * (1.0 - finalAlpha);
+        finalAlpha = finalAlpha + auraA * (1.0 - finalAlpha);
+    }
+
+    if (finalAlpha <= 0.001) {
         discard;
     }
-    return vec4f(outCol * outAlpha, outAlpha);
+    return vec4f(premulCol, finalAlpha);
 }

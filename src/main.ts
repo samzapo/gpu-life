@@ -54,6 +54,8 @@ import {
 } from './utils';
 import {
   bindOptions,
+  bioLinkBinding,
+  bioRateBinding,
   coastlinesBinding,
   colourAmt as colourAmtOptn,
   earthParams,
@@ -77,6 +79,7 @@ import {
   randomizeOceanRulesBtn,
   resetViewBtn,
   seedInput,
+  setBioLink,
   setEngineDisplay,
   setOceanSim,
   setSim,
@@ -119,6 +122,8 @@ const simSize = 20;
 const simData = new Float32Array(simSize);
 const oceanSimSize = 20;
 const oceanSimData = new Float32Array(oceanSimSize);
+const bioUniformFloats = 12;
+const bioUniformData = new Float32Array(bioUniformFloats);
 const frameBuf = new Float32Array(1);
 
 let colourAmt = colourAmtOptn;
@@ -164,18 +169,22 @@ let uniformBuffer: GPUBuffer | undefined;
 let oceanUniformBuffer: GPUBuffer | undefined;
 let simBuffer: GPUBuffer | undefined;
 let oceanSimBuffer: GPUBuffer | undefined;
+let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
 
 let matrixBuffer: GPUBuffer | undefined;
 let colourBuffer: GPUBuffer | undefined;
 let valenceBuffer: GPUBuffer | undefined;
+let airBioReactBuffer: GPUBuffer | undefined;
 let particleBuffers: [GPUBuffer, GPUBuffer] | undefined;
 
 let oceanMatrixBuffer: GPUBuffer | undefined;
 let oceanColourBuffer: GPUBuffer | undefined;
 let oceanValenceBuffer: GPUBuffer | undefined;
+let oceanSteerBuffer: GPUBuffer | undefined;
 let oceanParticleBuffers: [GPUBuffer, GPUBuffer] | undefined;
+let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
@@ -435,12 +444,17 @@ declare global {
       randomizeMatrix: (seed?: string) => void;
       getSeed: () => string;
       getEngine: () => string;
+      setEngine: (name: string) => boolean;
       getParticleCount: () => number;
       getColourCount: () => number;
       getOceanParticleCount: () => number;
       getOceanColourCount: () => number;
       getViewLayer: () => ViewLayerMode;
       setViewLayer: (layer: ViewLayerMode) => void;
+      getBioLink: () => boolean;
+      setBioLink: (on: boolean) => void;
+      getBioRate: () => number;
+      setBioRate: (rate: number) => void;
       setOceanColors: (on: boolean) => void;
       setOceanLines: (on: boolean) => void;
       randomizeOceanMatrix: (seed?: string) => void;
@@ -467,6 +481,8 @@ declare global {
       readParticles: (count?: number) => Promise<number[][]>;
       readOceanParticles: (count?: number) => Promise<number[][]>;
       readValence: (count?: number) => Promise<number[][]>;
+      readOceanState: (count?: number) => Promise<number[][]>;
+      readAirBioReact: (count?: number) => Promise<number[][]>;
     };
   }
 }
@@ -511,16 +527,20 @@ async function readParticleBuffer(
   return out;
 }
 
-async function readValence(count: number = 16): Promise<number[][]> {
-  if (!device || !valenceBuffer) return [];
-  const n = Math.min(count, particleAmt);
+async function readVec4Buffer(
+  buf: GPUBuffer | undefined,
+  totalAmt: number,
+  count: number = 16,
+): Promise<number[][]> {
+  if (!device || !buf) return [];
+  const n = Math.min(count, totalAmt);
   const byteLength = n * valenceStride;
   const staging = device.createBuffer({
     size: byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   const enc = device.createCommandEncoder();
-  enc.copyBufferToBuffer(valenceBuffer, 0, staging, 0, byteLength);
+  enc.copyBufferToBuffer(buf, 0, staging, 0, byteLength);
   device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
   const f32 = new Float32Array(staging.getMappedRange());
@@ -536,6 +556,51 @@ async function readValence(count: number = 16): Promise<number[][]> {
   staging.unmap();
   staging.destroy();
   return out;
+}
+
+function writeNeutralOceanState() {
+  if (!device || !oceanValenceBuffer) return;
+  const neutral = new Float32Array(oceanParticleAmt * 4);
+  for (let i = 0; i < oceanParticleAmt; i++) {
+    neutral[i * 4] = 0.65;
+  }
+  device.queue.writeBuffer(oceanValenceBuffer, 0, neutral);
+}
+
+function resetNeutralBioBuffers(resetMetabolism: boolean = true) {
+  if (!device) return;
+  if (airBioReactBuffer) {
+    device.queue.writeBuffer(airBioReactBuffer, 0, new Float32Array(particleAmt * 4));
+  }
+  if (oceanSteerBuffer) {
+    device.queue.writeBuffer(oceanSteerBuffer, 0, new Float32Array(oceanParticleAmt * 4));
+  }
+  if (resetMetabolism) {
+    writeNeutralOceanState();
+  }
+}
+
+function syncBioUniformState() {
+  if (!device || !bioUniformBuffer) return;
+  const active =
+    earthParams.viewLayer === 'both' && earthParams.bioLink && earthParams.bioRate > 0;
+  setBioLink(device, bioUniformData, bioUniformBuffer, active);
+  if (!active && (bioWasActive || !earthParams.bioLink)) {
+    resetNeutralBioBuffers(!earthParams.bioLink);
+  }
+  bioWasActive = active;
+}
+
+function refreshEngineCrossBio() {
+  if (!device || !bioUniformBuffer || !airBioReactBuffer || !oceanSteerBuffer) return;
+  for (const engineName in engines) {
+    engines[engineName].bindCrossBio(
+      device,
+      bioUniformBuffer,
+      airBioReactBuffer,
+      oceanSteerBuffer,
+    );
+  }
 }
 
 function unitTangentFromSphere(
@@ -580,6 +645,7 @@ function setViewLayerChoice(layer: ViewLayerMode) {
   } else if (layer === 'ocean' && windCtx) {
     windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
   }
+  syncBioUniformState();
   syncUrlHashDebounced();
 }
 
@@ -606,12 +672,32 @@ window.complexLife = {
   },
   getSeed: () => params.seed,
   getEngine: () => engine,
+  setEngine: (name: string) => {
+    if (!(name in engines)) return false;
+    engine = name;
+    params.engine = name;
+    setEngineDisplay(name);
+    engineSelect.refresh();
+    return true;
+  },
   getParticleCount: () => particleAmt,
   getColourCount: () => colourAmt,
   getOceanParticleCount: () => oceanParticleAmt,
   getOceanColourCount: () => oceanColourAmt,
   getViewLayer: () => earthParams.viewLayer,
   setViewLayer: setViewLayerChoice,
+  getBioLink: () => earthParams.bioLink,
+  setBioLink: (on: boolean) => {
+    earthParams.bioLink = on;
+    bioLinkBinding.refresh();
+    syncBioUniformState();
+  },
+  getBioRate: () => earthParams.bioRate,
+  setBioRate: (rate: number) => {
+    earthParams.bioRate = rate;
+    bioRateBinding.refresh();
+    syncBioUniformState();
+  },
   setOceanColors: (on: boolean) => {
     earthParams.oceanColors = on;
     oceanColorsBinding.refresh();
@@ -671,7 +757,11 @@ window.complexLife = {
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readOceanParticles: (count: number = 16) =>
     readParticleBuffer(oceanParticleBuffers, oceanAlternate, oceanParticleAmt, count),
-  readValence,
+  readValence: (count: number = 16) => readVec4Buffer(valenceBuffer, particleAmt, count),
+  readOceanState: (count: number = 16) =>
+    readVec4Buffer(oceanValenceBuffer, oceanParticleAmt, count),
+  readAirBioReact: (count: number = 16) =>
+    readVec4Buffer(airBioReactBuffer, particleAmt, count),
 };
 
 function syncCanvasDimensions() {
@@ -700,9 +790,15 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
       // Non-fatal if coastline JSON fails to load
     });
 
-  const adapter = await navigator.gpu.requestAdapter({
+  let adapter = await navigator.gpu.requestAdapter({
     featureLevel: 'compatibility',
   });
+  for (let retry = 0; retry < 5 && !adapter; retry++) {
+    await new Promise((r) => setTimeout(r, 200));
+    adapter = await navigator.gpu.requestAdapter({
+      featureLevel: 'compatibility',
+    });
+  }
   if (!adapter) return;
 
   device = await requestTimestamps(adapter);
@@ -748,6 +844,11 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     size: oceanSimSize * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'oceanSimBuffer',
+  });
+  bioUniformBuffer = device.createBuffer({
+    size: 64,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    label: 'bioUniformBuffer',
   });
 
   windTexture = device.createTexture({
@@ -824,6 +925,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
             { shaderLocation: 0, offset: 0, format: 'float32x3' },
             { shaderLocation: 1, offset: 12, format: 'float32' },
             { shaderLocation: 2, offset: 32, format: 'float32x3' },
+            { shaderLocation: 4, offset: 44, format: 'float32' },
           ],
         },
         {
@@ -878,7 +980,16 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
 
   startParticles();
   startOceanParticles();
-  bindOptions(device, simData, simBuffer, oceanSimData, oceanSimBuffer);
+  refreshEngineCrossBio();
+  syncBioUniformState();
+  bindOptions(
+    device,
+    simData,
+    simBuffer,
+    oceanSimData,
+    oceanSimBuffer,
+    syncBioUniformState,
+  );
   loadWindLevel(earthParams.windLevel);
 })();
 
@@ -886,19 +997,53 @@ function tick(commandEncoder: GPUCommandEncoder) {
   if (!device) return;
   const runAir = earthParams.viewLayer !== 'ocean';
   const runOcean = earthParams.viewLayer !== 'air';
+  const curEngine = engines[engine];
 
-  if (runAir) {
-    engines[engine].tick(device, commandEncoder, alternate, particleAmt, 'air', true);
-    alternate = (alternate + 1) % 2;
-  }
-  if (runOcean) {
-    engines[engine].tick(
+  if (runAir && runOcean) {
+    curEngine.buildIndex(device, commandEncoder, alternate, particleAmt, 'air', true);
+    curEngine.buildIndex(
       device,
       commandEncoder,
       oceanAlternate,
       oceanParticleAmt,
       'ocean',
-      !runAir,
+      false,
+    );
+    if (earthParams.bioLink && earthParams.bioRate > 0) {
+      curEngine.stepBio(
+        commandEncoder,
+        alternate,
+        oceanAlternate,
+        particleAmt,
+        oceanParticleAmt,
+      );
+    }
+    curEngine.stepSim(device, commandEncoder, alternate, particleAmt, 'air', true);
+    alternate = (alternate + 1) % 2;
+    curEngine.stepSim(
+      device,
+      commandEncoder,
+      oceanAlternate,
+      oceanParticleAmt,
+      'ocean',
+      false,
+    );
+    oceanAlternate = (oceanAlternate + 1) % 2;
+    return;
+  }
+
+  if (runAir) {
+    curEngine.tick(device, commandEncoder, alternate, particleAmt, 'air', true);
+    alternate = (alternate + 1) % 2;
+  }
+  if (runOcean) {
+    curEngine.tick(
+      device,
+      commandEncoder,
+      oceanAlternate,
+      oceanParticleAmt,
+      'ocean',
+      true,
     );
     oceanAlternate = (oceanAlternate + 1) % 2;
   }
@@ -992,6 +1137,7 @@ function startParticles() {
   matrixBuffer?.destroy();
   colourBuffer?.destroy();
   valenceBuffer?.destroy();
+  airBioReactBuffer?.destroy();
 
   refreshChemistryDefinition();
 
@@ -1023,6 +1169,11 @@ function startParticles() {
       GPUBufferUsage.COPY_DST |
       GPUBufferUsage.COPY_SRC,
     label: 'valenceBuffer',
+  });
+  airBioReactBuffer = device.createBuffer({
+    size: particleAmt * valenceStride,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: 'airBioReactBuffer',
   });
 
   alternate = 0;
@@ -1090,8 +1241,11 @@ function startParticles() {
       params.cells,
       windView,
       'air',
+      airBioReactBuffer,
     );
   }
+  refreshEngineCrossBio();
+  syncBioUniformState();
 
   renderBindGroup = device.createBindGroup({
     layout: renderPipeline.getBindGroupLayout(0),
@@ -1122,6 +1276,7 @@ function startOceanParticles() {
   oceanMatrixBuffer?.destroy();
   oceanColourBuffer?.destroy();
   oceanValenceBuffer?.destroy();
+  oceanSteerBuffer?.destroy();
 
   oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
 
@@ -1149,9 +1304,19 @@ function startOceanParticles() {
 
   oceanValenceBuffer = device.createBuffer({
     size: oceanParticleAmt * valenceStride,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    label: 'oceanValenceDummy',
+    usage:
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.VERTEX |
+      GPUBufferUsage.COPY_DST |
+      GPUBufferUsage.COPY_SRC,
+    label: 'oceanStateBuffer',
   });
+  oceanSteerBuffer = device.createBuffer({
+    size: oceanParticleAmt * valenceStride,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: 'oceanSteerBuffer',
+  });
+  writeNeutralOceanState();
 
   oceanAlternate = 0;
   const rng = createSeededRng(`${oceanSeed}:spawn`);
@@ -1220,8 +1385,11 @@ function startOceanParticles() {
       oceanOptionParams.cells,
       oceanView,
       'ocean',
+      oceanSteerBuffer,
     );
   }
+  refreshEngineCrossBio();
+  syncBioUniformState();
 
   oceanRenderBindGroup = device.createBindGroup({
     layout: renderPipeline.getBindGroupLayout(0),
@@ -1443,6 +1611,15 @@ randomizeOceanRulesBtn.on('click', () => {
 
 viewLayerSelect.on('change', (ev) => {
   setViewLayerChoice(ev.value);
+  syncBioUniformState();
+});
+
+bioLinkBinding.on('change', () => {
+  syncBioUniformState();
+});
+
+bioRateBinding.on('change', () => {
+  syncBioUniformState();
 });
 
 projectionSelect.on('change', (ev) => {

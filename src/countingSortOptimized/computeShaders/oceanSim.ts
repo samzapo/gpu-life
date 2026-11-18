@@ -19,6 +19,8 @@ ${oceanSimShader}
 @group(0) @binding(6) var<storage, read> counts: array<u32>;
 @group(0) @binding(7) var<storage, read> prefixSumIndices: array<u32>;
 @group(0) @binding(8) var oceanTex: texture_2d<f32>;
+@group(0) @binding(9) var<storage, read> oceanState: array<vec4f>;
+@group(0) @binding(10) var<storage, read> oceanSteer: array<vec4f>;
 
 fn getOceanCellForce(
     pi: u32,
@@ -83,6 +85,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sim,
         oceanTex,
         uniforms.mouseSphere,
+        oceanState[pi],
+        oceanSteer[pi],
     );
 }
 `;

@@ -111,6 +111,8 @@ export const earthParams = {
   oceanLines: urlParams.get('oceanLines') !== 'false',
   oceanColors: urlParams.get('oceanColors') !== 'false',
   coastlines: urlParams.get('coastlines') !== 'false',
+  bioLink: urlParams.get('bioLink') !== 'false',
+  bioRate: validateURLParam('bioRate', 1.0),
   mouseTool: 'globe' as 'globe' | 'attract' | 'repel',
   windStatus: 'Loading GFS…',
   oceanStatus: 'Loading CoastWatch…',
@@ -152,6 +154,33 @@ export function setOceanSim(
   oceanSimData[10] = earthParams.oceanStrength;
   oceanSimData[11] = earthParams.oceanMix ? 1 : 0;
   device.queue.writeBuffer(oceanSimBuffer, 0, oceanSimData);
+}
+
+export function setBioLink(
+  device: GPUDevice,
+  bioData: Float32Array<ArrayBuffer>,
+  bioBuffer: GPUBuffer,
+  enabled: boolean,
+) {
+  const worldSize = Math.max(optionParams.worldSize, 0.25);
+  const airRMax = 1 / Math.max(optionParams.r, 0.5);
+  const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
+  const catRadius = Math.max(oceanRMax * 1.35, 0.065);
+  const dt = Math.min(Math.max(optionParams.delta, 1e-4), Math.max(oceanOptionParams.delta, 1e-4));
+
+  bioData[0] = enabled && earthParams.bioRate > 0 ? 1 : 0;
+  bioData[1] = earthParams.bioRate;
+  bioData[2] = catRadius;
+  bioData[3] = worldSize;
+  bioData[4] = airRMax * 2;
+  bioData[5] = params.cells;
+  bioData[6] = oceanRMax * 2;
+  bioData[7] = oceanOptionParams.cells;
+  bioData[8] = params.colours;
+  bioData[9] = oceanOptionParams.colours;
+  bioData[10] = dt;
+  bioData[11] = 0;
+  device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
 
 export const optionParams = {
@@ -292,6 +321,15 @@ export const coastlinesBinding = earthFolder.addBinding(
   earthParams,
   'coastlines',
 );
+export const bioLinkBinding = earthFolder.addBinding(earthParams, 'bioLink', {
+  label: 'bioChem',
+});
+export const bioRateBinding = earthFolder.addBinding(earthParams, 'bioRate', {
+  label: 'bioRate',
+  min: 0,
+  max: 3,
+  step: 0.05,
+});
 const mouseToolBinding = earthFolder.addBinding(earthParams, 'mouseTool', {
   label: 'tool',
   options: {
@@ -414,6 +452,7 @@ export function bindOptions(
   simBuffer: GPUBuffer,
   oceanSimData: Float32Array<ArrayBuffer>,
   oceanSimBuffer: GPUBuffer,
+  onBioSync?: () => void,
 ) {
   for (const param in optionBindings) {
     optionBindings[param].on('change', () => {
@@ -421,17 +460,22 @@ export function bindOptions(
       if (param === 'worldSize') {
         setOceanSim(device, oceanSimData, oceanSimBuffer);
       }
+      onBioSync?.();
     });
   }
   windMixBinding.on('change', () => setSim(device, simData, simBuffer));
   windStrengthBinding.on('change', () => setSim(device, simData, simBuffer));
 
   for (const b of oceanParamBindings) {
-    b.on('change', () => setOceanSim(device, oceanSimData, oceanSimBuffer));
+    b.on('change', () => {
+      setOceanSim(device, oceanSimData, oceanSimBuffer);
+      onBioSync?.();
+    });
   }
-  oceanColoursBinding.on('change', () =>
-    setOceanSim(device, oceanSimData, oceanSimBuffer),
-  );
+  oceanColoursBinding.on('change', () => {
+    setOceanSim(device, oceanSimData, oceanSimBuffer);
+    onBioSync?.();
+  });
   oceanMixBinding.on('change', () =>
     setOceanSim(device, oceanSimData, oceanSimBuffer),
   );

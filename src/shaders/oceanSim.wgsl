@@ -62,12 +62,16 @@ fn integrateOceanParticle(
     sim: OceanSim,
     oceanTex: texture_2d<f32>,
     mouseSphere: vec4f,
+    oceanState: vec4f,
+    bioSteer: vec4f,
 ) -> Particle {
     var p = pIn;
     let R = max(sim.worldSize, 0.25);
 
+    let vitality = clamp(0.35 + oceanState.x - oceanState.z * 0.48, 0.15, 1.50);
+    let toxicDrag = max(0.65, 1.0 - 0.22 * oceanState.z);
     p.vel -= dot(p.vel, p.pos) * p.pos;
-    p.vel = p.vel * sim.friction + netForce * sim.dt;
+    p.vel = p.vel * (sim.friction * toxicDrag) + (netForce * vitality + bioSteer.xyz) * sim.dt;
 
     let eEast = sphereEastBasis(p.pos);
     let eNorth = normalize(cross(p.pos, eEast));
@@ -118,5 +122,6 @@ fn integrateOceanParticle(
     p.pos = stepRes.pos;
     p.vel = stepRes.vel;
     p.orient = stepRes.orient;
+    p._pad = clamp(bioSteer.w, -1.0, 1.0);
     return p;
 }

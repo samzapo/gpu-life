@@ -18,12 +18,14 @@ struct LinkedList {
 @group(0) @binding(6) var<storage, read> linkedList: LinkedList;
 @group(0) @binding(7) var<storage, read> valence: array<vec4f>;
 @group(0) @binding(8) var windTex: texture_2d<f32>;
+@group(0) @binding(9) var<storage, read> airBioReact: array<vec4f>;
 
 fn getCellForce(
     pi: u32,
     p: Particle,
     sP: SpeciesInfo,
     mySlots: vec4f,
+    actScale: f32,
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
@@ -44,6 +46,7 @@ fn getCellForce(
                 ip.colour,
                 ip.orient,
                 valence[ip.idx],
+                actScale,
                 acc,
             );
         }
@@ -53,7 +56,7 @@ fn getCellForce(
     }
 }
 
-fn getForce(pi: u32) -> ForceResult {
+fn getForce(pi: u32, actScale: f32) -> ForceResult {
     let p = input[pi];
     let sP = getSpeciesInfo(u32(p.colour));
     let mySlots = valence[pi];
@@ -68,7 +71,7 @@ fn getForce(pi: u32) -> ForceResult {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % headCount;
-                getCellForce(pi, p, sP, mySlots, c, &acc);
+                getCellForce(pi, p, sP, mySlots, actScale, c, &acc);
             }
         }
     }
@@ -83,7 +86,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let p = input[pi];
-    let res = getForce(pi);
+    let bioReact = airBioReact[pi];
+    let actScale = unpackActGlow(bioReact.w).x;
+    let res = getForce(pi, actScale);
     let windUv = sampleWindTexture(windTex, p.pos);
     output[pi] = integrateParticle(
         pi,
@@ -92,5 +97,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         windUv,
         uniforms.flags.w,
         uniforms.mouseSphere,
+        bioReact,
     );
 }

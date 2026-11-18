@@ -1,11 +1,13 @@
 import structsShader from '../../shaders/structs.wgsl?raw';
 import projectionShader from '../../shaders/projection.wgsl?raw';
+import bioChemShader from '../../shaders/bioChem.wgsl?raw';
 import valenceSimShader from '../../shaders/valenceSim.wgsl?raw';
 
 export const valenceComputeShader = (workgroupSize: number) => {
   return /* wgsl */ `
 ${structsShader}
 ${projectionShader}
+${bioChemShader}
 ${valenceSimShader}
 
 @group(0) @binding(1) var<uniform> sim: Sim;

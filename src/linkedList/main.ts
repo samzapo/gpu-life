@@ -1,11 +1,14 @@
 import structsShader from '../shaders/structs.wgsl?raw';
 import projectionShader from '../shaders/projection.wgsl?raw';
+import bioChemShader from '../shaders/bioChem.wgsl?raw';
 import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
 import oceanSimHelperShader from '../shaders/oceanSim.wgsl?raw';
 import constructShader from './construct.wgsl?raw';
 import valenceShader from './valence.wgsl?raw';
 import simShader from './sim.wgsl?raw';
 import oceanSimShader from './oceanSim.wgsl?raw';
+import bioAirShader from './bioAir.wgsl?raw';
+import bioOceanShader from './bioOcean.wgsl?raw';
 import {
   linkComputeTimestamp,
   readTimestamp,
@@ -19,17 +22,31 @@ interface LinkedListSlotState {
   headsBuffer: GPUBuffer;
   headsInitBuffer: GPUBuffer;
   linkedListBuffer: GPUBuffer;
+  matrixBuffer: GPUBuffer;
+  valenceBuffer: GPUBuffer;
+  particleBuffers: [GPUBuffer, GPUBuffer];
   constructBindGroups: [GPUBindGroup, GPUBindGroup];
   valenceBindGroups?: [GPUBindGroup, GPUBindGroup];
   simBindGroups: [GPUBindGroup, GPUBindGroup];
+}
+
+interface BioRefs {
+  bioUniformBuffer: GPUBuffer;
+  airBioReactBuffer: GPUBuffer;
+  oceanSteerBuffer: GPUBuffer;
 }
 
 let constructPipeline: GPUComputePipeline | undefined;
 let valencePipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
 let oceanSimPipeline: GPUComputePipeline | undefined;
+let bioAirPipeline: GPUComputePipeline | undefined;
+let bioOceanPipeline: GPUComputePipeline | undefined;
 
 const slots: Partial<Record<SimSlot, LinkedListSlotState>> = {};
+let bioRefs: BioRefs | undefined;
+let bioAirBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
+let bioOceanBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 
 const workgroupSize = 64;
 
@@ -57,7 +74,7 @@ export function setup(device: GPUDevice) {
     layout: 'auto',
     compute: {
       module: device.createShaderModule({
-        code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${valenceShader}`,
+        code: `${structsShader}\n${projectionShader}\n${bioChemShader}\n${valenceSimShader}\n${valenceShader}`,
       }),
       entryPoint: 'main',
     },
@@ -68,7 +85,7 @@ export function setup(device: GPUDevice) {
     layout: 'auto',
     compute: {
       module: device.createShaderModule({
-        code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${simShader}`,
+        code: `${structsShader}\n${projectionShader}\n${bioChemShader}\n${valenceSimShader}\n${simShader}`,
       }),
       entryPoint: 'main',
     },
@@ -83,6 +100,78 @@ export function setup(device: GPUDevice) {
       entryPoint: 'main',
     },
   });
+
+  bioAirPipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: device.createShaderModule({
+        code: `${structsShader}\n${projectionShader}\n${bioChemShader}\n${bioAirShader}`,
+      }),
+      entryPoint: 'main',
+    },
+  });
+
+  bioOceanPipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: device.createShaderModule({
+        code: `${structsShader}\n${projectionShader}\n${bioChemShader}\n${bioOceanShader}`,
+      }),
+      entryPoint: 'main',
+    },
+  });
+}
+
+function rebuildBioBindGroups(device: GPUDevice) {
+  const air = slots.air;
+  const ocean = slots.ocean;
+  if (!air || !ocean || !bioRefs || !bioAirPipeline || !bioOceanPipeline) {
+    bioAirBindGroups = undefined;
+    bioOceanBindGroups = undefined;
+    return;
+  }
+
+  bioAirBindGroups = [0, 1].map((i) =>
+    device.createBindGroup({
+      layout: bioAirPipeline!.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: bioRefs!.bioUniformBuffer } },
+        { binding: 1, resource: { buffer: air.matrixBuffer } },
+        { binding: 2, resource: { buffer: air.particleBuffers[i] } },
+        { binding: 3, resource: { buffer: air.valenceBuffer } },
+        { binding: 4, resource: { buffer: ocean.headsBuffer } },
+        { binding: 5, resource: { buffer: ocean.linkedListBuffer } },
+        { binding: 6, resource: { buffer: ocean.valenceBuffer } },
+        { binding: 7, resource: { buffer: bioRefs!.airBioReactBuffer } },
+      ],
+    }),
+  ) as [GPUBindGroup, GPUBindGroup];
+
+  bioOceanBindGroups = [0, 1].map((i) =>
+    device.createBindGroup({
+      layout: bioOceanPipeline!.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: bioRefs!.bioUniformBuffer } },
+        { binding: 1, resource: { buffer: air.matrixBuffer } },
+        { binding: 2, resource: { buffer: air.valenceBuffer } },
+        { binding: 3, resource: { buffer: air.headsBuffer } },
+        { binding: 4, resource: { buffer: air.linkedListBuffer } },
+        { binding: 5, resource: { buffer: ocean.particleBuffers[i] } },
+        { binding: 6, resource: { buffer: ocean.valenceBuffer } },
+        { binding: 7, resource: { buffer: bioRefs!.oceanSteerBuffer } },
+      ],
+    }),
+  ) as [GPUBindGroup, GPUBindGroup];
+}
+
+export function bindCrossBio(
+  device: GPUDevice,
+  bioUniformBuffer: GPUBuffer,
+  airBioReactBuffer: GPUBuffer,
+  oceanSteerBuffer: GPUBuffer,
+) {
+  bioRefs = { bioUniformBuffer, airBioReactBuffer, oceanSteerBuffer };
+  rebuildBioBindGroups(device);
 }
 
 export function start(
@@ -96,6 +185,7 @@ export function start(
   cellAmt: number,
   fieldTexView: GPUTextureView,
   slot: SimSlot = 'air',
+  bioSideBuffer?: GPUBuffer,
 ) {
   if (!constructPipeline || !valencePipeline || !simPipeline || !oceanSimPipeline) {
     return;
@@ -175,6 +265,7 @@ export function start(
             { binding: 6, resource: { buffer: linkedListBuffer } },
             { binding: 7, resource: { buffer: valenceBuffer } },
             { binding: 8, resource: fieldTexView },
+            { binding: 9, resource: { buffer: bioSideBuffer! } },
           ],
         }),
       );
@@ -194,6 +285,8 @@ export function start(
             { binding: 5, resource: { buffer: headsBuffer } },
             { binding: 6, resource: { buffer: linkedListBuffer } },
             { binding: 7, resource: fieldTexView },
+            { binding: 8, resource: { buffer: valenceBuffer } },
+            { binding: 9, resource: { buffer: bioSideBuffer! } },
           ],
         }),
       );
@@ -204,13 +297,18 @@ export function start(
     headsBuffer,
     headsInitBuffer,
     linkedListBuffer,
+    matrixBuffer,
+    valenceBuffer,
+    particleBuffers,
     constructBindGroups: [constructGroups[0], constructGroups[1]],
     valenceBindGroups,
     simBindGroups: [simGroups[0], simGroups[1]],
   };
+
+  rebuildBioBindGroups(device);
 }
 
-export function tick(
+export function buildIndex(
   device: GPUDevice,
   commandEncoder: GPUCommandEncoder,
   alternate: number,
@@ -219,7 +317,7 @@ export function tick(
   profile: boolean = slot === 'air',
 ) {
   const s = slots[slot];
-  if (!s || !constructPipeline || !valencePipeline || !simPipeline || !oceanSimPipeline) {
+  if (!s || !constructPipeline || !valencePipeline) {
     return;
   }
 
@@ -243,7 +341,47 @@ export function tick(
     valencePass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
     valencePass.end();
     if (profile) resolveTimestamp(commandEncoder, 'llValence');
+  }
+}
 
+export function stepBio(
+  commandEncoder: GPUCommandEncoder,
+  airAlt: number,
+  oceanAlt: number,
+  airAmt: number,
+  oceanAmt: number,
+) {
+  if (!bioAirPipeline || !bioOceanPipeline || !bioAirBindGroups || !bioOceanBindGroups) {
+    return;
+  }
+
+  const airBioPass = commandEncoder.beginComputePass({});
+  airBioPass.setPipeline(bioAirPipeline);
+  airBioPass.setBindGroup(0, bioAirBindGroups[airAlt]);
+  airBioPass.dispatchWorkgroups(Math.ceil(airAmt / workgroupSize));
+  airBioPass.end();
+
+  const oceanBioPass = commandEncoder.beginComputePass({});
+  oceanBioPass.setPipeline(bioOceanPipeline);
+  oceanBioPass.setBindGroup(0, bioOceanBindGroups[oceanAlt]);
+  oceanBioPass.dispatchWorkgroups(Math.ceil(oceanAmt / workgroupSize));
+  oceanBioPass.end();
+}
+
+export function stepSim(
+  device: GPUDevice,
+  commandEncoder: GPUCommandEncoder,
+  alternate: number,
+  particleAmt: number,
+  slot: SimSlot = 'air',
+  profile: boolean = slot === 'air',
+) {
+  const s = slots[slot];
+  if (!s || !simPipeline || !oceanSimPipeline) {
+    return;
+  }
+
+  if (slot === 'air') {
     const simPass = commandEncoder.beginComputePass(
       profile ? linkComputeTimestamp(device, 'sim') : {},
     );
@@ -262,6 +400,18 @@ export function tick(
     oceanPass.end();
     if (profile) resolveTimestamp(commandEncoder, 'sim');
   }
+}
+
+export function tick(
+  device: GPUDevice,
+  commandEncoder: GPUCommandEncoder,
+  alternate: number,
+  particleAmt: number,
+  slot: SimSlot = 'air',
+  profile: boolean = slot === 'air',
+) {
+  buildIndex(device, commandEncoder, alternate, particleAmt, slot, profile);
+  stepSim(device, commandEncoder, alternate, particleAmt, slot, profile);
 }
 
 export function updateDisplays(params: Record<string, number>) {
