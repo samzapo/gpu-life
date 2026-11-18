@@ -536,16 +536,47 @@ fn invertUnitPos(
     return vec4f(normalize(rotateFromView(u, v)), 1.0);
 }
 
-// Flat-field optical magnifying lens (`mag` constant inside `u <= 0.24`, monotonic C^1 transition to `1.0` at `u = 1.0`).
-fn lensMagScale(mag: f32, u: f32) -> f32 {
+// Strictly monotonic C^1 flat-field optical magnifying lens:
+// Constant `mag` inside `u <= 0.22`, Hermite transition on `[0.22, 1.0]` with `dr_out/du > +0.25` everywhere (no fold).
+fn lensRadialMap(mag: f32, u: f32) -> vec2f {
+    let m = clamp(mag, 1.0, 2.15);
+    if (u <= 0.0) {
+        return vec2f(0.0, m);
+    }
+    if (u >= 1.0) {
+        return vec2f(1.0, 1.0);
+    }
+    let uc = 0.22;
+    if (u <= uc) {
+        return vec2f(m * u, m);
+    }
+    let du = 1.0 - uc;
+    let rStart = m * uc;
+    let dr = 1.0 - rStart;
+    let t = (u - uc) / du;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let m0 = (m * du) / dr;
+    let m1 = du / dr;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    let rOut = rStart + dr * (h10 * m0 + h01 + h11 * m1);
+    let dh = (3.0 * t2 - 4.0 * t + 1.0) * m0 + (6.0 * t - 6.0 * t2) + (3.0 * t2 - 2.0 * t) * m1;
+    return vec2f(rOut, (dr / du) * dh);
+}
+
+fn lensParticleScale(mag: f32, u: f32) -> f32 {
     if (u >= 1.0) {
         return 1.0;
     }
     let uc = max(u, 0.0);
-    let t = clamp((uc - 0.24) / 0.76, 0.0, 1.0);
-    let blend = 1.0 - t * t * (3.0 - 2.0 * t);
-    let k = clamp(mag - 1.0, 0.0, 1.25);
-    return 1.0 + k * blend;
+    let rm = lensRadialMap(mag, uc);
+    if (uc <= 0.22) {
+        return clamp(mag, 1.0, 2.15);
+    }
+    let tanScale = rm.x / max(uc, 1e-4);
+    return clamp(mix(tanScale, rm.y, 0.45), 0.72, clamp(mag, 1.0, 2.15));
 }
 
 fn applyLensForward(u: Uniforms, pScreen: vec2f) -> vec2f {
@@ -560,8 +591,8 @@ fn applyLensForward(u: Uniforms, pScreen: vec2f) -> vec2f {
     if (dist <= 1e-4 || dist >= rLens) {
         return pScreen;
     }
-    let s = lensMagScale(mag, dist / rLens);
-    return center + d * s;
+    let rm = lensRadialMap(mag, dist / rLens);
+    return center + d * (rm.x * (rLens / dist));
 }
 
 fn applyLensInverse(u: Uniforms, pOut: vec2f) -> vec2f {
@@ -577,15 +608,12 @@ fn applyLensInverse(u: Uniforms, pOut: vec2f) -> vec2f {
         return pOut;
     }
     let uOut = dist / rLens;
-    let k = clamp(mag - 1.0, 0.0, 1.25);
-    var uIn = clamp(uOut / (1.0 + k), 0.0, 1.0);
+    let m = clamp(mag, 1.0, 2.15);
+    var uIn = clamp(uOut / m, 0.0, 1.0);
     for (var it = 0u; it < 5u; it++) {
-        let t = clamp((uIn - 0.24) / 0.76, 0.0, 1.0);
-        let blend = 1.0 - t * t * (3.0 - 2.0 * t);
-        let dBlend = select(0.0, (-6.0 * t * (1.0 - t)) / 0.76, uIn > 0.24 && uIn < 1.0);
-        let fVal = uIn * (1.0 + k * blend) - uOut;
-        let dfVal = 1.0 + k * blend + k * uIn * dBlend;
-        uIn = clamp(uIn - fVal / max(dfVal, 0.12), 0.0, 1.0);
+        let rm = lensRadialMap(m, uIn);
+        let fVal = rm.x - uOut;
+        uIn = clamp(uIn - fVal / max(rm.y, 0.2), 0.0, 1.0);
     }
     return center + d * (uIn / uOut);
 }

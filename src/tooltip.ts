@@ -49,6 +49,25 @@ export interface TooltipLensState {
   mag: number;
 }
 
+export interface TooltipLensGpuConfig {
+  kind: 0 | 1 | 2;
+  idx: number;
+  radius: number;
+  mag: number;
+  color: [number, number, number, number];
+  generation: number;
+}
+
+const LENS_THEME_COLORS: Record<TooltipTheme, [number, number, number, number]> = {
+  menu: [0.57, 0.76, 1.0, 1.0],
+  chem: [0.57, 0.76, 1.0, 1.0],
+  anabolic: [0.20, 0.91, 0.72, 1.0],
+  catabolic: [1.0, 0.57, 0.28, 1.0],
+  toxic: [0.89, 0.34, 0.98, 1.0],
+  cofactor: [0.35, 0.88, 1.0, 1.0],
+  ocean: [0.22, 0.74, 0.97, 1.0],
+};
+
 export interface TooltipContent {
   theme: TooltipTheme;
   badge: string;
@@ -578,8 +597,17 @@ export class TooltipManager {
   private lensActive = false;
   private lensX = 0;
   private lensY = 0;
-  private lensRadius = 82;
-  private readonly lensMag = 2.2;
+  private lensRadius = 64;
+  private readonly lensMag = 2.0;
+  private lensTheme: TooltipTheme = 'chem';
+  private lensGeneration = 0;
+  private gpuLensSynced = false;
+  private offGlobeStreak = 0;
+  private tipAnchorX = 0;
+  private tipAnchorY = 0;
+  private tipAnchorInit = false;
+  private lastTickAt = 0;
+  private lastInfo: TooltipContent | null = null;
   private hoverX = 0;
   private hoverY = 0;
   private cachedSnapshot: HoverSimSnapshot | null = null;
@@ -620,6 +648,46 @@ export class TooltipManager {
       radius: this.lensRadius,
       mag: this.lensMag,
     };
+  }
+
+  public getLensGpuConfig(): TooltipLensGpuConfig {
+    const kind: 0 | 1 | 2 =
+      !this.lensActive || !this.pinnedTarget
+        ? 0
+        : this.pinnedTarget.type === 'air'
+          ? 1
+          : 2;
+    return {
+      kind,
+      idx: this.pinnedTarget?.idx ?? 0,
+      radius: this.lensActive ? this.lensRadius : 0,
+      mag: this.lensActive ? this.lensMag : 1.0,
+      color: LENS_THEME_COLORS[this.lensTheme] ?? LENS_THEME_COLORS.chem,
+      generation: this.lensGeneration,
+    };
+  }
+
+  public syncGpuLensPos(cx: number, cy: number, visibleOnGlobe: boolean): void {
+    if (!this.lensActive || !this.touchPinned) return;
+    if (!visibleOnGlobe) {
+      this.offGlobeStreak++;
+      if (this.gpuLensSynced && this.offGlobeStreak >= 4) {
+        this.hide();
+      }
+      return;
+    }
+    this.offGlobeStreak = 0;
+    this.gpuLensSynced = true;
+    this.lensX = cx;
+    this.lensY = cy;
+    this.hoverX = cx;
+    this.hoverY = cy;
+    if (!this.tipAnchorInit) {
+      this.tipAnchorX = cx;
+      this.tipAnchorY = cy;
+      this.tipAnchorInit = true;
+    }
+    this.syncLensDom(this.lensTheme);
   }
 
   public isTouchPinned(): boolean {
@@ -877,7 +945,16 @@ export class TooltipManager {
     this.lensRadius = this.computeLensRadius();
     this.lensX = cx;
     this.lensY = cy;
+    this.tipAnchorX = cx;
+    this.tipAnchorY = cy;
+    this.tipAnchorInit = true;
+    this.lastTickAt = performance.now();
+    this.lensTheme = info.theme;
+    this.lastInfo = info;
     this.lensActive = true;
+    this.gpuLensSynced = false;
+    this.offGlobeStreak = 0;
+    this.lensGeneration++;
     this.hoverX = cx;
     this.hoverY = cy;
     this.syncLensDom(info.theme);
@@ -894,10 +971,9 @@ export class TooltipManager {
     }
     const d = Math.round(this.lensRadius * 2);
     lensEl.dataset.theme = theme;
-    lensEl.style.left = `${Math.round(this.lensX)}px`;
-    lensEl.style.top = `${Math.round(this.lensY)}px`;
     lensEl.style.width = `${d}px`;
     lensEl.style.height = `${d}px`;
+    lensEl.style.transform = `translate3d(${this.lensX.toFixed(2)}px, ${this.lensY.toFixed(2)}px, 0) translate(-50%, -50%)`;
     lensEl.classList.add('visible');
     lensEl.setAttribute('aria-hidden', 'false');
   }
@@ -917,7 +993,18 @@ export class TooltipManager {
 
     const isTouch = this.touchPinned;
     const now = performance.now();
-    const intervalMs = isTouch ? 110 : 200;
+    const dtSec = this.lastTickAt > 0 ? Math.min(0.08, Math.max(0.001, (now - this.lastTickAt) / 1000)) : 1 / 60;
+    this.lastTickAt = now;
+
+    // Smoothly track #hoverTooltip toward GPU lens position every frame via sub-pixel translate3d
+    if (isTouch && this.lensActive && this.lastInfo) {
+      const alpha = 1 - Math.exp(-dtSec * 12.0);
+      this.tipAnchorX += (this.lensX - this.tipAnchorX) * alpha;
+      this.tipAnchorY += (this.lensY - this.tipAnchorY) * alpha;
+      this.renderCard(this.lastInfo, this.tipAnchorX, this.tipAnchorY, null, true, true);
+    }
+
+    const intervalMs = isTouch ? 350 : 200;
     if (!this.snapshotPromise && now - this.lastSampleTime >= intervalMs) {
       void this.ensureSnapshot().then((snap) => {
         if (
@@ -971,8 +1058,7 @@ export class TooltipManager {
       isTouch,
       isTouch ? this.pinnedTarget : null,
     );
-    if (!info && isTouch && this.pinnedTarget) {
-      // Target rotated/wrapped out of pinned index or bounds; probe once near last lens spot
+    if (!info && isTouch && this.pinnedTarget && !this.gpuLensSynced) {
       info = analyzeReactionAt(
         this.lensX,
         this.lensY,
@@ -984,6 +1070,7 @@ export class TooltipManager {
       );
       if (info && info.targetType !== undefined && info.targetIdx !== undefined) {
         this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+        this.lensGeneration++;
       }
     }
     if (!info) {
@@ -995,16 +1082,27 @@ export class TooltipManager {
 
     if (isTouch) {
       this.lensRadius = this.computeLensRadius();
-      this.lensX = info.targetX ?? clientX;
-      this.lensY = info.targetY ?? clientY;
-      this.hoverX = this.lensX;
-      this.hoverY = this.lensY;
+      this.lensTheme = info.theme;
+      this.lastInfo = info;
+      if (!this.gpuLensSynced) {
+        this.lensX = info.targetX ?? clientX;
+        this.lensY = info.targetY ?? clientY;
+        this.hoverX = this.lensX;
+        this.hoverY = this.lensY;
+      }
       this.lensActive = true;
       if (info.targetType !== undefined && info.targetIdx !== undefined) {
-        this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+        if (
+          !this.pinnedTarget ||
+          this.pinnedTarget.type !== info.targetType ||
+          this.pinnedTarget.idx !== info.targetIdx
+        ) {
+          this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+          this.lensGeneration++;
+        }
       }
       this.syncLensDom(info.theme);
-      this.renderCard(info, this.lensX, this.lensY, null, true);
+      this.renderCard(info, this.tipAnchorX, this.tipAnchorY, null, true);
     } else {
       this.renderCard(info, clientX, clientY, null, false);
     }
@@ -1016,23 +1114,26 @@ export class TooltipManager {
     clientY: number,
     menuRowEl: HTMLElement | null,
     isTouch: boolean = false,
+    repositionOnly: boolean = false,
   ): void {
     const el = this.el;
     if (!el) return;
 
-    const html =
-      `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span></div>` +
-      `<div class="tip-title">${escapeHtml(info.title)}</div>` +
-      `<div class="tip-body">${escapeHtml(info.body)}</div>` +
-      (info.meta ? `<div class="tip-meta">${escapeHtml(info.meta)}</div>` : '');
+    if (!repositionOnly) {
+      const html =
+        `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span></div>` +
+        `<div class="tip-title">${escapeHtml(info.title)}</div>` +
+        `<div class="tip-body">${escapeHtml(info.body)}</div>` +
+        (info.meta ? `<div class="tip-meta">${escapeHtml(info.meta)}</div>` : '');
 
-    if (html !== this.lastHtml) {
-      el.innerHTML = html;
-      this.lastHtml = html;
+      if (html !== this.lastHtml) {
+        el.innerHTML = html;
+        this.lastHtml = html;
+      }
+      el.dataset.theme = info.theme;
+      el.classList.add('visible');
+      el.setAttribute('aria-hidden', 'false');
     }
-    el.dataset.theme = info.theme;
-    el.classList.add('visible');
-    el.setAttribute('aria-hidden', 'false');
 
     const pad = 10;
     const vw = window.innerWidth;
@@ -1080,8 +1181,9 @@ export class TooltipManager {
       }
     }
 
-    el.style.left = `${Math.max(pad, Math.min(vw - tipW - pad, Math.round(left)))}px`;
-    el.style.top = `${Math.max(pad, Math.min(vh - tipH - pad, Math.round(top)))}px`;
+    const clampedL = Math.max(pad, Math.min(vw - tipW - pad, left));
+    const clampedT = Math.max(pad, Math.min(vh - tipH - pad, top));
+    el.style.transform = `translate3d(${clampedL.toFixed(2)}px, ${clampedT.toFixed(2)}px, 0)`;
   }
 
   public hide(): void {
@@ -1089,7 +1191,12 @@ export class TooltipManager {
     this.touchPinned = false;
     this.pinnedTarget = null;
     this.lensActive = false;
+    this.gpuLensSynced = false;
+    this.offGlobeStreak = 0;
+    this.tipAnchorInit = false;
+    this.lastInfo = null;
     this.pendingTap = null;
+    this.lensGeneration++;
     this.syncLensDom('chem');
     if (!el) return;
     if (this.mode !== 'none' || el.classList.contains('visible')) {

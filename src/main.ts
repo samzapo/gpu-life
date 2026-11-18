@@ -12,6 +12,8 @@ import {
 import structsShader from './shaders/structs.wgsl?raw';
 import projectionShader from './shaders/projection.wgsl?raw';
 import bgRenderShader from './shaders/bgRender.wgsl?raw';
+import lensTrackShader from './shaders/lensTrack.wgsl?raw';
+import lensOverlayShader from './shaders/lensOverlay.wgsl?raw';
 import renderShader from './render.wgsl?raw';
 import {
   buildConfiguredD3Projection,
@@ -226,6 +228,26 @@ let watermanInvTexture: GPUTexture | undefined;
 let bgBindGroup: GPUBindGroup | undefined;
 let renderBindGroup: GPUBindGroup | undefined;
 let oceanRenderBindGroup: GPUBindGroup | undefined;
+
+let lensTrackPipeline: GPUComputePipeline | undefined;
+let lensOverlayPipeline: GPURenderPipeline | undefined;
+let lensTrackUniformBuffer: GPUBuffer | undefined;
+let lensGpuStateBuffer: GPUBuffer | undefined;
+let lensOverlayBindGroup: GPUBindGroup | undefined;
+const lensTrackBindGroups: [
+  [GPUBindGroup | undefined, GPUBindGroup | undefined],
+  [GPUBindGroup | undefined, GPUBindGroup | undefined],
+] = [
+  [undefined, undefined],
+  [undefined, undefined],
+];
+const lensTrackUniformData = new Float32Array(12);
+let prevGpuLensGen = -1;
+let prevGpuLensViewSig = '';
+let lensReadbackBuffers: [GPUBuffer, GPUBuffer] | undefined;
+const lensReadbackInFlight: [boolean, boolean] = [false, false];
+let lensReadbackToggle = 0;
+let pendingLensReadbackIdx: number | null = null;
 
 let alternate = 0;
 let oceanAlternate = 0;
@@ -1490,6 +1512,85 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     primitive: { topology: 'triangle-strip' },
   });
 
+  lensTrackUniformBuffer = device.createBuffer({
+    size: 48,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    label: 'lensTrackUniformBuffer',
+  });
+  lensGpuStateBuffer = device.createBuffer({
+    size: 32,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    label: 'lensGpuStateBuffer',
+  });
+  device.queue.writeBuffer(
+    lensGpuStateBuffer,
+    0,
+    new Float32Array([0, 0, 0, 1, 0, 0, 0, 0]),
+  );
+  lensReadbackBuffers = [
+    device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'lensReadbackBuffer0',
+    }),
+    device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'lensReadbackBuffer1',
+    }),
+  ];
+
+  const lensTrackModule = device.createShaderModule({
+    code: `${structsShader}\n${projectionShader}\n${lensTrackShader}`,
+  });
+  lensTrackPipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: lensTrackModule,
+      entryPoint: 'main',
+    },
+  });
+
+  const lensOverlayModule = device.createShaderModule({
+    code: `${structsShader}\n${lensOverlayShader}`,
+  });
+  lensOverlayPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: lensOverlayModule,
+      entryPoint: 'vertex',
+    },
+    fragment: {
+      module: lensOverlayModule,
+      entryPoint: 'fragment',
+      targets: [
+        {
+          format: presentationFormat,
+          blend: {
+            color: {
+              srcFactor: 'one',
+              dstFactor: 'one-minus-src-alpha',
+              operation: 'add',
+            },
+            alpha: {
+              srcFactor: 'one',
+              dstFactor: 'one-minus-src-alpha',
+              operation: 'add',
+            },
+          },
+        },
+      ],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+  lensOverlayBindGroup = device.createBindGroup({
+    layout: lensOverlayPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: lensTrackUniformBuffer } },
+    ],
+  });
+
   syncCanvasDimensions();
   updateProjectionState();
   setupTimestamp(device, 'render');
@@ -1583,6 +1684,107 @@ function tick(commandEncoder: GPUCommandEncoder) {
   }
 }
 
+function rebuildLensTrackBindGroups() {
+  if (
+    !device ||
+    !lensTrackPipeline ||
+    !uniformBuffer ||
+    !watermanFwdTexture ||
+    !lensTrackUniformBuffer ||
+    !lensGpuStateBuffer ||
+    !particleBuffers ||
+    !oceanParticleBuffers
+  )
+    return;
+
+  const fwdView = watermanFwdTexture.createView();
+  for (let ai = 0; ai < 2; ai++) {
+    for (let oi = 0; oi < 2; oi++) {
+      lensTrackBindGroups[ai][oi] = device.createBindGroup({
+        layout: lensTrackPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: fwdView },
+          { binding: 2, resource: { buffer: lensTrackUniformBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[ai] } },
+          { binding: 4, resource: { buffer: oceanParticleBuffers[oi] } },
+          { binding: 5, resource: { buffer: lensGpuStateBuffer } },
+        ],
+      });
+    }
+  }
+}
+
+function updateGpuLens(commandEncoder: GPUCommandEncoder, frameDtMs: number) {
+  pendingLensReadbackIdx = null;
+  if (
+    !device ||
+    !uniformBuffer ||
+    !oceanUniformBuffer ||
+    !lensTrackPipeline ||
+    !lensTrackUniformBuffer ||
+    !lensGpuStateBuffer
+  ) {
+    return;
+  }
+
+  const bg = lensTrackBindGroups[alternate]?.[oceanAlternate];
+  if (!bg) return;
+
+  const cfg = tooltipManager.getLensGpuConfig();
+  const snapNow =
+    cfg.generation !== prevGpuLensGen || viewSignature !== prevGpuLensViewSig;
+  prevGpuLensGen = cfg.generation;
+  prevGpuLensViewSig = viewSignature;
+
+  const dtSec = Math.min(0.08, Math.max(0.001, frameDtMs / 1000));
+  const smoothAlpha = Math.min(0.45, Math.max(0.14, 1 - Math.exp(-dtSec * 14.0)));
+
+  lensTrackUniformData[0] = cfg.kind;
+  lensTrackUniformData[1] = cfg.idx;
+  lensTrackUniformData[2] = cfg.radius;
+  lensTrackUniformData[3] = cfg.mag;
+  lensTrackUniformData[4] = snapNow ? 1 : 0;
+  lensTrackUniformData[5] = smoothAlpha;
+  lensTrackUniformData[6] = 0;
+  lensTrackUniformData[7] = 0;
+  lensTrackUniformData[8] = cfg.color[0];
+  lensTrackUniformData[9] = cfg.color[1];
+  lensTrackUniformData[10] = cfg.color[2];
+  lensTrackUniformData[11] = cfg.color[3];
+  device.queue.writeBuffer(lensTrackUniformBuffer, 0, lensTrackUniformData);
+
+  const cPass = commandEncoder.beginComputePass();
+  cPass.setPipeline(lensTrackPipeline);
+  cPass.setBindGroup(0, bg);
+  cPass.dispatchWorkgroups(1);
+  cPass.end();
+
+  commandEncoder.copyBufferToBuffer(lensGpuStateBuffer, 0, uniformBuffer, 32 * 4, 16);
+  commandEncoder.copyBufferToBuffer(
+    lensGpuStateBuffer,
+    0,
+    oceanUniformBuffer,
+    32 * 4,
+    16,
+  );
+
+  if (cfg.kind > 0 && lensReadbackBuffers) {
+    const slot = lensReadbackToggle;
+    if (!lensReadbackInFlight[slot]) {
+      commandEncoder.copyBufferToBuffer(
+        lensGpuStateBuffer,
+        0,
+        lensReadbackBuffers[slot],
+        0,
+        16,
+      );
+      pendingLensReadbackIdx = slot;
+      lensReadbackToggle = (slot + 1) % 2;
+    }
+  }
+}
+
 function render(commandEncoder: GPUCommandEncoder) {
   if (
     !device ||
@@ -1649,6 +1851,12 @@ function render(commandEncoder: GPUCommandEncoder) {
     passEncoder.setVertexBuffer(1, valenceBuffer);
     passEncoder.setBindGroup(0, renderBindGroup);
     passEncoder.draw(6, particleAmt, 0, 0);
+  }
+
+  if (lensOverlayPipeline && lensOverlayBindGroup) {
+    passEncoder.setPipeline(lensOverlayPipeline);
+    passEncoder.setBindGroup(0, lensOverlayBindGroup);
+    passEncoder.draw(3, 1, 0, 0);
   }
 
   passEncoder.end();
@@ -1792,6 +2000,7 @@ function startParticles() {
       { binding: 3, resource: { buffer: matrixBuffer } },
     ],
   });
+  rebuildLensTrackBindGroups();
 }
 
 function startOceanParticles() {
@@ -1936,6 +2145,7 @@ function startOceanParticles() {
       { binding: 3, resource: { buffer: oceanMatrixBuffer } },
     ],
   });
+  rebuildLensTrackBindGroups();
 }
 
 let lastTime = 0;
@@ -1998,7 +2208,8 @@ function update() {
   if (!device || !context || !bgContext) return;
 
   const start = performance.now();
-  deltaVs.push(start - lastTime);
+  const frameDtMs = lastTime > 0 ? start - lastTime : 16.67;
+  deltaVs.push(frameDtMs);
   if (deltaVs.length > 1000) {
     deltaVs.splice(0, 1);
   }
@@ -2083,10 +2294,40 @@ function update() {
 
   const commandEncoder = device.createCommandEncoder();
   tick(commandEncoder);
+  updateGpuLens(commandEncoder, frameDtMs);
   render(commandEncoder);
 
   const commands = commandEncoder.finish();
   device.queue.submit([commands]);
+
+  if (pendingLensReadbackIdx !== null && lensReadbackBuffers) {
+    const slot = pendingLensReadbackIdx;
+    const buf = lensReadbackBuffers[slot];
+    const genSnapshot = prevGpuLensGen;
+    lensReadbackInFlight[slot] = true;
+    buf
+      .mapAsync(GPUMapMode.READ)
+      .then(() => {
+        const f32 = new Float32Array(buf.getMappedRange());
+        const cx = f32[0] ?? 0;
+        const cy = f32[1] ?? 0;
+        const r = f32[2] ?? 0;
+        buf.unmap();
+        if (tooltipManager.getLensGpuConfig().generation === genSnapshot) {
+          tooltipManager.syncGpuLensPos(cx, cy, r > 1.0);
+        }
+      })
+      .catch(() => {
+        try {
+          buf.unmap();
+        } catch {
+          // Ignore already unmapped readback buffer
+        }
+      })
+      .finally(() => {
+        lensReadbackInFlight[slot] = false;
+      });
+  }
 
   device.popErrorScope().then((error) => {
     if (error && !window.location.search.includes('noTimestamp')) {

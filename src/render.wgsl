@@ -137,7 +137,7 @@ fn vertex(
         let uDist = length(cScreenRaw - uniforms.lensParams.xy) / uniforms.lensParams.z;
         if (uDist < 1.0) {
             cScreen = applyLensForward(uniforms, cScreenRaw);
-            localMag = lensMagScale(uniforms.lensParams.w, uDist);
+            localMag = lensParticleScale(uniforms.lensParams.w, uDist);
         }
     }
     let pScreen = cScreen + (corner.x * dU + corner.y * dB) * (angR * scalePx * localMag);
