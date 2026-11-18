@@ -14,9 +14,31 @@ export const isSample = urlParams.has('sample');
 const githubBtn = document.getElementById('githubBtn') as HTMLAnchorElement | null;
 if (githubBtn) {
   if (!isSample) githubBtn.style.display = 'block';
-  githubBtn.onmousedown = (event) => {
+  githubBtn.addEventListener('pointerdown', (event) => {
     event.stopPropagation();
-  };
+  });
+}
+
+const controlsHud = document.getElementById('controls');
+const hudHeader = document.getElementById('hudHeader');
+const hudToggleBtn = document.getElementById('hudToggleBtn') as HTMLButtonElement | null;
+
+function setHudMinimized(minimized: boolean) {
+  if (!controlsHud || !hudToggleBtn) return;
+  controlsHud.classList.toggle('minimized', minimized);
+  hudToggleBtn.textContent = minimized ? '+' : '−';
+  hudToggleBtn.setAttribute('aria-expanded', String(!minimized));
+  hudToggleBtn.setAttribute(
+    'aria-label',
+    minimized ? 'Expand display' : 'Minimize display',
+  );
+}
+
+if (hudHeader && controlsHud) {
+  hudHeader.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setHudMinimized(!controlsHud.classList.contains('minimized'));
+  });
 }
 
 let activeViewState: GlobeViewState | null = null;
@@ -58,12 +80,106 @@ function isUiTarget(target: EventTarget | null): boolean {
   return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn'));
 }
 
-let draggingMode: 'none' | 'globe' | 'chem' = 'none';
+function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
+  if (!activeViewState) return;
+  const spec = PROJECTIONS[activeViewState.projectionId];
+  if (spec.sphericalDrag && !forcePan) {
+    const sensitivity = 60 / Math.max(activeViewState.scale, 120);
+    activeViewState.rotate[0] += dx * sensitivity;
+    activeViewState.rotate[1] = Math.max(
+      -88,
+      Math.min(88, activeViewState.rotate[1] - dy * sensitivity),
+    );
+  } else {
+    activeViewState.pan[0] += dx;
+    activeViewState.pan[1] += dy;
+  }
+  onViewMutated?.();
+}
+
+function applyZoomAt(factor: number, anchorX: number, anchorY: number) {
+  if (!activeViewState || !Number.isFinite(factor) || factor <= 0) return;
+  const oldScale = activeViewState.scale;
+  const newScale = Math.max(120, Math.min(30000, oldScale * factor));
+  const ratio = newScale / oldScale;
+
+  if (
+    !PROJECTIONS[activeViewState.projectionId].sphericalDrag ||
+    Math.abs(activeViewState.pan[0]) > 1 ||
+    Math.abs(activeViewState.pan[1]) > 1
+  ) {
+    const cx = activeViewState.width * 0.5 + activeViewState.pan[0];
+    const cy = activeViewState.height * 0.5 + activeViewState.pan[1];
+    activeViewState.pan[0] = anchorX - (anchorX - cx) * ratio - activeViewState.width * 0.5;
+    activeViewState.pan[1] = anchorY - (anchorY - cy) * ratio - activeViewState.height * 0.5;
+  }
+  activeViewState.scale = newScale;
+  onViewMutated?.();
+}
+
+interface PointerPt {
+  x: number;
+  y: number;
+}
+
+const mainCanvas = document.getElementById('canvas') as HTMLCanvasElement | null;
+const activePointers = new Map<number, PointerPt>();
+let draggingMode: 'none' | 'globe' | 'chem' | 'pinch' = 'none';
 let lastX = 0;
 let lastY = 0;
+let prevPinchDist = 0;
+let prevPinchMidX = 0;
+let prevPinchMidY = 0;
 
-window.addEventListener('mousedown', (event) => {
+function initPinchFromPointers() {
+  const pts = [...activePointers.values()];
+  if (pts.length < 2) return;
+  const [a, b] = pts;
+  prevPinchDist = Math.hypot(b.x - a.x, b.y - a.y);
+  prevPinchMidX = (a.x + b.x) * 0.5;
+  prevPinchMidY = (a.y + b.y) * 0.5;
+  draggingMode = 'pinch';
+  mouseSphere.mode = 0;
+}
+
+function releaseActivePointer(pointerId: number) {
+  if (!activePointers.has(pointerId)) return;
+  activePointers.delete(pointerId);
+
+  if (activePointers.size >= 2) {
+    initPinchFromPointers();
+  } else if (activePointers.size === 1) {
+    const [rem] = activePointers.values();
+    lastX = rem.x;
+    lastY = rem.y;
+    draggingMode = currentMouseTool === 'globe' ? 'globe' : 'none';
+    mouseSphere.mode = 0;
+  } else {
+    draggingMode = 'none';
+    mouseSphere.mode = 0;
+  }
+}
+
+window.addEventListener('pointerdown', (event) => {
   if (isUiTarget(event.target)) return;
+  if (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2) {
+    return;
+  }
+
+  activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (mainCanvas && event.target === mainCanvas) {
+    try {
+      mainCanvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Ignore synthetic events without active pointer capture registration
+    }
+  }
+
+  if (activePointers.size >= 2) {
+    initPinchFromPointers();
+    return;
+  }
+
   updateMouseSphere(event.clientX, event.clientY);
   lastX = event.clientX;
   lastY = event.clientY;
@@ -79,42 +195,83 @@ window.addEventListener('mousedown', (event) => {
     keys.ShiftRight ||
     (currentMouseTool === 'attract' && !isRepel);
 
-  if (event.button === 0 && (isRepel || isAttract)) {
+  if ((event.pointerType !== 'mouse' || event.button === 0) && (isRepel || isAttract)) {
     draggingMode = 'chem';
     mouseSphere.mode = isRepel ? -1 : 1;
-  } else if (event.button === 0 || event.button === 2) {
+  } else {
     draggingMode = 'globe';
     mouseSphere.mode = 0;
   }
 });
 
-window.addEventListener('mouseup', () => {
-  draggingMode = 'none';
-  mouseSphere.mode = 0;
-});
+window.addEventListener('pointermove', (event) => {
+  if (!activePointers.has(event.pointerId)) {
+    if (event.pointerType === 'mouse') {
+      updateMouseSphere(event.clientX, event.clientY);
+    }
+    return;
+  }
 
-window.addEventListener('mousemove', (event) => {
+  activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (activePointers.size >= 2) {
+    const [a, b] = [...activePointers.values()];
+    const midX = (a.x + b.x) * 0.5;
+    const midY = (a.y + b.y) * 0.5;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+
+    const dx = midX - prevPinchMidX;
+    const dy = midY - prevPinchMidY;
+    if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+      applyDragDelta(dx, dy, false);
+    }
+    if (prevPinchDist > 12 && dist > 12) {
+      const factor = Math.max(0.75, Math.min(1.35, dist / prevPinchDist));
+      applyZoomAt(factor, midX, midY);
+    }
+
+    prevPinchDist = dist;
+    prevPinchMidX = midX;
+    prevPinchMidY = midY;
+    return;
+  }
+
   updateMouseSphere(event.clientX, event.clientY);
-  if (draggingMode === 'globe' && activeViewState) {
+  if (draggingMode === 'globe') {
     const dx = event.clientX - lastX;
     const dy = event.clientY - lastY;
     lastX = event.clientX;
     lastY = event.clientY;
-    const spec = PROJECTIONS[activeViewState.projectionId];
-    if (spec.sphericalDrag && !event.ctrlKey) {
-      const sensitivity = 60 / Math.max(activeViewState.scale, 120);
-      activeViewState.rotate[0] += dx * sensitivity;
-      activeViewState.rotate[1] = Math.max(
-        -88,
-        Math.min(88, activeViewState.rotate[1] - dy * sensitivity),
-      );
-    } else {
-      activeViewState.pan[0] += dx;
-      activeViewState.pan[1] += dy;
-    }
-    onViewMutated?.();
+    applyDragDelta(dx, dy, event.ctrlKey);
   }
 });
+
+window.addEventListener('pointerup', (event) => {
+  releaseActivePointer(event.pointerId);
+});
+
+window.addEventListener('pointercancel', (event) => {
+  releaseActivePointer(event.pointerId);
+});
+
+window.addEventListener('blur', () => {
+  activePointers.clear();
+  draggingMode = 'none';
+  mouseSphere.mode = 0;
+});
+
+// Prevent iOS Safari / Android native pinch-zoom and pull-to-refresh on canvas touches
+for (const evName of ['touchstart', 'touchmove', 'gesturestart', 'gesturechange'] as const) {
+  window.addEventListener(
+    evName,
+    (event) => {
+      if (!isUiTarget(event.target)) {
+        event.preventDefault();
+      }
+    },
+    { passive: false },
+  );
+}
 
 window.addEventListener('contextmenu', (event) => {
   event.preventDefault();
@@ -123,26 +280,10 @@ window.addEventListener('contextmenu', (event) => {
 window.addEventListener(
   'wheel',
   (event) => {
-    if (isUiTarget(event.target) || !activeViewState) return;
+    if (isUiTarget(event.target)) return;
     event.preventDefault();
     const factor = Math.exp(-event.deltaY * 0.0011);
-    const oldScale = activeViewState.scale;
-    const newScale = Math.max(120, Math.min(30000, oldScale * factor));
-    const ratio = newScale / oldScale;
-
-    // Anchor zoom smoothly at cursor when zooming non-orthographic or already panned
-    if (
-      !PROJECTIONS[activeViewState.projectionId].sphericalDrag ||
-      Math.abs(activeViewState.pan[0]) > 1 ||
-      Math.abs(activeViewState.pan[1]) > 1
-    ) {
-      const cx = activeViewState.width * 0.5 + activeViewState.pan[0];
-      const cy = activeViewState.height * 0.5 + activeViewState.pan[1];
-      activeViewState.pan[0] = event.clientX - (event.clientX - cx) * ratio - activeViewState.width * 0.5;
-      activeViewState.pan[1] = event.clientY - (event.clientY - cy) * ratio - activeViewState.height * 0.5;
-    }
-    activeViewState.scale = newScale;
-    onViewMutated?.();
+    applyZoomAt(factor, event.clientX, event.clientY);
   },
   { passive: false },
 );

@@ -224,7 +224,7 @@ const initRotate: [number, number, number] = initialOrientation
 const viewState: GlobeViewState = {
   projectionId: earthParams.projection,
   rotate: initRotate,
-  scale: Math.max(220, initScale),
+  scale: Math.max(140, initScale),
   pan: [0, 0],
   width: window.innerWidth,
   height: window.innerHeight,
@@ -1483,8 +1483,9 @@ resetViewBtn.on('click', () => {
   viewState.projectionId = 'orthographic';
   viewState.rotate = [...PROJECTIONS.orthographic.defaultRotate];
   viewState.pan = [0, 0];
-  viewState.scale = Math.round(
-    586 * Math.min(viewState.width / 1280, viewState.height / 800) || 586,
+  viewState.scale = Math.max(
+    140,
+    Math.round(586 * Math.min(viewState.width / 1280, viewState.height / 800) || 586),
   );
   updateProjectionState();
 });

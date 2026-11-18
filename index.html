@@ -28,32 +28,38 @@
     <canvas id="canvas"></canvas>
 
     <div id="controls">
-      <div id="windHudGroup">
-        <div id="earthMeta" class="hudMetaRow">
-          <span id="windLevelBadge">Wind @ Sfc (10m)</span>
-          <span id="windTimeBadge">GFS · loading…</span>
-        </div>
-        <div id="scaleWrap" class="hudScaleWrap">
-          <span class="scaleTick">0</span>
-          <div id="scaleBar" class="scaleBar"></div>
-          <span id="scaleMaxLabel" class="scaleTick">100 m/s</span>
-        </div>
+      <div id="hudHeader">
+        <span id="hudTitle">Wind &amp; Ocean</span>
+        <button id="hudToggleBtn" type="button" aria-expanded="true" aria-label="Minimize display">−</button>
       </div>
-      <div id="oceanHudGroup">
-        <div id="oceanMeta" class="hudMetaRow">
-          <span id="oceanLevelBadge">Ocean @ Sfc Currents</span>
-          <span id="oceanTimeBadge">NOAA CoastWatch · loading…</span>
+      <div id="hudBody">
+        <div id="windHudGroup">
+          <div id="earthMeta" class="hudMetaRow">
+            <span id="windLevelBadge">Wind @ Sfc (10m)</span>
+            <span id="windTimeBadge">GFS · loading…</span>
+          </div>
+          <div id="scaleWrap" class="hudScaleWrap">
+            <span class="scaleTick">0</span>
+            <div id="scaleBar" class="scaleBar"></div>
+            <span id="scaleMaxLabel" class="scaleTick">100 m/s</span>
+          </div>
         </div>
-        <div id="oceanScaleWrap" class="hudScaleWrap">
-          <span class="scaleTick">0</span>
-          <div id="oceanScaleBar" class="scaleBar"></div>
-          <span id="oceanScaleMaxLabel" class="scaleTick">1.5 m/s</span>
+        <div id="oceanHudGroup">
+          <div id="oceanMeta" class="hudMetaRow">
+            <span id="oceanLevelBadge">Ocean @ Sfc Currents</span>
+            <span id="oceanTimeBadge">NOAA CoastWatch · loading…</span>
+          </div>
+          <div id="oceanScaleWrap" class="hudScaleWrap">
+            <span class="scaleTick">0</span>
+            <div id="oceanScaleBar" class="scaleBar"></div>
+            <span id="oceanScaleMaxLabel" class="scaleTick">1.5 m/s</span>
+          </div>
         </div>
+        <p>
+          Drag — rotate · Scroll / Pinch — zoom<br>
+          Shift / Alt / Tool — attract &amp; repel
+        </p>
       </div>
-      <p>
-        Drag — rotate / pan Earth &nbsp;·&nbsp; Scroll — zoom<br>
-        Shift + Drag — attract &nbsp;·&nbsp; Alt + Drag — repel
-      </p>
     </div>
 
     <a id="githubBtn" href="https://github.com/samzapo/gpu-life" target="_blank"></a>

@@ -206,7 +206,10 @@ export function setSim(
   device.queue.writeBuffer(simBuffer, 0, simData);
 }
 
-const pane = new Pane({ title: 'Complex Life · Earth Wind' });
+const pane = new Pane({
+  title: 'Complex Life · Earth Wind',
+  expanded: window.innerWidth >= 768,
+});
 
 pane.addBinding(params, 'fps', { readonly: true });
 
