@@ -68,7 +68,7 @@ fn integrateOceanParticle(
     var p = pIn;
     let R = max(sim.worldSize, 0.25);
 
-    let vitality = clamp(0.35 + oceanState.x - oceanState.z * 0.48, 0.15, 1.50);
+    let vitality = clamp(0.45 + 0.65 * oceanState.x - oceanState.z * 0.40, 0.25, 1.35);
     let toxicDrag = max(0.65, 1.0 - 0.22 * oceanState.z);
     p.vel -= dot(p.vel, p.pos) * p.pos;
     p.vel = p.vel * (sim.friction * toxicDrag) + (netForce * vitality + bioSteer.xyz) * sim.dt;

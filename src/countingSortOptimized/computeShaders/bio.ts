@@ -40,7 +40,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     if (bio.enabled <= 0.5) {
         let resOff = finalizeBioUnified(
-            pi, p.pos, myAtomicNum, myValence, myAtomLoad, curLife, oc, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, oc, initBioUnifiedAccum(), bio,
         );
         lifeStateOut[pi] = resOff.nextLifeState;
         bioForceOut[pi] = resOff.bioForce;
@@ -71,14 +71,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let nbV = valence[ip.idx];
                     let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
                     let nbLife = lifeStateIn[ip.idx];
+                    let nbVel = input[ip.idx].vel;
                     accumulateBioUnifiedNeighbor(
                         p.pos,
+                        p.vel,
                         myPhase,
                         myAtomicNum,
                         myValence,
                         myAtomLoad,
                         curLife,
                         ip.pos,
+                        nbVel,
                         ip.colour,
                         ip.phase,
                         ip.bioSpecies,
@@ -86,6 +89,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         nbAtomLoad,
                         nbAtomicNum,
                         nbValence,
+                        oc,
                         bio,
                         &acc,
                     );
@@ -97,6 +101,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let res = finalizeBioUnified(
         pi,
         p.pos,
+        p.vel,
         myAtomicNum,
         myValence,
         myAtomLoad,

@@ -117,7 +117,10 @@ import {
   type SimConfigV1,
 } from './config';
 import {
+  kinAngularDist,
+  summarizeAndClassifyBlob,
   TooltipManager,
+  unpackLifeMeta,
   type HoverSimSnapshot,
   type TooltipContent,
   type TooltipLensState,
@@ -186,30 +189,61 @@ function computeBioSeedHash(seed: string, oSeed: string): number {
   return (h >>> 0) & 0xffff;
 }
 
-const TROPHIC_PRIORS: number[][] = [
-  [0.32, -0.48, -0.12, -0.10], // Guild 0: Producer
-  [0.68, -0.22, -0.42, 0.46],  // Guild 1: Consumer
-  [-0.18, -0.52, 0.42, 0.08],  // Guild 2: Halophile
-  [0.26, -0.24, 0.18, -0.16],  // Guild 3: Decomposer
-];
+let speciesTraits: number[][] = [];
 
-const SELF_STRAIN_PRIORS: number[] = [0.44, -0.10, 0.55, 0.08];
-
-function buildStructuredOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
+function buildRandomOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
   const rng = createSeededRng(`${seed}:oceanMatrix`);
   const mat = new Float32Array(nColours * nColours);
   for (let i = 0; i < nColours; i++) {
-    const rG = i % 4;
     for (let j = 0; j < nColours; j++) {
-      const cG = j % 4;
-      const prior = i === j ? SELF_STRAIN_PRIORS[rG] : TROPHIC_PRIORS[rG][cG];
-      const noise = (rng() * 2 - 1) * 0.24;
-      mat[i * nColours + j] = Math.max(-1, Math.min(1, prior + noise));
+      mat[i * nColours + j] =
+        i === j
+          ? Math.max(-1, Math.min(1, rng() * 2 - 0.72))
+          : rng() * 2 - 1;
     }
   }
   return mat;
 }
-oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+
+function computeSpeciesTraitsFromMatrix(
+  mat: Float32Array,
+  nBio: number,
+): { flat: Float32Array<ArrayBuffer>; table: number[][] } {
+  const n = Math.max(1, nBio);
+  const flat = new Float32Array(n * 4);
+  const table: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    let posMutualSum = 0;
+    let posDiffSum = 0;
+    let negDiffSum = 0;
+    for (let j = 0; j < n; j++) {
+      const aIJ = mat[i * n + j] ?? 0;
+      const aJI = mat[j * n + i] ?? 0;
+      posMutualSum += Math.max(0, 0.5 * (aIJ + aJI));
+      if (j !== i) {
+        posDiffSum += Math.max(0, aIJ - aJI);
+        negDiffSum += Math.max(0, aJI - aIJ);
+      }
+    }
+    const denom = Math.max(1, n - 1);
+    const coh =
+      n <= 1
+        ? Math.max(0, Math.min(1, (mat[0] ?? 0) * 0.5 + 0.5))
+        : Math.max(0, Math.min(1, (posMutualSum / n) * 2.2));
+    const chase = n <= 1 ? 0 : Math.max(0, Math.min(1, (posDiffSum / denom) * 1.6));
+    const flee = n <= 1 ? 0 : Math.max(0, Math.min(1, (negDiffSum / denom) * 1.6));
+    const asym = Math.max(0, Math.min(1, (chase + flee) * 0.65));
+    flat[i * 4 + 0] = coh;
+    flat[i * 4 + 1] = chase;
+    flat[i * 4 + 2] = flee;
+    flat[i * 4 + 3] = asym;
+    table.push([coh, chase, flee, asym]);
+  }
+  return { flat, table };
+}
+
+oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
+speciesTraits = computeSpeciesTraitsFromMatrix(oceanMatrixData, oceanColourAmt).table;
 
 const particleStride = 48; // 12 floats: pos(3), colour(1), vel(3), omega(1), orient(3), pad(1)
 const valenceStride = 16;
@@ -789,16 +823,19 @@ async function loadWindLevel(levelId: WindLevelId) {
   }
 }
 
-const GUILD_BASE_HUES = [118, 12, 282, 46];
-const GUILD_SPREADS = [28, 24, 28, 24];
-const GUILD_SATS = [0.78, 0.86, 0.80, 0.84];
-const GUILD_LIGHTS = [0.48, 0.56, 0.58, 0.52];
-
 function writeWorldRuleAndColourBuffers() {
   if (!device || !worldRulesBuffer || !worldColoursBuffer) return;
-  const rules = new Float32Array(chemistryData.length + oceanMatrixData.length);
+  const { flat: traitsFlat, table } = computeSpeciesTraitsFromMatrix(
+    oceanMatrixData,
+    oceanColourAmt,
+  );
+  speciesTraits = table;
+  const rules = new Float32Array(
+    chemistryData.length + oceanMatrixData.length + traitsFlat.length,
+  );
   rules.set(chemistryData, 0);
   rules.set(oceanMatrixData, chemistryData.length);
+  rules.set(traitsFlat, chemistryData.length + oceanMatrixData.length);
   device.queue.writeBuffer(worldRulesBuffer, 0, rules.buffer);
 
   const totalPalette = colourAmt + oceanColourAmt;
@@ -809,12 +846,8 @@ function writeWorldRuleAndColourBuffers() {
     colourData[c * 3 + 2] = elements[c].color[2];
   }
   for (let i = 0; i < oceanColourAmt; i++) {
-    const guild = i % 4;
-    const strainIdx = Math.floor(i / 4);
-    const totalStrains = Math.max(1, Math.ceil((oceanColourAmt - guild) / 4));
-    const frac = totalStrains > 1 ? strainIdx / (totalStrains - 1) - 0.5 : 0;
-    const hue = (((GUILD_BASE_HUES[guild] + frac * GUILD_SPREADS[guild]) % 360) + 360) % 360;
-    const [r, g, b] = hslToRgb(hue, GUILD_SATS[guild], GUILD_LIGHTS[guild]);
+    const hue = (i * 137.508) % 360;
+    const [r, g, b] = hslToRgb(hue, 0.9, 0.54);
     const outIdx = (colourAmt + i) * 3;
     colourData[outIdx] = r;
     colourData[outIdx + 1] = g;
@@ -909,6 +942,22 @@ declare global {
         avgBioEnergy: number;
         oceanBioCount: number;
         landBioCount: number;
+        blobCount: number;
+        multiSpeciesBlobs: number;
+        avgBlobSize: number;
+        maxBlobSize: number;
+        emergentRoles: {
+          producerBlobs: number;
+          consumerBlobs: number;
+          mixotrophBlobs: number;
+          decomposerBlobs: number;
+          halophileBlobs: number;
+          producerParticles: number;
+          consumerParticles: number;
+          mixotrophParticles: number;
+          decomposerParticles: number;
+          halophileParticles: number;
+        };
       }>;
     };
   }
@@ -1063,27 +1112,44 @@ async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
     valence: data.valence,
     lifeState: data.lifeState,
     bioForce: data.bioForce,
+    speciesTraits,
     capturedAt: performance.now(),
   };
 }
 
 async function computeWorldStats() {
   const data = await readUnifiedWorldBuffers(particleAmt, false);
-  const guildCounts: [number, number, number, number] = [0, 0, 0, 0];
   const chemElementCounts: Record<string, number> = {};
   const bioElementCounts: Record<string, number> = {};
+  const emptyRoles = {
+    producerBlobs: 0,
+    consumerBlobs: 0,
+    mixotrophBlobs: 0,
+    decomposerBlobs: 0,
+    halophileBlobs: 0,
+    producerParticles: 0,
+    consumerParticles: 0,
+    mixotrophParticles: 0,
+    decomposerParticles: 0,
+    halophileParticles: 0,
+  };
   if (!data) {
     return {
       total: 0,
       chemCount: 0,
       bioCount: 0,
-      guildCounts,
+      guildCounts: [0, 0, 0, 0] as [number, number, number, number],
       abioticBioViolations: 0,
       chemElementCounts,
       bioElementCounts,
       avgBioEnergy: 0,
       oceanBioCount: 0,
       landBioCount: 0,
+      blobCount: 0,
+      multiSpeciesBlobs: 0,
+      avgBlobSize: 0,
+      maxBlobSize: 0,
+      emergentRoles: emptyRoles,
     };
   }
 
@@ -1095,18 +1161,21 @@ async function computeWorldStats() {
   let oceanBioCount = 0;
   let landBioCount = 0;
   const RAD2DEG = 180 / Math.PI;
+  const bioIndices: number[] = [];
+  const bioMeta = new Array<{ phase: number; bioSpecies: number; kinPhase: number }>(total);
+  const halogenIndices: number[] = [];
 
   for (let i = 0; i < total; i++) {
     const p = data.particles[i];
     const ls = data.lifeState[i] ?? [0, 0, 0, 0];
+    const meta = unpackLifeMeta(ls);
+    bioMeta[i] = meta;
     const cIdx = Math.max(0, Math.min(elements.length - 1, Math.floor(p[6] ?? 0)));
     const el = elements[cIdx];
     const sym = getElementSymbol(el.atomicNumber);
-    const w = ls[3] ?? 0;
-    if (w >= 0.5) {
+    if (meta.phase !== 0) {
       bioCount++;
-      const bioSp = Math.max(0, Math.round(w - 1.0));
-      guildCounts[bioSp % 4]++;
+      bioIndices.push(i);
       bioEnergySum += ls[0] ?? 0;
       bioElementCounts[sym] = (bioElementCounts[sym] ?? 0) + 1;
       if (!isBiogenicAtomicNumber(el.atomicNumber, el.valence)) {
@@ -1123,6 +1192,137 @@ async function computeWorldStats() {
     } else {
       chemCount++;
       chemElementCounts[sym] = (chemElementCounts[sym] ?? 0) + 1;
+      if (el.atomicNumber === 7 || el.atomicNumber === 13) {
+        halogenIndices.push(i);
+      }
+    }
+  }
+
+  // Build spatial grid hash over living particles to assemble connected emergent blobs (size >= 3)
+  const R = Math.max(optionParams.worldSize, 0.25);
+  const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
+  const connectChord = Math.max(0.02, (oceanRMax * 1.35) / R);
+  const connectChord2 = connectChord * connectChord;
+  const tightChord2 = Math.pow((oceanRMax * 0.72) / R, 2);
+
+  const keyForPos = (p: number[]) => {
+    const gx = Math.floor((p[0] + 1.5) / connectChord);
+    const gy = Math.floor((p[1] + 1.5) / connectChord);
+    const gz = Math.floor((p[2] + 1.5) / connectChord);
+    return `${gx},${gy},${gz}`;
+  };
+
+  const grid = new Map<string, number[]>();
+  for (const idx of bioIndices) {
+    const k = keyForPos(data.particles[idx]);
+    let arr = grid.get(k);
+    if (!arr) {
+      arr = [];
+      grid.set(k, arr);
+    }
+    arr.push(idx);
+  }
+  const halGrid = new Map<string, number[]>();
+  for (const idx of halogenIndices) {
+    const k = keyForPos(data.particles[idx]);
+    let arr = halGrid.get(k);
+    if (!arr) {
+      arr = [];
+      halGrid.set(k, arr);
+    }
+    arr.push(idx);
+  }
+
+  const visited = new Uint8Array(total);
+  const emergentRoles = { ...emptyRoles };
+  let blobCount = 0;
+  let multiSpeciesBlobs = 0;
+  let blobSizeSum = 0;
+  let maxBlobSize = 0;
+
+  for (const seedIdx of bioIndices) {
+    if (visited[seedIdx]) continue;
+    visited[seedIdx] = 1;
+    const comp = [seedIdx];
+    let head = 0;
+    const nearbyHalogenSet = new Set<number>();
+
+    while (head < comp.length && comp.length < 512) {
+      const u = comp[head++];
+      const pu = data.particles[u];
+      const mu = bioMeta[u];
+      const gx = Math.floor((pu[0] + 1.5) / connectChord);
+      const gy = Math.floor((pu[1] + 1.5) / connectChord);
+      const gz = Math.floor((pu[2] + 1.5) / connectChord);
+
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let oz = -1; oz <= 1; oz++) {
+            const key = `${gx + ox},${gy + oy},${gz + oz}`;
+            const bucket = grid.get(key);
+            if (bucket) {
+              for (const v of bucket) {
+                if (visited[v]) continue;
+                const pv = data.particles[v];
+                const dx = pv[0] - pu[0];
+                const dy = pv[1] - pu[1];
+                const dz = pv[2] - pu[2];
+                const d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 >= connectChord2) continue;
+                const mv = bioMeta[v];
+                if (kinAngularDist(mu.kinPhase, mv.kinPhase) < 0.3 || d2 < tightChord2) {
+                  visited[v] = 1;
+                  comp.push(v);
+                }
+              }
+            }
+            const hBucket = halGrid.get(key);
+            if (hBucket) {
+              for (const hi of hBucket) {
+                const ph = data.particles[hi];
+                const dx = ph[0] - pu[0];
+                const dy = ph[1] - pu[1];
+                const dz = ph[2] - pu[2];
+                if (dx * dx + dy * dy + dz * dz < connectChord2) {
+                  nearbyHalogenSet.add(hi);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (comp.length < 3) continue;
+    blobCount++;
+    blobSizeSum += comp.length;
+    if (comp.length > maxBlobSize) maxBlobSize = comp.length;
+
+    const summary = summarizeAndClassifyBlob(
+      comp,
+      data.particles,
+      data.lifeState,
+      elements,
+      speciesTraits,
+      nearbyHalogenSet.size,
+    );
+    if (summary.distinctSpecies >= 2) multiSpeciesBlobs++;
+
+    if (summary.role === 'producer') {
+      emergentRoles.producerBlobs++;
+      emergentRoles.producerParticles += comp.length;
+    } else if (summary.role === 'consumer') {
+      emergentRoles.consumerBlobs++;
+      emergentRoles.consumerParticles += comp.length;
+    } else if (summary.role === 'mixotroph') {
+      emergentRoles.mixotrophBlobs++;
+      emergentRoles.mixotrophParticles += comp.length;
+    } else if (summary.role === 'decomposer') {
+      emergentRoles.decomposerBlobs++;
+      emergentRoles.decomposerParticles += comp.length;
+    } else {
+      emergentRoles.halophileBlobs++;
+      emergentRoles.halophileParticles += comp.length;
     }
   }
 
@@ -1130,13 +1330,23 @@ async function computeWorldStats() {
     total,
     chemCount,
     bioCount,
-    guildCounts,
+    guildCounts: [
+      emergentRoles.producerParticles,
+      emergentRoles.consumerParticles,
+      emergentRoles.halophileParticles,
+      emergentRoles.decomposerParticles,
+    ] as [number, number, number, number],
     abioticBioViolations,
     chemElementCounts,
     bioElementCounts,
     avgBioEnergy: bioCount > 0 ? bioEnergySum / bioCount : 0,
     oceanBioCount,
     landBioCount,
+    blobCount,
+    multiSpeciesBlobs,
+    avgBlobSize: blobCount > 0 ? blobSizeSum / blobCount : 0,
+    maxBlobSize,
+    emergentRoles,
   };
 }
 
@@ -1337,7 +1547,7 @@ window.complexLife = {
   resetDefaultConfig: resetToFactoryDefaults,
   randomizeOceanMatrix: (seed?: string) => {
     oceanSeed = seed ?? generateRandomSeed();
-    oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+    oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
     writeWorldRuleAndColourBuffers();
     syncBioUniformState();
   },
@@ -1880,13 +2090,13 @@ function render(commandEncoder: GPUCommandEncoder) {
   resolveTimestamp(commandEncoder, 'render');
 }
 
-function pickStrainForGuild(guild: number, nBio: number, u: number): number {
-  if (nBio <= 4) {
-    return Math.min(guild, Math.max(nBio, 1) - 1);
-  }
-  const strainCount = Math.floor((nBio - guild + 3) / 4);
-  const pick = Math.max(0, Math.min(strainCount - 1, Math.floor(u * strainCount)));
-  return Math.min(pick * 4 + guild, nBio - 1);
+function packLifeMetaJs(phase: number, bioSp: number, kinAngle: number): number {
+  if (phase === 0) return 0;
+  const twoPi = Math.PI * 2;
+  let a = kinAngle % twoPi;
+  if (a < 0) a += twoPi;
+  const k = Math.floor((a / twoPi) * 1024) & 1023;
+  return ((phase & 3) | ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) | (k << 10)) >>> 0;
 }
 
 function startWorld() {
@@ -1914,7 +2124,8 @@ function startWorld() {
   worldColoursBuffer?.destroy();
 
   refreshChemistryDefinition();
-  oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+  oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
+  speciesTraits = computeSpeciesTraitsFromMatrix(oceanMatrixData, oceanColourAmt).table;
 
   const bufferSize = particleAmt * particleStride;
   particleBuffers = [
@@ -1975,7 +2186,7 @@ function startWorld() {
   });
 
   worldRulesBuffer = device.createBuffer({
-    size: Math.max((chemistryData.length + oceanMatrixData.length) * 4, 16),
+    size: Math.max((chemistryData.length + oceanMatrixData.length + oceanColourAmt * 4) * 4, 16),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'worldRulesBuffer',
   });
@@ -2004,11 +2215,147 @@ function startWorld() {
     return colourAmt - 1;
   };
 
+  const elemChoice = new Uint16Array(particleAmt);
+  const biogenicPool: number[] = [];
+  const abioticPool: number[] = [];
+  for (let pi = 0; pi < particleAmt; pi++) {
+    const cIdx = pickElement();
+    elemChoice[pi] = cIdx;
+    const el = elements[cIdx];
+    if (el && isBiogenicAtomicNumber(el.atomicNumber, el.valence)) {
+      biogenicPool.push(pi);
+    } else {
+      abioticPool.push(pi);
+    }
+  }
+  for (let i = biogenicPool.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = biogenicPool[i];
+    biogenicPool[i] = biogenicPool[j];
+    biogenicPool[j] = tmp;
+  }
+
   const particleData = new Float32Array(bufferSize / 4);
   const lifeData = new Float32Array(particleAmt * 4);
-  const RAD2DEG = 180 / Math.PI;
+  const worldR = Math.max(optionParams.worldSize, 0.25);
+  const nBio = Math.max(1, oceanColourAmt);
+  const cohSorted = Array.from({ length: nBio }, (_, i) => i).sort(
+    (a, b) => (speciesTraits[b]?.[0] ?? 0) - (speciesTraits[a]?.[0] ?? 0),
+  );
+  const asymSorted = Array.from({ length: nBio }, (_, i) => i).sort(
+    (a, b) => (speciesTraits[b]?.[3] ?? 0) - (speciesTraits[a]?.[3] ?? 0),
+  );
 
-  for (let pi = 0; pi < particleAmt; pi++) {
+  const pickBlobSpeciesSet = (isMotileSeed: boolean): number[] => {
+    if (nBio === 1) return [0];
+    if (!isMotileSeed) {
+      const poolLen = Math.max(1, Math.ceil(nBio * 0.45));
+      const s0 = cohSorted[Math.floor(rng() * poolLen)];
+      const partners = Array.from({ length: nBio }, (_, j) => j)
+        .filter((j) => j !== s0)
+        .sort(
+          (a, b) =>
+            oceanMatrixData[s0 * nBio + b] +
+            oceanMatrixData[b * nBio + s0] -
+            (oceanMatrixData[s0 * nBio + a] + oceanMatrixData[a * nBio + s0]),
+        );
+      return partners.length >= 2 ? [s0, partners[0], partners[1]] : [s0, partners[0]];
+    }
+    const poolLen = Math.max(1, Math.ceil(nBio * 0.5));
+    const s0 = asymSorted[Math.floor(rng() * poolLen)];
+    const chaseList = Array.from({ length: nBio }, (_, j) => j)
+      .filter((j) => j !== s0)
+      .sort(
+        (a, b) =>
+          Math.abs(oceanMatrixData[s0 * nBio + b] - oceanMatrixData[b * nBio + s0]) -
+          Math.abs(oceanMatrixData[s0 * nBio + a] - oceanMatrixData[a * nBio + s0]),
+      );
+    return chaseList.length >= 2 ? [s0, chaseList[0], chaseList[1]] : [s0, chaseList[0]];
+  };
+
+  const targetBio = Math.min(
+    Math.round(particleAmt * 0.2),
+    Math.floor(biogenicPool.length * 0.7),
+  );
+  const numBlobs =
+    targetBio >= 12 ? Math.max(12, Math.min(180, Math.round(targetBio / 38))) : 0;
+  const DEG2RAD = Math.PI / 180;
+
+  const sampleOceanCenter = (): [number, number, number] => {
+    let lonDeg = (rng() - 0.5) * 360;
+    let latDeg = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
+    if (currentOceanGrid) {
+      for (let t = 0; t < 60; t++) {
+        const candLon = (rng() - 0.5) * 360;
+        const candLat = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
+        if (sampleOceanLonLat(currentOceanGrid, candLon, candLat)[3] >= 0.58) {
+          lonDeg = candLon;
+          latDeg = candLat;
+          break;
+        }
+      }
+    }
+    const lonR = lonDeg * DEG2RAD;
+    const latR = latDeg * DEG2RAD;
+    const cLat = Math.cos(latR);
+    return [cLat * Math.cos(lonR), cLat * Math.sin(lonR), Math.sin(latR)];
+  };
+
+  let bioCursor = 0;
+  if (numBlobs > 0) {
+    for (let bi = 0; bi < numBlobs; bi++) {
+      const endCursor =
+        bi === numBlobs - 1
+          ? targetBio
+          : Math.min(targetBio, Math.round(((bi + 1) * targetBio) / numBlobs));
+      const [cx, cy, cz] = sampleOceanCenter();
+      const [e1x, e1y, e1z] = unitTangentFromSphere(cx, cy, cz, rng() * Math.PI * 2);
+      const e2x = cy * e1z - cz * e1y;
+      const e2y = cz * e1x - cx * e1z;
+      const e2z = cx * e1y - cy * e1x;
+      const kinPhase = rng() * Math.PI * 2;
+      const blobSpecies = pickBlobSpeciesSet(bi % 2 === 1);
+
+      while (bioCursor < endCursor) {
+        const pi = biogenicPool[bioCursor++];
+        const angR = (0.008 + Math.sqrt(rng()) * 0.022) / worldR;
+        const th = rng() * Math.PI * 2;
+        const ct = Math.cos(th);
+        const st = Math.sin(th);
+        const dx = ct * e1x + st * e2x;
+        const dy = ct * e1y + st * e2y;
+        const dz = ct * e1z + st * e2z;
+        const ca = Math.cos(angR);
+        const sa = Math.sin(angR);
+        let nx = ca * cx + sa * dx;
+        let ny = ca * cy + sa * dy;
+        let nz = ca * cz + sa * dz;
+        const invL = 1 / (Math.hypot(nx, ny, nz) || 1);
+        nx *= invL;
+        ny *= invL;
+        nz *= invL;
+        const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, rng() * Math.PI * 2);
+
+        const b = pi * 12;
+        particleData[b + 0] = nx;
+        particleData[b + 1] = ny;
+        particleData[b + 2] = nz;
+        particleData[b + 3] = elemChoice[pi];
+        particleData[b + 8] = ux;
+        particleData[b + 9] = uy;
+        particleData[b + 10] = uz;
+
+        const sp = blobSpecies[Math.floor(rng() * blobSpecies.length)];
+        const lBase = pi * 4;
+        lifeData[lBase + 0] = 0.72 + 0.23 * rng();
+        lifeData[lBase + 1] = 0.05;
+        lifeData[lBase + 2] = 0.0;
+        lifeData[lBase + 3] = packLifeMetaJs(1, sp, kinPhase);
+      }
+    }
+  }
+
+  const placeFreeAtom = (pi: number) => {
     const z = rng() * 2 - 1;
     const lon = rng() * Math.PI * 2;
     const rxy = Math.sqrt(Math.max(0, 1 - z * z));
@@ -2016,35 +2363,21 @@ function startWorld() {
     const ny = rxy * Math.sin(lon);
     const nz = z;
     const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, rng() * Math.PI * 2);
-    const cIdx = pickElement();
-    const el = elements[cIdx];
-
     const b = pi * 12;
     particleData[b + 0] = nx;
     particleData[b + 1] = ny;
     particleData[b + 2] = nz;
-    particleData[b + 3] = cIdx;
+    particleData[b + 3] = elemChoice[pi];
     particleData[b + 8] = ux;
     particleData[b + 9] = uy;
     particleData[b + 10] = uz;
+  };
 
-    const lonDeg = Math.atan2(ny, nx) * RAD2DEG;
-    const latDeg = Math.asin(Math.max(-1, Math.min(1, nz))) * RAD2DEG;
-    const biogenic = isBiogenicAtomicNumber(el.atomicNumber, el.valence);
-    const inOcean = currentOceanGrid
-      ? sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3] >= 0.55
-      : rng() < 0.7;
-
-    if (biogenic && inOcean && rng() < 0.42) {
-      const gRoll = rng();
-      const guild = gRoll < 0.46 ? 0 : gRoll < 0.68 ? 1 : gRoll < 0.8 ? 2 : 3;
-      const bioSp = pickStrainForGuild(guild, oceanColourAmt, rng());
-      const lBase = pi * 4;
-      lifeData[lBase + 0] = 0.68 + 0.25 * rng();
-      lifeData[lBase + 1] = 0.05;
-      lifeData[lBase + 2] = 0.0;
-      lifeData[lBase + 3] = 1 + bioSp;
-    }
+  while (bioCursor < biogenicPool.length) {
+    placeFreeAtom(biogenicPool[bioCursor++]);
+  }
+  for (const pi of abioticPool) {
+    placeFreeAtom(pi);
   }
 
   device.queue.writeBuffer(particleBuffers[0], 0, particleData.buffer);
@@ -2482,7 +2815,7 @@ randomizeOceanRulesBtn.on('click', () => {
   if (!worldRulesBuffer || oceanMatrixData.length !== oceanColourAmt * oceanColourAmt) {
     startWorld();
   } else {
-    oceanMatrixData = buildStructuredOceanMatrix(oceanColourAmt, oceanSeed);
+    oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
     writeWorldRuleAndColourBuffers();
     syncBioUniformState();
   }

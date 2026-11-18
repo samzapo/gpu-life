@@ -105,15 +105,32 @@ struct ListParticle {
 }
 
 fn unpackPhase(packed: f32) -> u32 {
-    return select(0u, 1u, packed >= 0.5);
+    if (packed < 0.5) {
+        return 0u;
+    }
+    return u32(packed + 0.5) & 3u;
 }
 
 fn unpackBioSpecies(packed: f32) -> u32 {
-    return select(0u, u32(packed + 0.5) - 1u, packed >= 0.5);
+    if (packed < 0.5) {
+        return 0u;
+    }
+    return (u32(packed + 0.5) >> 2u) & 255u;
 }
 
-fn packPhaseBio(phase: u32, bioSp: u32) -> f32 {
-    return select(0.0, f32(bioSp + 1u), phase == 1u);
+fn unpackKinPhase(packed: f32) -> f32 {
+    if (packed < 0.5) {
+        return 0.0;
+    }
+    return (f32((u32(packed + 0.5) >> 10u) & 1023u) / 1024.0) * TWO_PI;
+}
+
+fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32) -> f32 {
+    if (phase == 0u) {
+        return 0.0;
+    }
+    let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 1024.0)) & 1023u;
+    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u));
 }
 
 struct ForceAccum {

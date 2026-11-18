@@ -9,6 +9,7 @@ export interface HoverSimSnapshot {
   valence: number[][];
   lifeState: number[][];
   bioForce: number[][];
+  speciesTraits: number[][];
   capturedAt: number;
 }
 
@@ -162,19 +163,154 @@ function buildSelectedElement(el: Element2D): TooltipSelectedElement {
   };
 }
 
-const OCEAN_ROLE_NAMES = [
-  'Autotroph (Producer)',
-  'Consumer (Heterotroph)',
-  'Halophile (Detoxifier)',
-  'Decomposer (Remineralizer)',
-];
+export type EmergentBlobRole =
+  | 'producer'
+  | 'consumer'
+  | 'mixotroph'
+  | 'decomposer'
+  | 'halophile';
 
-const OCEAN_ROLE_SHORT = [
-  'Producer',
-  'Consumer',
-  'Halophile',
-  'Decomposer',
-];
+export interface EmergentBlobSummary {
+  size: number;
+  distinctSpecies: number;
+  formula: string;
+  avgEnergy: number;
+  avgVit: number;
+  avgPoi: number;
+  avgCoh: number;
+  avgAsym: number;
+  avgSolarFrac: number;
+  avgRedoxFrac: number;
+  avgMotility: number;
+  autoCap: number;
+  predCap: number;
+  decompCap: number;
+  haloTol: number;
+  role: EmergentBlobRole;
+}
+
+export function kinAngularDist(a: number, b: number): number {
+  return 0.5 * (1 - Math.cos(a - b));
+}
+
+export function elemSolarWeight(atomicNum: number): number {
+  if (atomicNum === 5) return 1.0;
+  if (atomicNum === 6) return 0.8;
+  if (atomicNum === 1) return 0.25;
+  if (atomicNum === 12) return 0.15;
+  return 0;
+}
+
+export function elemRedoxWeight(atomicNum: number): number {
+  if (atomicNum === 12) return 1.0;
+  if (atomicNum === 1) return 0.85;
+  if (atomicNum === 5) return 0.25;
+  if (atomicNum === 6) return 0.1;
+  return 0;
+}
+
+export function summarizeAndClassifyBlob(
+  memberIndices: number[],
+  particles: number[][],
+  lifeState: number[][],
+  elements: Element2D[],
+  speciesTraits: number[][],
+  nearbyHalogens: number = 0,
+): EmergentBlobSummary {
+  const n = Math.max(1, memberIndices.length);
+  const formulaCounts = new Map<string, number>();
+  const spSet = new Set<number>();
+  let eSum = 0;
+  let vitSum = 0;
+  let poiSum = 0;
+  let cohSum = 0;
+  let asymSum = 0;
+  let solarSum = 0;
+  let redoxSum = 0;
+  let speedSum = 0;
+
+  for (const id of memberIndices) {
+    const p = particles[id];
+    const ls = lifeState[id] ?? [0.65, 0, 0, 1];
+    const meta = unpackLifeMeta(ls);
+    spSet.add(meta.bioSpecies);
+    const tr = speciesTraits[meta.bioSpecies] ?? [0.5, 0.25, 0.25, 0.35];
+    const el = elements[Math.max(0, Math.min(elements.length - 1, Math.floor(p?.[6] ?? 0)))];
+    if (el) {
+      const s = getElementSymbol(el.atomicNumber);
+      formulaCounts.set(s, (formulaCounts.get(s) ?? 0) + 1);
+      solarSum += elemSolarWeight(el.atomicNumber);
+      redoxSum += elemRedoxWeight(el.atomicNumber);
+    }
+    eSum += ls[0] ?? 0;
+    vitSum += ls[1] ?? 0;
+    poiSum += ls[2] ?? 0;
+    cohSum += tr[0] ?? 0.5;
+    asymSum += tr[3] ?? 0.35;
+    if (p) {
+      speedSum += Math.hypot(p[3] ?? 0, p[4] ?? 0, p[5] ?? 0);
+    }
+  }
+
+  const avgEnergy = eSum / n;
+  const avgVit = vitSum / n;
+  const avgPoi = poiSum / n;
+  const avgCoh = cohSum / n;
+  const avgAsym = asymSum / n;
+  const avgSolarFrac = solarSum / n;
+  const avgRedoxFrac = redoxSum / n;
+  const avgMotility = Math.max(0, Math.min(1.5, speedSum / n / 0.45));
+  const lightExposure = Math.max(0.45, Math.min(1.0, 1.12 - 0.015 * Math.min(n, 45)));
+
+  const autoCap = Math.max(
+    0.08,
+    Math.min(1.35, ((0.35 + 0.85 * avgCoh) * (0.45 + 0.85 * avgSolarFrac) * lightExposure) / (1 + 0.65 * avgMotility)),
+  );
+  const predCap = Math.max(
+    0.05,
+    Math.min(1.6, (0.2 + 0.95 * avgAsym) * (0.35 + 0.85 * avgMotility) * (0.55 + 0.65 * avgRedoxFrac)),
+  );
+  const decompCap = Math.max(
+    0.1,
+    Math.min(1.4, (0.3 + 0.9 * avgRedoxFrac) * (0.55 + 0.55 * (1 - Math.min(avgMotility, 1)))),
+  );
+  const haloTol = Math.max(0, Math.min(1, 0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh));
+
+  let role: EmergentBlobRole = 'producer';
+  if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
+    role = 'halophile';
+  } else if (
+    (avgEnergy < 0.36 && decompCap >= 0.45) ||
+    (decompCap > autoCap * 1.12 && decompCap > predCap * 1.05 && avgRedoxFrac >= 0.42)
+  ) {
+    role = 'decomposer';
+  } else if (autoCap >= 0.46 && predCap >= 0.46 && avgAsym >= 0.35) {
+    role = 'mixotroph';
+  } else if (predCap > autoCap * 1.02 && avgAsym >= 0.32) {
+    role = 'consumer';
+  } else if (avgAsym > avgCoh * 1.15 && avgAsym >= 0.46) {
+    role = 'consumer';
+  }
+
+  return {
+    size: memberIndices.length,
+    distinctSpecies: spSet.size,
+    formula: formatFormula(formulaCounts),
+    avgEnergy,
+    avgVit,
+    avgPoi,
+    avgCoh,
+    avgAsym,
+    avgSolarFrac,
+    avgRedoxFrac,
+    avgMotility,
+    autoCap,
+    predCap,
+    decompCap,
+    haloTol,
+    role,
+  };
+}
 
 function unitDistChord2(a: number[], b: number[]): number {
   const dx = a[0] - b[0];
@@ -199,10 +335,19 @@ function projectUnitVecToScreen(
   return [pt[0], pt[1]];
 }
 
-function unpackLifeTuple(ls: number[] | undefined): [0 | 1, number] {
-  const w = ls?.[3] ?? 0;
-  if (w < 0.5) return [0, 0];
-  return [1, Math.max(0, Math.round(w - 1.0))];
+export function unpackLifeMeta(ls: number[] | undefined): {
+  phase: number;
+  bioSpecies: number;
+  kinPhase: number;
+} {
+  const packed = ls?.[3] ?? 0;
+  if (packed < 0.5) return { phase: 0, bioSpecies: 0, kinPhase: 0 };
+  const u = Math.round(packed);
+  return {
+    phase: u & 3,
+    bioSpecies: (u >>> 2) & 255,
+    kinPhase: (((u >>> 10) & 1023) / 1024) * Math.PI * 2,
+  };
 }
 
 export function analyzeReactionAt(
@@ -248,16 +393,16 @@ export function analyzeReactionAt(
       return null;
     }
     const p = snap.particles[pinnedTarget.idx];
-    const [phase, bioSp] = unpackLifeTuple(snap.lifeState[pinnedTarget.idx]);
-    if ((phase === 0 && !showChem) || (phase === 1 && !showLife)) {
+    const meta = unpackLifeMeta(snap.lifeState[pinnedTarget.idx]);
+    if ((meta.phase === 0 && !showChem) || (meta.phase !== 0 && !showLife)) {
       return null;
     }
     pinnedPt = projectUnitVecToScreen(p, proj);
     if (!pinnedPt) return null;
     uCur = [p[0], p[1], p[2]];
     bestIdx = pinnedTarget.idx;
-    bestPhase = phase;
-    bestBioSp = bioSp;
+    bestPhase = meta.phase === 0 ? 0 : 1;
+    bestBioSp = meta.bioSpecies;
   }
 
   if (!uCur) {
@@ -281,20 +426,20 @@ export function analyzeReactionAt(
 
   if (!pinnedTarget) {
     for (let i = 0; i < nParticles; i++) {
-      const [phase, bioSp] = unpackLifeTuple(snap.lifeState[i]);
-      if ((phase === 0 && !showChem) || (phase === 1 && !showLife)) {
+      const meta = unpackLifeMeta(snap.lifeState[i]);
+      if ((meta.phase === 0 && !showChem) || (meta.phase !== 0 && !showLife)) {
         continue;
       }
       const p = snap.particles[i];
       const d2 = unitDistChord2(p, uCur);
-      const thr2 = phase === 0 ? chemPickChord2 : lifePickChord2;
+      const thr2 = meta.phase === 0 ? chemPickChord2 : lifePickChord2;
       if (d2 < thr2) {
         const score = d2 / Math.max(thr2, 1e-12);
         if (score < bestScore) {
           bestScore = score;
           bestIdx = i;
-          bestPhase = phase;
-          bestBioSp = bioSp;
+          bestPhase = meta.phase === 0 ? 0 : 1;
+          bestBioSp = meta.bioSpecies;
         }
       }
     }
@@ -307,17 +452,24 @@ export function analyzeReactionAt(
   const centerRef = snap.particles[bestIdx];
   const catChord = catRadius / R;
   const catRef2 = Math.max(catChord * catChord, lifePickChord2);
+  const blobPatchR = Math.min(0.28, Math.max(catChord * 4.5, lifePickChord * 3.0));
+  const blobPatchR2 = blobPatchR * blobPatchR;
   const nearbyLife: number[] = [];
+  const localLifePool: number[] = [];
 
   for (let i = 0; i < nParticles; i++) {
-    const [phase] = unpackLifeTuple(snap.lifeState[i]);
-    if (phase === 0 && showChem) {
+    const meta = unpackLifeMeta(snap.lifeState[i]);
+    if (meta.phase === 0 && showChem) {
       if (unitDistChord2(snap.particles[i], centerRef) < localPatchR2) {
         localChemIdx.push(i);
       }
-    } else if (phase === 1 && showLife) {
-      if (unitDistChord2(snap.particles[i], centerRef) < catRef2) {
+    } else if (meta.phase !== 0 && showLife) {
+      const d2 = unitDistChord2(snap.particles[i], centerRef);
+      if (d2 < catRef2) {
         nearbyLife.push(i);
+      }
+      if (d2 < blobPatchR2) {
+        localLifePool.push(i);
       }
     }
   }
@@ -412,29 +564,35 @@ export function analyzeReactionAt(
       showLife &&
       (kickMag > 0.02 || actScale < 0.985 || Math.abs(glow) > 0.06);
 
-    const roleCounts = [0, 0, 0, 0];
-    let avgE = 0;
-    let avgVit = 0;
-    let avgPoi = 0;
-    for (const oi of nearbyLife) {
-      const lsO = snap.lifeState[oi] ?? [0.65, 0, 0, 1];
-      const [, oiSp] = unpackLifeTuple(lsO);
-      roleCounts[oiSp % 4]++;
-      avgE += lsO[0] ?? 0;
-      avgVit += lsO[1] ?? 0;
-      avgPoi += lsO[2] ?? 0;
-    }
-    if (nearbyLife.length > 0) {
-      avgE /= nearbyLife.length;
-      avgVit /= nearbyLife.length;
-      avgPoi /= nearbyLife.length;
-    }
+    const nearbySummary =
+      nearbyLife.length > 0
+        ? summarizeAndClassifyBlob(
+            nearbyLife,
+            snap.particles,
+            snap.lifeState,
+            els,
+            snap.speciesTraits ?? [],
+            0,
+          )
+        : null;
+    const avgE = nearbySummary?.avgEnergy ?? 0;
+    const avgVit = nearbySummary?.avgVit ?? 0;
+    const avgPoi = nearbySummary?.avgPoi ?? 0;
+    const nearbyRoleLabel =
+      nearbySummary?.role === 'halophile'
+        ? 'Halophile Biofilm'
+        : nearbySummary?.role === 'decomposer'
+          ? 'Decomposer Colony'
+          : nearbySummary?.role === 'mixotroph'
+            ? 'Mixotroph Blob'
+            : nearbySummary?.role === 'consumer'
+              ? 'Consumer Glider'
+              : 'Producer Blob';
 
     const hasOngoingChem = compIds.length >= 2 || directInteract.length > 0;
     if (bioActive) {
       const kind = bioKind(el0.atomicNumber, el0.valence);
       const dropPct = Math.round((1 - actScale) * 100);
-      const dominantRoleIdx = roleCounts.indexOf(Math.max(...roleCounts));
       const radicalSuffix =
         compIds.length === 1
           ? `${sym0} monomer`
@@ -447,47 +605,47 @@ export function analyzeReactionAt(
       if (kind === 3) {
         theme = 'cofactor';
         badge = 'VITAMIN COFACTOR';
-        body = `Abiotic ${sym0} cofactor stabilizing nearby marine enzymes (${nearbyLife.length} organisms), calming thermal jitter and boosting halide detox (+vit ${(avgVit * 100).toFixed(0)}%).`;
+        body = `Abiotic ${sym0} cofactor stabilizing nearby emergent blobs (${nearbyLife.length} living particles), calming thermal jitter (+vit ${(avgVit * 100).toFixed(0)}%).`;
       } else if (kind === 4) {
-        if (roleCounts[2] > 0 && glow < -0.05) {
+        if ((nearbySummary?.haloTol ?? 0) > 0.58 && glow < -0.05) {
           theme = 'cofactor';
           badge = 'HALOPHILE DETOX';
-          body = `Detoxifying halophiles catalyzing abiotic ${sym0} halide into benign salts; barrier lowered ${dropPct}%.`;
+          body = `Halotolerant biofilm detoxifying abiotic ${sym0} halide into benign salts; barrier lowered ${dropPct}%.`;
         } else {
           theme = 'toxic';
           badge = 'HALOGEN TOXIN';
-          body = `Abiotic ${sym0} stressing nearby Ocean Life (avg poison ${(avgPoi * 100).toFixed(0)}%, draining vitality).`;
+          body = `Abiotic ${sym0} stressing nearby emergent blobs (avg poison ${(avgPoi * 100).toFixed(0)}%, draining energy).`;
         }
       } else if (kind === 2) {
         if (glow >= 0) {
           theme = 'anabolic';
           badge = 'CARBON FIXATION';
-          body = `Producers fixing biogenic ${radicalSuffix}: barrier cut ${dropPct}% while recruiting carbon toward living Producer biomass.`;
+          body = `Cohesive ${nearbyRoleLabel} fixing biogenic ${radicalSuffix}: barrier cut ${dropPct}% while recruiting carbon into living tissue.`;
         } else {
           theme = 'catabolic';
           badge = 'CARBON METABOLISM';
-          body = `Consumers cleaving ${radicalSuffix} carbon bonds, harvesting chemical energy (+ΔE) near living biomass.`;
+          body = `Motile ${nearbyRoleLabel} cleaving ${radicalSuffix} carbon bonds, harvesting chemical energy (+ΔE).`;
         }
       } else if (kind === 1) {
         if (glow >= 0) {
           theme = 'anabolic';
           badge = 'HYDRIDE FIXATION';
-          body = `Producers funneling biogenic ${sym0} fuel into lowered-barrier bond synthesis (-${dropPct}% activation).`;
+          body = `Autotrophic blob funneling biogenic ${sym0} fuel into lowered-barrier bond synthesis (-${dropPct}% activation).`;
         } else {
           theme = 'catabolic';
           badge = 'FUEL HARVEST';
-          body = `Marine life harvesting ${sym0} chemical fuel: cleaving weak bonds with exothermic kinetic kick.`;
+          body = `Emergent blob harvesting ${sym0} chemical fuel: cleaving weak bonds with exothermic kinetic kick.`;
         }
       } else {
         theme = glow >= 0 ? 'anabolic' : 'catabolic';
         badge = glow < -0.05 && atomLoad >= 1.35 ? 'OXIDE STRIPPING' : 'RADICAL STABILIZATION';
         body =
           glow < -0.05 && atomLoad >= 1.35
-            ? `Autotrophs stripping excess bound ${sym0} from saturated oxides to free reactive bonding sites.`
+            ? `Blobs stripping excess bound ${sym0} from saturated oxides to free reactive bonding sites.`
             : `Marine symbionts guiding ${sym0} radicals toward stable aqueous equilibrium.`;
       }
 
-      const meta = `Species nearby: ${OCEAN_ROLE_NAMES[dominantRoleIdx]} · Biomass avg E=${avgE.toFixed(2)} · Valence load ${atomLoad.toFixed(2)}/${el0.valence}`;
+      const meta = `Nearby ecology: ${nearbyRoleLabel} · Blob avg E=${avgE.toFixed(2)} · Valence load ${atomLoad.toFixed(2)}/${el0.valence}`;
       return {
         theme,
         badge,
@@ -586,55 +744,101 @@ export function analyzeReactionAt(
     return null;
   }
 
-  // Living Biomass (phase === 1): conserved biogenic element currently fixed in a living guild
+  // Living Biomass (phase === 1): assemble emergent multi-particle blob via BFS over nearby life particles
+  const blobConnectChord = Math.max(0.02, (oceanRMax * 1.35) / R);
+  const blobConnectChord2 = blobConnectChord * blobConnectChord;
+  const tightChord2 = Math.pow((oceanRMax * 0.72) / R, 2);
+
+  const blobIds = [bestIdx];
+  const blobVisited = new Set<number>([bestIdx]);
+  let head = 0;
+  while (head < blobIds.length && blobIds.length < 64) {
+    const u = blobIds[head++];
+    const pu = snap.particles[u];
+    const metaU = unpackLifeMeta(snap.lifeState[u]);
+    for (const j of localLifePool) {
+      if (blobVisited.has(j)) continue;
+      const pj = snap.particles[j];
+      const d2 = unitDistChord2(pu, pj);
+      if (d2 >= blobConnectChord2) continue;
+      const metaJ = unpackLifeMeta(snap.lifeState[j]);
+      if (kinAngularDist(metaU.kinPhase, metaJ.kinPhase) < 0.30 || d2 < tightChord2) {
+        blobVisited.add(j);
+        blobIds.push(j);
+      }
+    }
+  }
+
+  let nearbyHalogens = 0;
+  for (const ci of localChemIdx) {
+    const eC = els[Math.max(0, Math.min(els.length - 1, Math.floor(snap.particles[ci]?.[6] ?? 0)))];
+    if (eC && (eC.atomicNumber === 7 || eC.atomicNumber === 13)) {
+      nearbyHalogens++;
+    }
+  }
+
+  const blob = summarizeAndClassifyBlob(
+    blobIds,
+    snap.particles,
+    snap.lifeState,
+    els,
+    snap.speciesTraits ?? [],
+    nearbyHalogens,
+  );
   const ls = snap.lifeState[bestIdx] ?? [0.65, 0, 0, 1];
-  const energy = ls[0] ?? 0;
   const vit = ls[1] ?? 0;
   const poi = ls[2] ?? 0;
-  const roleIdx = bestBioSp % 4;
   const hasActivity =
-    nearbyLife.length >= 2 ||
+    blob.size >= 2 ||
     vit > 0.04 ||
     poi > 0.04 ||
-    energy < 0.35 ||
-    energy > 0.65;
+    blob.avgEnergy < 0.35 ||
+    blob.avgEnergy > 0.65;
 
   if (hasActivity || includeSingletons) {
     let theme: TooltipTheme = 'ocean';
-    let statusDesc = `Conserved ${selectedElement.name} (${sym0}) cycling in ${OCEAN_ROLE_NAMES[roleIdx]} biomass.`;
+    let badge = 'PRODUCER BLOB · AUTOTROPH';
+    let title = `Producer Blob (${blob.size} ${blob.size === 1 ? 'cell' : 'cells'} · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+    let statusDesc = '';
 
-    if (poi > 0.15) {
-      theme = roleIdx === 2 ? 'cofactor' : 'toxic';
-      statusDesc =
-        roleIdx === 2
-          ? `Halophile clearing dissolved halide toxins while protecting embodied ${sym0} biomass.`
-          : `Biomass containing ${sym0} stressed by halogen toxins (halide injury increases decomposition susceptibility).`;
-    } else if (vit > 0.12) {
+    if (blob.size === 1) {
+      theme = poi > 0.15 ? 'toxic' : 'ocean';
+      badge = 'FREE LIVING CELL';
+      title = `Solitary #${bestBioSp} · Living ${selectedElement.name} (${sym0})`;
+      statusDesc = `Free single cell carrying conserved ${sym0}, drifting until joining a colony or nucleating a new blob.`;
+    } else if (blob.role === 'halophile') {
+      theme = poi > 0.15 ? 'cofactor' : 'ocean';
+      badge = 'HALOPHILE BIOFILM';
+      title = `Halophile Biofilm (${blob.size} cells · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+      statusDesc = `Halotolerant ${blob.formula} colony clearing dissolved Cl/F halides inside saline pockets while shielding embodied ${sym0}.`;
+    } else if (blob.role === 'decomposer') {
       theme = 'cofactor';
-      statusDesc = `Cofactor-stabilized ${OCEAN_ROLE_SHORT[roleIdx].toLowerCase()} holding conserved ${sym0} with elevated halide resilience.`;
-    } else if (energy < 0.25) {
-      theme = 'catabolic';
-      statusDesc = `Low-energy ${sym0} biomass — vulnerable to Decomposer remineralization back into free ${sym0} atoms.`;
-    } else if (roleIdx === 0) {
+      badge = 'DECOMPOSER BLOB · SAPROTROPH';
+      title = `Decomposer Colony (${blob.size} cells · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+      statusDesc = `Redox-rich (${Math.round(blob.avgRedoxFrac * 100)}% S/H) ${blob.formula} saprotroph remineralizing stressed biomass back into free chemistry.`;
+    } else if (blob.role === 'mixotroph') {
       theme = 'anabolic';
-      statusDesc = `Autotroph harvesting solar & coastal upwelling energy to fix nearby C/H/O/S atoms alongside bound ${sym0}.`;
-    } else if (roleIdx === 1) {
+      badge = 'MIXOTROPH BLOB';
+      title = `Mixotroph Swimmer (${blob.size} cells · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+      statusDesc = `Hybrid ${blob.formula} anatomy pairing a cohesive C/O photosynthetic core (coh=${blob.avgCoh.toFixed(2)}) with a motile hunting tail (asym=${blob.avgAsym.toFixed(2)}).`;
+    } else if (blob.role === 'consumer') {
       theme = 'catabolic';
-      statusDesc = `Consumer grazing Producer & Decomposer biomass (~65% assimilated, ~35% respired back to free chemistry).`;
-    } else if (roleIdx === 2) {
-      theme = 'ocean';
-      statusDesc = `Halophile extremophile thriving inside saline halogen refuges around ${sym0} biopolymer.`;
+      badge = 'CONSUMER BLOB · HETEROTROPH';
+      title = `Consumer Glider (${blob.size} cells · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+      statusDesc = `Asymmetric ${blob.formula} swimmer (asym=${blob.avgAsym.toFixed(2)}, motility=${blob.avgMotility.toFixed(2)}) grazing foreign blobs (~65% assimilated, ~35% respired).`;
     } else {
-      theme = 'cofactor';
-      statusDesc = `Decomposer remineralizing stressed/dense biomass (~80% returned as free atoms, ~20% Decomposer biomass).`;
+      theme = 'anabolic';
+      badge = 'PRODUCER BLOB · AUTOTROPH';
+      title = `Producer Blob (${blob.size} cells · ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'type' : 'types'})`;
+      statusDesc = `Calm cohesive ${blob.formula} colony (coh=${blob.avgCoh.toFixed(2)}, solar=${Math.round(blob.avgSolarFrac * 100)}%) fixing free C/H/O/S atoms from sunlight & upwelling.`;
     }
 
     return {
       theme,
-      badge: `${OCEAN_ROLE_NAMES[roleIdx].toUpperCase()} · LIVING`,
-      title: `${OCEAN_ROLE_SHORT[roleIdx]} #${bestBioSp} · Living ${selectedElement.name} (${sym0})`,
+      badge,
+      title,
       body: statusDesc,
-      meta: `Atom #${bestIdx} (${sym0}) · Energy ${energy.toFixed(2)} · Vitamin ${(vit * 100).toFixed(0)}% · Poison ${(poi * 100).toFixed(0)}% · Cluster: ${nearbyLife.length}`,
+      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · Formula ${blob.formula || sym0} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,
       targetIdx: bestIdx,

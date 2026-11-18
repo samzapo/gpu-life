@@ -269,7 +269,7 @@ export function setBioLink(
   bioData[8] = dt;
   bioData[9] = frameCount;
   bioData[10] = seedHash;
-  bioData[11] = 0;
+  bioData[11] = earthParams.oceanMix ? earthParams.oceanStrength : 0;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
 
@@ -630,7 +630,7 @@ export const oceanColoursBinding = withTooltip(
     step: 1,
   }),
   'Ocean Species Count',
-  'Number of marine species (roles cycle across Autotroph, Consumer, Halophile Detoxifier, Decomposer).',
+  'Number of Particle Life organ/tissue species interacting via the random asymmetric matrix to form emergent blobs.',
 );
 const oceanParamSpecs: Record<string, BindingParams> = {
   r: { min: 2, max: 60, step: 0.5 },
@@ -671,7 +671,7 @@ export const newOceanSimBtn = withTooltip(
 export const randomizeOceanRulesBtn = withTooltip(
   oceanLifeFolder.addButton({ title: 'Randomize Ocean Matrix' }),
   'Randomize Ocean Rules',
-  'Generate a fresh random pairwise attraction/repulsion matrix across ocean species.',
+  'Generate a fresh unconstrained asymmetric pairwise Particle Life matrix for emergent gliders, colonies, and swimmers.',
 );
 
 const constantOptions = ['colours', 'cells'];
@@ -802,12 +802,14 @@ export function bindOptions(
     setOceanSim(device, oceanSimData, oceanSimBuffer);
     onBioSync?.();
   });
-  oceanMixBinding.on('change', () =>
-    setOceanSim(device, oceanSimData, oceanSimBuffer),
-  );
-  oceanStrengthBinding.on('change', () =>
-    setOceanSim(device, oceanSimData, oceanSimBuffer),
-  );
+  oceanMixBinding.on('change', () => {
+    setOceanSim(device, oceanSimData, oceanSimBuffer);
+    onBioSync?.();
+  });
+  oceanStrengthBinding.on('change', () => {
+    setOceanSim(device, oceanSimData, oceanSimBuffer);
+    onBioSync?.();
+  });
 }
 
 export function refreshAllPane() {
