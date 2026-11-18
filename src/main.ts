@@ -2,6 +2,7 @@ import { tcamera, mouse } from './input';
 import { createSeededRng, generateRandomSeed } from './matrix';
 import {
   buildPackedChemistryBuffer,
+  computeAbundanceDistribution,
   type Element2D,
 } from './periodicTable2D';
 import renderShaders from './render.wgsl?raw';
@@ -414,27 +415,12 @@ function startParticles() {
   frameCount = 0;
   const rng = createSeededRng(`${params.seed}:chem`);
 
-  // Seeded elemental stoichiometry weights (favoring covalent backbones & H slightly while including all elements)
-  const weights: number[] = [];
-  let totalWeight = 0;
-  for (let c = 0; c < colourAmt; c++) {
-    const el = elements[c];
-    const baseW =
-      el.valence === 0
-        ? 0.25
-        : el.role === 0 && el.valence === 3
-          ? 1.5
-          : el.atomicNumber === 1
-            ? 1.6
-            : 1.0;
-    const w = baseW * (0.4 + 1.2 * rng());
-    weights.push(w);
-    totalWeight += w;
-  }
+  // Sample element species from normalized Earth-surface atomic abundances
+  const probs = computeAbundanceDistribution(colourAmt);
   const cdf: number[] = [];
   let accW = 0;
   for (let c = 0; c < colourAmt; c++) {
-    accW += weights[c] / totalWeight;
+    accW += probs[c];
     cdf.push(accW);
   }
 

@@ -1,5 +1,5 @@
 import { generateRandomSeed } from './matrix';
-import { getElement2D } from './periodicTable2D';
+import { computeAbundanceDistribution, getElement2D } from './periodicTable2D';
 
 const urlParams = new URLSearchParams(window.location.search);
 
@@ -202,11 +202,13 @@ export function updatePeriodicLegend(colourCount: number) {
     periodicFolder.remove(b);
   }
   periodicBindings.length = 0;
+  const probs = computeAbundanceDistribution(colourCount);
   const shown = Math.min(colourCount, 24);
   for (let c = 0; c < shown; c++) {
     const el = getElement2D(c);
     const key = `Z${el.atomicNumber}`;
-    periodicState[key] = el.name.replace(`Z=${el.atomicNumber} `, '');
+    const pct = (probs[c] * 100).toFixed(probs[c] >= 0.01 ? 1 : 2);
+    periodicState[key] = `${el.name.replace(`Z=${el.atomicNumber} `, '')} (${pct}%)`;
     periodicBindings.push(
       periodicFolder.addBinding(periodicState, key, { readonly: true }),
     );

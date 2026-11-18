@@ -12,6 +12,8 @@ export interface Element2D {
   role: -1 | 0 | 1;
   /** Body-frame slot angles (up to 3 slots) in radians. */
   slotAngles: [number, number, number];
+  /** Relative Earth-surface atomic abundance weight (normalized in startParticles). */
+  relativeAbundance: number;
   /** Visual RGB colour [0..1]. */
   color: [number, number, number];
 }
@@ -81,6 +83,44 @@ function computeElementColor(
   }
   // Valence-2 donors / transition metals (sky blue)
   return [0.26 * dim, 0.68 * dim, 1.0 * dim];
+}
+
+// Relative Earth-surface (crust + oceans + atmosphere) atomic weights for Z=1..14
+// in the 2D Periodic Table (period lengths: 2, 6, 6, ...), with O, H, Si dominating,
+// Mg/C/Na/Cl secondary, S/Ar/Li/F/Be minor, and He/Ne rare.
+const EARTH_SURFACE_WEIGHTS_P1_TO_P3: Record<number, number> = {
+  1: 0.21, // 1s1  2D H  (hydrosphere & organics)
+  2: 0.002, // 1s2  2D He (escapes gravity well)
+  3: 0.008, // 2s1  2D Li (light alkali trace)
+  4: 0.005, // 2s2  2D Be (rare light alkaline-earth)
+  5: 0.06, // 2p1  2D C/N analog (biosphere & carbonates)
+  6: 0.36, // 2p2  2D O  (rock oxides & water)
+  7: 0.008, // 2p3  2D F  (trace halogen)
+  8: 0.002, // 2p4  2D Ne (rare noble gas)
+  9: 0.05, // 3s1  2D Na (crustal & seawater alkali)
+  10: 0.065, // 3s2  2D Mg/Ca/Fe²⁺ divalent crustal metal
+  11: 0.17, // 3p1  2D Si/Al silicate network former
+  12: 0.015, // 3p2  2D S  (sulfates/sulfides)
+  13: 0.025, // 3p3  2D Cl (seawater halogen)
+  14: 0.01, // 3p4  2D Ar (atmospheric noble gas)
+};
+
+function computeEarthSurfaceWeight(
+  z: number,
+  period: number,
+  block: 's' | 'p' | 'd' | 'f',
+  valence: number,
+): number {
+  if (z in EARTH_SURFACE_WEIGHTS_P1_TO_P3) {
+    return EARTH_SURFACE_WEIGHTS_P1_TO_P3[z];
+  }
+  // Periods 4..7: steep crustal drop-off with transition-metal (d) bump & Oddo-Harkins alternation
+  const periodScale = Math.pow(0.28, period - 3);
+  const blockFactor =
+    block === 'd' ? 1.6 : block === 's' ? 1.0 : block === 'f' ? 0.35 : 0.7;
+  const evenOdd = z % 2 === 0 ? 1.25 : 0.8;
+  const noblePenalty = valence === 0 ? 0.12 : 1.0;
+  return 0.045 * periodScale * blockFactor * evenOdd * noblePenalty;
 }
 
 export function getElement2D(speciesIndex: number): Element2D {
@@ -161,6 +201,7 @@ export function getElement2D(speciesIndex: number): Element2D {
     valence,
     role,
     slotAngles,
+    relativeAbundance: computeEarthSurfaceWeight(z, period, block, valence),
     color: computeElementColor(period, valence, role, z),
   };
 }
@@ -185,6 +226,20 @@ export function computePairAffinity(e1: Element2D, e2: Element2D): number {
   }
   // Same-polarity (Donor+Donor or Acceptor+Acceptor) repel
   return -0.55;
+}
+
+/**
+ * Returns normalized Earth-surface atomic fractions (summing to 1.0) across the active species.
+ */
+export function computeAbundanceDistribution(colourAmt: number): number[] {
+  const weights: number[] = [];
+  let total = 0;
+  for (let c = 0; c < colourAmt; c++) {
+    const w = getElement2D(c).relativeAbundance;
+    weights.push(w);
+    total += w;
+  }
+  return weights.map((w) => (total > 0 ? w / total : 1 / Math.max(colourAmt, 1)));
 }
 
 export const SPECIES_STRIDE_FLOATS = 8;
