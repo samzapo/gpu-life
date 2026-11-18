@@ -119,15 +119,16 @@ export class WindStreamRenderer {
 
     const spec = WIND_LEVELS[grid.level];
     const scale = proj.scale();
-    // Angular advance keeps apparent pixel streak speed consistent from whole-globe zoom to regional zoom
-    const radScale = (1.55 / Math.max(scale, 80)) / Math.max(spec.streamMax, 5) * 18;
+    // Target ~4.2 px/frame at streamMax across all zoom levels, keeping fast gales & jets crisp
+    const radScale = 4.2 / (Math.max(scale, 80) * Math.max(spec.streamMax, 5));
 
     const buckets: [number, number, number, number][][] = Array.from(
       { length: INTENSITY_BUCKETS },
       () => [],
     );
 
-    const maxSegJump = 18;
+    // Reject only projection tear / antimeridian jumps, never legitimate fast wind steps
+    const maxSegJump = 28;
     const DEG2RAD = Math.PI / 180;
     const RAD2DEG = 180 / Math.PI;
 
@@ -137,54 +138,67 @@ export class WindStreamRenderer {
       }
       p.age++;
 
-      const scr0 = proj([p.lon, p.lat]);
-      const [u, v, mag] = sampleWindLonLat(grid, p.lon, p.lat);
-      const cosLat = Math.max(0.18, Math.cos(p.lat * DEG2RAD));
-      const dLon = (u / cosLat) * radScale * RAD2DEG;
-      const dLat = v * radScale * RAD2DEG;
+      let curLon = p.lon;
+      let curLat = p.lat;
+      let scr0 = proj([curLon, curLat]);
+      const [u0, v0, mag0] = sampleWindLonLat(grid, curLon, curLat);
 
-      let nextLon = p.lon + dLon;
-      if (nextLon > 180) nextLon -= 360;
-      else if (nextLon < -180) nextLon += 360;
-      const nextLat = Math.max(-89.5, Math.min(89.5, p.lat + dLat));
+      // Sub-step high-speed regions (> streamMax) so curved gale/jet paths stay smooth and never clip
+      const nSub = Math.min(4, Math.max(1, Math.ceil(mag0 / Math.max(spec.streamMax, 5))));
+      const subRadScale = radScale / nSub;
 
-      const scr1 = proj([nextLon, nextLat]);
-      p.lon = nextLon;
-      p.lat = nextLat;
+      for (let s = 0; s < nSub; s++) {
+        const [u, v, mag] = s === 0 ? [u0, v0, mag0] : sampleWindLonLat(grid, curLon, curLat);
+        const cosLat = Math.max(0.18, Math.cos(curLat * DEG2RAD));
+        const dLon = (u / cosLat) * subRadScale * RAD2DEG;
+        const dLat = v * subRadScale * RAD2DEG;
+
+        let nextLon = curLon + dLon;
+        if (nextLon > 180) nextLon -= 360;
+        else if (nextLon < -180) nextLon += 360;
+        const nextLat = Math.max(-89.5, Math.min(89.5, curLat + dLat));
+
+        const scr1 = proj([nextLon, nextLat]);
+        curLon = nextLon;
+        curLat = nextLat;
+
+        if (
+          scr0 &&
+          scr1 &&
+          Number.isFinite(scr0[0]) &&
+          Number.isFinite(scr0[1]) &&
+          Number.isFinite(scr1[0]) &&
+          Number.isFinite(scr1[1])
+        ) {
+          const dx = scr1[0] - scr0[0];
+          const dy = scr1[1] - scr0[1];
+          if (dx * dx + dy * dy <= maxSegJump * maxSegJump) {
+            const bIdx = Math.min(
+              INTENSITY_BUCKETS - 1,
+              Math.floor((Math.min(mag, spec.streamMax) / spec.streamMax) * (INTENSITY_BUCKETS - 1)),
+            );
+            buckets[bIdx].push([scr0[0], scr0[1], scr1[0], scr1[1]]);
+          }
+        }
+        scr0 = scr1;
+      }
+
+      p.lon = curLon;
+      p.lat = curLat;
 
       if (
         !scr0 ||
-        !scr1 ||
         !Number.isFinite(scr0[0]) ||
         !Number.isFinite(scr0[1]) ||
-        !Number.isFinite(scr1[0]) ||
-        !Number.isFinite(scr1[1])
-      ) {
-        if (this.frameCounter % 4 === 0 && !scr1) {
-          p.age = MAX_AGE;
-        }
-        continue;
-      }
-
-      if (
         scr0[0] < -40 ||
         scr0[0] > width + 40 ||
         scr0[1] < -40 ||
         scr0[1] > height + 40
       ) {
-        p.age = MAX_AGE;
-        continue;
+        if (scr0 || this.frameCounter % 4 === 0) {
+          p.age = MAX_AGE;
+        }
       }
-
-      if (Math.hypot(scr1[0] - scr0[0], scr1[1] - scr0[1]) > maxSegJump) {
-        continue;
-      }
-
-      const bIdx = Math.min(
-        INTENSITY_BUCKETS - 1,
-        Math.floor((Math.min(mag, spec.streamMax) / spec.streamMax) * (INTENSITY_BUCKETS - 1)),
-      );
-      buckets[bIdx].push([scr0[0], scr0[1], scr1[0], scr1[1]]);
     }
 
     ctx.save();
