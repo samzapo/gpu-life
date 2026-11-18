@@ -17,6 +17,8 @@ fn getCellForce(
     sP: SpeciesInfo,
     mySlots: vec4f,
     actScale: f32,
+    bioCleave: f32,
+    shearStress: f32,
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
@@ -40,12 +42,14 @@ fn getCellForce(
             ip.orient,
             valence[ip.idx],
             actScale,
+            bioCleave,
+            shearStress,
             acc,
         );
     }
 }
 
-fn getForce(pi: u32, actScale: f32) -> ForceResult {
+fn getForce(pi: u32, actScale: f32, bioCleave: f32, shearStress: f32) -> ForceResult {
     let p = input[pi];
     let sP = getSpeciesInfo(u32(p.colour));
     let mySlots = valence[pi];
@@ -60,7 +64,7 @@ fn getForce(pi: u32, actScale: f32) -> ForceResult {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getCellForce(pi, p, sP, mySlots, actScale, c, &acc);
+                getCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, c, &acc);
             }
         }
     }
@@ -75,16 +79,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let p = input[pi];
+    let mySlots = valence[pi];
     let bioReact = airBioReact[pi];
-    let actScale = unpackActGlow(bioReact.w).x;
-    let res = getForce(pi, actScale);
-    let windUv = sampleWindTexture(windTex, p.pos);
+    let actGlow = unpackActGlow(bioReact.w);
+    let actScale = actGlow.x;
+    let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
+    let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
+    let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
+    let res = getForce(pi, actScale, bioCleave, shearStress);
     output[pi] = integrateParticle(
         pi,
         p,
+        mySlots,
         res,
-        windUv,
-        uniforms.flags.w,
+        windSample,
+        shearStress,
         uniforms.mouseSphere,
         bioReact,
     );

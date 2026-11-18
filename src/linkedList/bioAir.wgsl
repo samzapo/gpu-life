@@ -39,7 +39,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let atomLoad = airValence[pi].w;
+    let vLoad = airValence[pi];
+    let atomLoad = vLoad.x + vLoad.y + vLoad.z;
     var acc = BioAirAccum(vec3f(0.0), 1.0, 0.0, 0.0);
 
     let worldP = p.pos * bio.worldSize;

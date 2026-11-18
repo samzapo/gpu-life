@@ -33,6 +33,10 @@ export interface SimConfigV1 {
     showOrbitals?: boolean;
     avoidance?: number;
     worldSize?: number;
+    bondStability?: number;
+    exchangeDrive?: number;
+    shearBreak?: number;
+    shearFloor?: number;
   };
   ocean?: {
     particles?: number;
@@ -169,6 +173,10 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
   cfg.air!.temperature = numParam('temperature');
   cfg.air!.activation = numParam('activation');
   cfg.air!.orbitalSharpness = numParam('orbitalSharpness');
+  cfg.air!.bondStability = numParam('bondStability');
+  cfg.air!.exchangeDrive = numParam('exchangeDrive');
+  cfg.air!.shearBreak = numParam('shearBreak');
+  cfg.air!.shearFloor = numParam('shearFloor');
 
   cfg.ocean!.particles = numParam('oceanParticles');
   cfg.ocean!.colours = numParam('oceanColours');
@@ -245,6 +253,10 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     showOrbitals: boolVal(airRaw.showOrbitals),
     avoidance: finiteNum(airRaw.avoidance),
     worldSize: finiteNum(airRaw.worldSize),
+    bondStability: finiteNum(airRaw.bondStability),
+    exchangeDrive: finiteNum(airRaw.exchangeDrive),
+    shearBreak: finiteNum(airRaw.shearBreak),
+    shearFloor: finiteNum(airRaw.shearFloor),
   };
 
   out.ocean = {

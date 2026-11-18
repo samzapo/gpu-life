@@ -37,6 +37,10 @@ struct Sim {
     orbitalSharpness: f32,
     frame: f32,
     windStrength: f32,
+    bondStability: f32,
+    exchangeDrive: f32,
+    shearBreak: f32,
+    shearFloor: f32,
 }
 
 // Original-fork (51bc381) Particle Life uniforms for the Ocean Currents layer.

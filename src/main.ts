@@ -141,9 +141,9 @@ const windStreamRenderer = new WindStreamRenderer();
 const uniformsFloats = 32; // 128 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const oceanUniformData = new Float32Array(uniformsFloats);
-const simSize = 20;
+const simSize = 24;
 const simData = new Float32Array(simSize);
-const oceanSimSize = 20;
+const oceanSimSize = 24;
 const oceanSimData = new Float32Array(oceanSimSize);
 const bioUniformFloats = 12;
 const bioUniformData = new Float32Array(bioUniformFloats);
@@ -387,6 +387,10 @@ function exportCurrentConfig(): SimConfigV1 {
       temperature: optionParams.temperature,
       activation: optionParams.activation,
       orbitalSharpness: optionParams.orbitalSharpness,
+      bondStability: optionParams.bondStability,
+      exchangeDrive: optionParams.exchangeDrive,
+      shearBreak: optionParams.shearBreak,
+      shearFloor: optionParams.shearFloor,
       showOrbitals: optionParams.showOrbitals,
       avoidance: optionParams.avoidance,
       worldSize: optionParams.worldSize,
@@ -527,6 +531,10 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (a.temperature !== undefined) optionParams.temperature = a.temperature;
     if (a.activation !== undefined) optionParams.activation = a.activation;
     if (a.orbitalSharpness !== undefined) optionParams.orbitalSharpness = a.orbitalSharpness;
+    if (a.bondStability !== undefined) optionParams.bondStability = a.bondStability;
+    if (a.exchangeDrive !== undefined) optionParams.exchangeDrive = a.exchangeDrive;
+    if (a.shearBreak !== undefined) optionParams.shearBreak = a.shearBreak;
+    if (a.shearFloor !== undefined) optionParams.shearFloor = a.shearFloor;
     if (a.showOrbitals !== undefined) optionParams.showOrbitals = a.showOrbitals;
     if (a.avoidance !== undefined) optionParams.avoidance = a.avoidance;
     if (a.worldSize !== undefined) {
@@ -1917,7 +1925,7 @@ function writeUniforms() {
   uniformData[0] = viewState.width;
   uniformData[1] = viewState.height;
   uniformData[2] = viewState.width / Math.max(viewState.height, 1);
-  uniformData[3] = ((1 / optionParams.r) / R) * optionParams.beta * 0.34;
+  uniformData[3] = ((1 / optionParams.r) / R) * optionParams.beta * 0.39;
 
   uniformData[4] = mouseSphere.x;
   uniformData[5] = mouseSphere.y;

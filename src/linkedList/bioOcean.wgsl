@@ -51,7 +51,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let sBase = sc * SPECIES_STRIDE;
                     let valence = u32(airMatrix[sBase + 0u]);
                     let atomicNum = u32(airMatrix[sBase + 7u]);
-                    let atomLoad = airValence[atom.idx].w;
+                    let vLoad = airValence[atom.idx];
+                    let atomLoad = vLoad.x + vLoad.y + vLoad.z;
                     accumulateBioOceanNeighbor(
                         p.pos,
                         p.colour,

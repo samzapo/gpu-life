@@ -89,12 +89,16 @@ const defaultEngine = urlParams.has('engine')
   : (cachedConfig?.engine ?? 'prefixSum');
 const defaultRadius = resolveNumber('radius', cachedConfig?.air?.r, 12);
 const defaultWorldSize = resolveNumber('worldSize', cachedConfig?.air?.worldSize, 1.8);
-const defaultTorque = resolveNumber('torque', cachedConfig?.air?.torque, 22);
-const defaultAngularFriction = resolveNumber('angularFriction', cachedConfig?.air?.angularFriction, 0.04);
-const defaultValency = resolveNumber('valency', cachedConfig?.air?.valency, 1.15);
-const defaultTemperature = resolveNumber('temperature', cachedConfig?.air?.temperature, 0.12);
-const defaultActivation = resolveNumber('activation', cachedConfig?.air?.activation, 0.15);
-const defaultOrbitalSharpness = resolveNumber('orbitalSharpness', cachedConfig?.air?.orbitalSharpness, 4);
+const defaultTorque = resolveNumber('torque', cachedConfig?.air?.torque, 42);
+const defaultAngularFriction = resolveNumber('angularFriction', cachedConfig?.air?.angularFriction, 0.03);
+const defaultValency = resolveNumber('valency', cachedConfig?.air?.valency, 1.35);
+const defaultTemperature = resolveNumber('temperature', cachedConfig?.air?.temperature, 0.1);
+const defaultActivation = resolveNumber('activation', cachedConfig?.air?.activation, 0.12);
+const defaultOrbitalSharpness = resolveNumber('orbitalSharpness', cachedConfig?.air?.orbitalSharpness, 6);
+const defaultBondStability = resolveNumber('bondStability', cachedConfig?.air?.bondStability, 0.82, 0);
+const defaultExchangeDrive = resolveNumber('exchangeDrive', cachedConfig?.air?.exchangeDrive, 0.85, 0);
+const defaultShearBreak = resolveNumber('shearBreak', cachedConfig?.air?.shearBreak, 1.1, 0);
+const defaultShearFloor = resolveNumber('shearFloor', cachedConfig?.air?.shearFloor, 0.2, 0);
 const defaultSeed = urlParams.has('seed')
   ? validateURLParam('seed', generateRandomSeed())
   : (cachedConfig?.seed ?? generateRandomSeed());
@@ -253,9 +257,9 @@ export function setBioLink(
 export const optionParams = {
   colours: colourAmt,
   r: defaultRadius,
-  force: resolveNumber(null, cachedConfig?.air?.force, 2.5),
+  force: resolveNumber(null, cachedConfig?.air?.force, 3.8),
   beta: resolveNumber(null, cachedConfig?.air?.beta, 0.4),
-  delta: resolveNumber(null, cachedConfig?.air?.delta, 0.02),
+  delta: resolveNumber(null, cachedConfig?.air?.delta, 0.016),
   friction: resolveNumber(null, cachedConfig?.air?.friction, 0.04),
   torque: defaultTorque,
   angularFriction: defaultAngularFriction,
@@ -263,6 +267,10 @@ export const optionParams = {
   temperature: defaultTemperature,
   activation: defaultActivation,
   orbitalSharpness: defaultOrbitalSharpness,
+  bondStability: defaultBondStability,
+  exchangeDrive: defaultExchangeDrive,
+  shearBreak: defaultShearBreak,
+  shearFloor: defaultShearFloor,
   showOrbitals: resolveBool(null, cachedConfig?.air?.showOrbitals, true),
   cells: cellAmt,
   avoidance: resolveNumber(null, cachedConfig?.air?.avoidance, 4),
@@ -299,6 +307,10 @@ export function setSim(
   simData[17] = optionParams.orbitalSharpness;
   simData[18] = frameCount;
   simData[19] = earthParams.windStrength;
+  simData[20] = optionParams.bondStability;
+  simData[21] = optionParams.exchangeDrive;
+  simData[22] = optionParams.shearBreak;
+  simData[23] = optionParams.shearFloor;
   device.queue.writeBuffer(simBuffer, 0, simData);
 }
 
@@ -707,6 +719,10 @@ const options: Record<string, BindingParams> = {
   temperature: { min: 0, max: 3 },
   activation: { min: 0, max: 1.5 },
   orbitalSharpness: { label: 'lobeFocus', min: 1, max: 12, step: 0.5 },
+  bondStability: { label: 'bondStab', min: 0, max: 1, step: 0.02 },
+  exchangeDrive: { label: 'reactSwap', min: 0, max: 2, step: 0.05 },
+  shearBreak: { label: 'shearBreak', min: 0, max: 3, step: 0.05 },
+  shearFloor: { label: 'shearFloor', min: 0, max: 0.8, step: 0.02 },
   showOrbitals: { label: 'showValence' },
   avoidance: { min: 0 },
   worldSize: { label: 'sphereRadius', min: 0.5, max: 5.0 },
@@ -721,9 +737,13 @@ const optionTips: Record<string, [string, string]> = {
   torque: ['Orbital Alignment Torque', 'Rotational strength aligning atomic valence slots directly toward bonded partners.'],
   angularFriction: ['Angular Friction', 'Spin damping half-life controlling how quickly valence orbital orientations settle.'],
   valency: ['Valency Stiffness', 'Suppression strength blocking extra bonds once an atom fills its outer valence slots.'],
-  temperature: ['Thermal Noise (Temperature)', 'Stochastic Brownian kinetic agitation driving collisions and endothermic bond cleavage.'],
-  activation: ['Activation Energy Barrier', 'Repulsive barrier outside the bond well that bio-catalysts locally lower to speed reactions.'],
+  temperature: ['Thermal Noise (Temperature)', 'Stochastic Brownian kinetic agitation driving free-atom collisions while bonded molecules cool cleanly.'],
+  activation: ['Activation Energy Barrier', 'Repulsive barrier outside the bond well lowered by catalysts and high-affinity reaction candidates.'],
   orbitalSharpness: ['Orbital Lobe Focus', 'Angular sharpness exponent concentrating attraction/repulsion onto discrete valence lobes.'],
+  bondStability: ['Molecular Bond Stabilization', 'Calms bonded thermal jitter, tightens bond equilibrium so valence orbitals overlap, and shields coherent drift in low winds.'],
+  exchangeDrive: ['Reaction Displacement Drive', 'Selectivity allowing strictly higher-affinity reaction candidates to displace weaker bonded partners while blocking equal/weaker collisions.'],
+  shearBreak: ['High-Wind Shear Breakup', 'How strongly storm/jet wind gradients exceeding shearFloor weaken and tear apart molecules.'],
+  shearFloor: ['Low-Wind Shear Shield', 'Wind-shear threshold below which formed molecules drift coherently on gentle winds without shearing apart.'],
   showOrbitals: ['Show Valence Orbitals', 'Render outer valence electron slots/rings around atoms instead of plain discs.'],
   avoidance: ['Crowding Avoidance', 'Short-range crowding divisor preventing instability in tight multi-atom clusters.'],
   worldSize: ['Sphere Radius', 'Simulated physical sphere radius controlling local interaction range relative to Earth.'],
@@ -798,15 +818,19 @@ export function buildFactoryConfig(seed: string, oceanSeed: string): SimConfigV1
     air: {
       r: 12,
       beta: 0.4,
-      force: 2.5,
-      delta: 0.02,
+      force: 3.8,
+      delta: 0.016,
       friction: 0.04,
-      torque: 22,
-      angularFriction: 0.04,
-      valency: 1.15,
-      temperature: 0.12,
-      activation: 0.15,
-      orbitalSharpness: 4,
+      torque: 42,
+      angularFriction: 0.03,
+      valency: 1.35,
+      temperature: 0.1,
+      activation: 0.12,
+      orbitalSharpness: 6,
+      bondStability: 0.82,
+      exchangeDrive: 0.85,
+      shearBreak: 1.1,
+      shearFloor: 0.2,
       showOrbitals: true,
       avoidance: 4,
       worldSize: 1.8,

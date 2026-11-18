@@ -26,6 +26,71 @@ fn getPairAffinity(c1: u32, c2: u32) -> f32 {
     return matrix[header + sc1 * nColours + sc2];
 }
 
+fn encodeSlotAffs(a0: f32, a1: f32, a2: f32) -> f32 {
+    let q0 = u32(clamp(round(a0 * 100.0), 0.0, 250.0));
+    let q1 = u32(clamp(round(a1 * 100.0), 0.0, 250.0));
+    let q2 = u32(clamp(round(a2 * 100.0), 0.0, 250.0));
+    return f32(q0 + q1 * 256u + q2 * 65536u);
+}
+
+fn decodeSlotAff(packed: f32, slotIdx: u32) -> f32 {
+    let u = u32(max(packed, 0.0) + 0.5);
+    let q = (u >> (slotIdx * 8u)) & 255u;
+    return f32(q) * 0.01;
+}
+
+struct WindSample {
+    pointWind: vec3f,
+    avgWind: vec3f,
+    shearDir: vec3f,
+    shearRel: f32,
+    refSpeed: f32,
+}
+
+fn sampleWind3D(windTex: texture_2d<f32>, dir: vec3f) -> vec3f {
+    let n = normalize(dir);
+    let uv = sampleWindTexture(windTex, n);
+    let eEast = sphereEastBasis(n);
+    let eNorth = normalize(cross(n, eEast));
+    return uv.x * eEast + uv.y * eNorth;
+}
+
+fn evalWindAndShear(
+    windTex: texture_2d<f32>,
+    pos: vec3f,
+    windStreamMax: f32,
+) -> WindSample {
+    if (sim.vortex <= 0.0 || sim.windStrength <= 0.0) {
+        return WindSample(vec3f(0.0), vec3f(0.0), vec3f(0.0), 0.0, 10.0);
+    }
+    let R = max(sim.worldSize, 0.25);
+    let eEast = sphereEastBasis(pos);
+    let eNorth = normalize(cross(pos, eEast));
+    let eps = clamp((sim.rMax / R) * 0.55, 0.008, 0.045);
+
+    let w0 = sampleWind3D(windTex, pos);
+    var wE = sampleWind3D(windTex, pos + eps * eEast);
+    var wW = sampleWind3D(windTex, pos - eps * eEast);
+    var wN = sampleWind3D(windTex, pos + eps * eNorth);
+    var wS = sampleWind3D(windTex, pos - eps * eNorth);
+
+    wE -= dot(wE, pos) * pos;
+    wW -= dot(wW, pos) * pos;
+    wN -= dot(wN, pos) * pos;
+    wS -= dot(wS, pos) * pos;
+
+    let avgWind = (w0 + 0.5 * (wE + wW + wN + wS)) / 3.0;
+    let dE = wE - wW;
+    let dN = wN - wS;
+    let shearMs = 0.5 * sqrt(dot(dE, dE) + dot(dN, dN));
+    let refSpeed = max(windStreamMax, 10.0);
+    // Physical shear rate scaled against a fixed 22 m/s storm shear scale so higher-altitude jet shear genuinely exceeds gentle surface breeze shear
+    let shearRel = (shearMs / 22.0) * sim.windStrength;
+    var shearVec = (dE * 0.5 + dN * 0.5);
+    shearVec -= dot(shearVec, pos) * pos;
+    return WindSample(w0, avgWind, shearVec, shearRel, refSpeed);
+}
+
 // Evaluates directional orbital lobe L(delta) = max(0, cos(delta))^p and dL/d(delta).
 fn evalLobe(delta: f32, p: f32) -> vec2f {
     let c = cos(delta);
@@ -143,7 +208,19 @@ fn accumulateValenceNeighbor(
     } else {
         (*slotAcc).z += w;
     }
-    (*slotAcc).w += w;
+    if (w >= 0.16) {
+        var a0 = decodeSlotAff((*slotAcc).w, 0u);
+        var a1 = decodeSlotAff((*slotAcc).w, 1u);
+        var a2 = decodeSlotAff((*slotAcc).w, 2u);
+        if (k == 0u) {
+            a0 = max(a0, aff);
+        } else if (k == 1u) {
+            a1 = max(a1, aff);
+        } else {
+            a2 = max(a2, aff);
+        }
+        (*slotAcc).w = encodeSlotAffs(a0, a1, a2);
+    }
 }
 
 fn getSlotValue(slots: vec4f, k: u32) -> f32 {
@@ -162,6 +239,8 @@ fn accumulateSimNeighbor(
     ipOrient: vec3f,
     nbSlots: vec4f,
     actScale: f32,
+    bioCleave: f32,
+    shearStress: f32,
     acc: ptr<function, ForceAccum>,
 ) {
     let R = max(sim.worldSize, 0.25);
@@ -223,7 +302,8 @@ fn accumulateSimNeighbor(
     if (rNorm >= wellEnd) {
         if (sim.activation > 0.0) {
             let u = (rNorm - wellEnd) / max(1.0 - wellEnd, 1e-4);
-            let fAct = -(sim.activation * clamp(actScale, 0.05, 1.0)) * sin(PI * u);
+            let evansPolanyi = max(0.15, 1.0 - max(0.0, aff - 1.04) * 2.4 * max(sim.exchangeDrive, 0.0));
+            let fAct = -(sim.activation * clamp(actScale, 0.05, 1.0) * evansPolanyi) * sin(PI * u);
             (*acc).repelForce += dI * fAct;
         }
         return;
@@ -252,7 +332,22 @@ fn accumulateSimNeighbor(
     let m = u32(lobeJ.x);
     let otherI = max(0.0, getSlotValue(mySlots, k) - w);
     let otherJ = max(0.0, getSlotValue(nbSlots, m) - w);
-    let avail = max(0.0, 1.0 - sim.valency * otherI) * max(0.0, 1.0 - sim.valency * otherJ);
+
+    // Higher-affinity candidates can displace weaker occupants in filled slots
+    let exch = max(sim.exchangeDrive, 0.0);
+    let incI = decodeSlotAff(mySlots.w, k);
+    let incJ = decodeSlotAff(nbSlots.w, m);
+    let advI = max(0.0, aff - incI - 0.04);
+    let advJ = max(0.0, aff - incJ - 0.04);
+    let relaxI = clamp(advI * 3.2 * exch, 0.0, 0.92);
+    let relaxJ = clamp(advJ * 3.2 * exch, 0.0, 0.92);
+    let effOtherI = otherI * (1.0 - relaxI);
+    let effOtherJ = otherJ * (1.0 - relaxJ);
+    var avail = max(0.0, 1.0 - sim.valency * effOtherI) * max(0.0, 1.0 - sim.valency * effOtherJ);
+    let disfavored = max(0.0, max(incI, incJ) - aff - 0.06);
+    if (disfavored > 0.0 && exch > 0.0) {
+        avail *= max(0.0, 1.0 - disfavored * 3.0 * exch);
+    }
 
     if (avail <= 0.05) {
         if (rNorm > beta) {
@@ -262,15 +357,24 @@ fn accumulateSimNeighbor(
         return;
     }
 
+    let stab = clamp(sim.bondStability, 0.0, 1.0);
+    let wellMod = clamp((1.0 - 0.70 * bioCleave) * (1.0 - 0.75 * shearStress), 0.15, 1.0);
+
     if (rNorm >= beta) {
-        let mid = 0.5 * (beta + wellEnd);
-        let halfW = max(0.5 * (wellEnd - beta), 1e-4);
-        let fWell = max(0.0, 1.0 - abs(rNorm - mid) / halfW);
-        let fPull = aff * avail * fWell * lI * lJ;
+        let rPeak = mix(0.5 * (beta + wellEnd), beta + 0.34 * (wellEnd - beta), stab);
+        var fWell = 0.0;
+        if (rNorm <= rPeak) {
+            fWell = (rNorm - beta) / max(rPeak - beta, 1e-4);
+        } else {
+            fWell = 1.0 - (rNorm - rPeak) / max(wellEnd - rPeak, 1e-4);
+        }
+        fWell = max(0.0, fWell);
+        let cohBoost = 1.0 + 0.35 * stab;
+        let fPull = aff * avail * fWell * lI * lJ * cohBoost * wellMod;
         (*acc).bondForce += dI * fPull;
     }
 
-    let bondStrength = aff * avail * pres;
+    let bondStrength = aff * avail * pres * mix(1.0, wellMod, 0.65);
     if (bondStrength > 0.0) {
         let tHat = cross(p.pos, dI);
         let invRClamped = 1.0 / max(r, 0.35 * sim.rMax);
@@ -290,9 +394,10 @@ fn finalizeForces(acc: ForceAccum) -> ForceResult {
 fn integrateParticle(
     pi: u32,
     pIn: Particle,
+    mySlots: vec4f,
     res: ForceResult,
-    windUv: vec3f,
-    windStreamMax: f32,
+    windSample: WindSample,
+    shearStress: f32,
     mouseSphere: vec4f,
     bioReact: vec4f,
 ) -> Particle {
@@ -308,25 +413,40 @@ fn integrateParticle(
     let uBody = orthoBasis(p.pos, p.orient);
     let bBody = cross(p.pos, uBody);
 
+    let sP = getSpeciesInfo(u32(p.colour));
+    let bondLoad = mySlots.x + mySlots.y + mySlots.z;
+    let bondFrac = select(0.0, clamp(bondLoad / max(sP.valence, 1.0), 0.0, 1.0), u32(sP.valence) > 0u);
+    let stab = clamp(sim.bondStability, 0.0, 1.0);
+
     let actGlow = unpackActGlow(bioReact.w);
+    let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
+    let catAgitation = clamp(bioCleave * 0.85 + length(bioReact.xyz) * 0.12 + shearStress, 0.0, 1.0);
     let tempScale = mix(0.28, 1.0, actGlow.x);
+    let calmFactor = mix(1.0, max(0.04, 1.0 - 0.92 * stab), bondFrac * (1.0 - catAgitation));
+
     if (sim.temperature > 0.0) {
         let frame = u32(sim.frame);
         let h1 = hashFloat(pi, frame, 0u) * 2.0 - 1.0;
         let h2 = hashFloat(pi, frame, 1u) * 2.0 - 1.0;
         let h3 = hashFloat(pi, frame, 2u) * 2.0 - 1.0;
         let sqrtDt = sqrt(sim.dt);
-        p.vel += (uBody * h1 + bBody * h2) * (sim.temperature * tempScale * sim.rMax * sqrtDt * 2.2);
-        p.omega += sim.temperature * tempScale * h3 * sqrtDt * 12.0;
+        p.vel += (uBody * h1 + bBody * h2) * (sim.temperature * tempScale * calmFactor * sim.rMax * sqrtDt * 2.2);
+        p.omega += sim.temperature * tempScale * calmFactor * h3 * sqrtDt * 12.0;
     }
 
-    // Live global atmospheric wind force field ("vortex" mixing across the sphere)
+    // Live global atmospheric wind force field with coherent low-wind drift & high-shear tearing
     if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
-        let eEast = sphereEastBasis(p.pos);
-        let eNorth = normalize(cross(p.pos, eEast));
-        let wind3D = windUv.x * eEast + windUv.y * eNorth;
-        let refSpeed = max(windStreamMax, 10.0);
-        var wTarget = (wind3D / refSpeed) * (0.45 * sim.windStrength);
+        let calmWind = bondFrac * stab * (1.0 - shearStress);
+        let windEff = mix(windSample.pointWind, windSample.avgWind, calmWind);
+        var wTarget = (windEff / windSample.refSpeed) * (0.45 * sim.windStrength);
+        if (shearStress > 0.0) {
+            let frame = u32(sim.frame);
+            let sh1 = hashFloat(pi, frame, 3u) * 2.0 - 1.0;
+            let sh2 = hashFloat(pi, frame, 4u) * 2.0 - 1.0;
+            let eddy = (windSample.shearDir / windSample.refSpeed) * (sh1 * 0.65)
+                     + (uBody * sh1 + bBody * sh2) * (0.18 * windSample.shearRel);
+            wTarget += eddy * (shearStress * sim.windStrength);
+        }
         let wLen = length(wTarget);
         if (wLen > 1.35) {
             wTarget *= 1.35 / wLen;

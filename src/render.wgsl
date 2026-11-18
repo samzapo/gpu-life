@@ -124,7 +124,7 @@ fn vertex(
     }
 
     let scalePx = max(uniforms.viewParams.x, 1.0);
-    let orbScale = select(1.0, 1.45, uniforms.flags.x > 0.5);
+    let orbScale = select(1.0, 1.68, uniforms.flags.x > 0.5);
     let angR = max(uniforms.size * orbScale, 1.55 / scalePx);
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
@@ -189,8 +189,8 @@ fn fragment(
     var outCol = vec3f(0.0);
     var outAlpha = 0.0;
 
-    // Core atom circle
-    let coreR = 0.56;
+    // Core atom circle sized so equilibrium bonded partners leave crisp overlapping valence rings/dots
+    let coreR = 0.45;
     if (d < coreR + delta) {
         let coreA = 1.0 - smoothstep(coreR - delta, coreR + delta, d);
         let shade = 0.85 + 0.22 * (1.0 - min(d / coreR, 1.0));
@@ -213,15 +213,15 @@ fn fragment(
             let occ = clamp(select(select(slots.z, slots.y, k == 1u), slots.x, k == 0u), 0.0, 1.0);
 
             if (role < -0.5) {
-                let ringA = 1.0 - smoothstep(0.04, 0.04 + deltaDot, abs(distDot - 0.12));
-                let fillA = (1.0 - smoothstep(0.11 - deltaDot, 0.11 + deltaDot, distDot)) * occ;
-                let slotA = max(ringA * 0.85, fillA);
+                let ringA = 1.0 - smoothstep(0.045, 0.045 + deltaDot, abs(distDot - 0.13));
+                let fillA = (1.0 - smoothstep(0.12 - deltaDot, 0.12 + deltaDot, distDot)) * occ;
+                let slotA = max(ringA * 0.88, fillA);
                 if (slotA > outAlpha) {
                     outCol = mix(baseCol, vec3f(1.0, 0.96, 0.82), 0.55 + 0.45 * occ);
                     outAlpha = slotA;
                 }
             } else {
-                let dotR = 0.12 + 0.03 * occ;
+                let dotR = 0.13 + 0.03 * occ;
                 let dotA = 1.0 - smoothstep(dotR - deltaDot, dotR + deltaDot, distDot);
                 if (dotA > outAlpha) {
                     outCol = mix(baseCol, vec3f(1.0, 0.98, 0.88), 0.65 + 0.35 * occ);

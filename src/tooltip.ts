@@ -193,7 +193,7 @@ export function analyzeReactionAt(
     const el0 = els[c0];
     const sym0 = getElementSymbol(el0.atomicNumber);
     const valVec = snap.valence[bestAir] ?? [0, 0, 0, 0];
-    const atomLoad = valVec[3] ?? 0;
+    const atomLoad = (valVec[0] ?? 0) + (valVec[1] ?? 0) + (valVec[2] ?? 0);
 
     // Build connected component & direct neighbors inside local patch
     const bondChord = (airRMax * 0.78) / R;
@@ -231,8 +231,14 @@ export function analyzeReactionAt(
             directInteract.push({ idx: j, dist, vRelDot });
           }
           if (d2 < bondChord2 && !visited.has(j)) {
-            const valU = snap.valence[u]?.[3] ?? 0;
-            const valJ = snap.valence[j]?.[3] ?? 0;
+            const valU =
+              (snap.valence[u]?.[0] ?? 0) +
+              (snap.valence[u]?.[1] ?? 0) +
+              (snap.valence[u]?.[2] ?? 0);
+            const valJ =
+              (snap.valence[j]?.[0] ?? 0) +
+              (snap.valence[j]?.[1] ?? 0) +
+              (snap.valence[j]?.[2] ?? 0);
             if (valU > 0.22 && valJ > 0.22) {
               visited.add(j);
               compIds.push(j);
