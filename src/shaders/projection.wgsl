@@ -535,3 +535,57 @@ fn invertUnitPos(
     let v = vec3f(cP * cos(lam), cP * sin(lam), sin(phi));
     return vec4f(normalize(rotateFromView(u, v)), 1.0);
 }
+
+// Flat-field optical magnifying lens (`mag` constant inside `u <= 0.24`, monotonic C^1 transition to `1.0` at `u = 1.0`).
+fn lensMagScale(mag: f32, u: f32) -> f32 {
+    if (u >= 1.0) {
+        return 1.0;
+    }
+    let uc = max(u, 0.0);
+    let t = clamp((uc - 0.24) / 0.76, 0.0, 1.0);
+    let blend = 1.0 - t * t * (3.0 - 2.0 * t);
+    let k = clamp(mag - 1.0, 0.0, 1.25);
+    return 1.0 + k * blend;
+}
+
+fn applyLensForward(u: Uniforms, pScreen: vec2f) -> vec2f {
+    let rLens = u.lensParams.z;
+    let mag = max(u.lensParams.w, 1.0);
+    if (rLens <= 1.0 || mag <= 1.01) {
+        return pScreen;
+    }
+    let center = u.lensParams.xy;
+    let d = pScreen - center;
+    let dist = length(d);
+    if (dist <= 1e-4 || dist >= rLens) {
+        return pScreen;
+    }
+    let s = lensMagScale(mag, dist / rLens);
+    return center + d * s;
+}
+
+fn applyLensInverse(u: Uniforms, pOut: vec2f) -> vec2f {
+    let rLens = u.lensParams.z;
+    let mag = max(u.lensParams.w, 1.0);
+    if (rLens <= 1.0 || mag <= 1.01) {
+        return pOut;
+    }
+    let center = u.lensParams.xy;
+    let d = pOut - center;
+    let dist = length(d);
+    if (dist <= 1e-4 || dist >= rLens) {
+        return pOut;
+    }
+    let uOut = dist / rLens;
+    let k = clamp(mag - 1.0, 0.0, 1.25);
+    var uIn = clamp(uOut / (1.0 + k), 0.0, 1.0);
+    for (var it = 0u; it < 5u; it++) {
+        let t = clamp((uIn - 0.24) / 0.76, 0.0, 1.0);
+        let blend = 1.0 - t * t * (3.0 - 2.0 * t);
+        let dBlend = select(0.0, (-6.0 * t * (1.0 - t)) / 0.76, uIn > 0.24 && uIn < 1.0);
+        let fVal = uIn * (1.0 + k * blend) - uOut;
+        let dfVal = 1.0 + k * blend + k * uIn * dBlend;
+        uIn = clamp(uIn - fVal / max(dfVal, 0.12), 0.0, 1.0);
+    }
+    return center + d * (uIn / uOut);
+}

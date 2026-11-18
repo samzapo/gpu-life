@@ -22,8 +22,9 @@ fn vertex(@builtin(vertex_index) vid: u32) -> BgOut {
 @fragment
 fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
     let spaceCol = vec3f(0.0, 0.0, 0.0196); // #000005
-    let sx = fragCoord.x;
-    let sy = fragCoord.y;
+    let srcCoord = applyLensInverse(uniforms, fragCoord.xy);
+    let sx = srcCoord.x;
+    let sy = srcCoord.y;
     let scale = max(uniforms.viewParams.x, 1.0);
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;

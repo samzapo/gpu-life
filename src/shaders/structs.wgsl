@@ -14,6 +14,7 @@ struct Uniforms {
     rotCol1: vec4f,
     rotCol2: vec4f,
     earthFlags: vec4f,
+    lensParams: vec4f,
 }
 
 struct Sim {

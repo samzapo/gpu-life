@@ -116,6 +116,7 @@ import {
   TooltipManager,
   type HoverSimSnapshot,
   type TooltipContent,
+  type TooltipLensState,
 } from './tooltip';
 
 import * as linkedList from './linkedList/main';
@@ -141,7 +142,7 @@ const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
 
-const uniformsFloats = 32; // 128 bytes
+const uniformsFloats = 36; // 144 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const oceanUniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
@@ -832,6 +833,7 @@ declare global {
       setWindLines: (val: boolean | number) => void;
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
       inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
+      getTooltipLens: () => TooltipLensState;
       exportConfig: () => SimConfigV1;
       getShareUrl: () => string;
       importConfig: (input: string | SimConfigV1) => Promise<SimConfigV1>;
@@ -1231,6 +1233,7 @@ window.complexLife = {
   },
   inspectReactionAt: (clientX: number, clientY: number) =>
     tooltipManager.inspectAt(clientX, clientY),
+  getTooltipLens: () => tooltipManager.getLensState(),
   exportConfig: exportCurrentConfig,
   getShareUrl: getCurrentShareUrl,
   importConfig: importConfiguration,
@@ -1972,6 +1975,12 @@ function writeUniforms() {
   uniformData[29] = OCEAN_CURRENTS_SPEC.scaleMax;
   uniformData[30] = earthParams.oceanStrength;
   uniformData[31] = earthParams.chemOpacity;
+
+  const lens = tooltipManager.getLensState();
+  uniformData[32] = lens.x;
+  uniformData[33] = lens.y;
+  uniformData[34] = lens.active ? lens.radius : 0;
+  uniformData[35] = lens.active ? lens.mag : 1;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 

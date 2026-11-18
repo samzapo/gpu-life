@@ -130,7 +130,17 @@ fn vertex(
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
 
     let corner = positions[vertexIndex];
-    let pScreen = p0.xy * scalePx + vec2f(cx, cy) + (corner.x * dU + corner.y * dB) * (angR * scalePx);
+    let cScreenRaw = p0.xy * scalePx + vec2f(cx, cy);
+    var cScreen = cScreenRaw;
+    var localMag = 1.0;
+    if (uniforms.lensParams.z > 1.0 && uniforms.lensParams.w > 1.01) {
+        let uDist = length(cScreenRaw - uniforms.lensParams.xy) / uniforms.lensParams.z;
+        if (uDist < 1.0) {
+            cScreen = applyLensForward(uniforms, cScreenRaw);
+            localMag = lensMagScale(uniforms.lensParams.w, uDist);
+        }
+    }
+    let pScreen = cScreen + (corner.x * dU + corner.y * dB) * (angR * scalePx * localMag);
 
     let ndcX = (pScreen.x / max(uniforms.viewSize.x, 1.0)) * 2.0 - 1.0;
     let ndcY = 1.0 - (pScreen.y / max(uniforms.viewSize.y, 1.0)) * 2.0;

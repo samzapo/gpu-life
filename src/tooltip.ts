@@ -36,12 +36,29 @@ export type TooltipTheme =
   | 'chem'
   | 'ocean';
 
+export interface TooltipTarget {
+  type: 'air' | 'ocean';
+  idx: number;
+}
+
+export interface TooltipLensState {
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  mag: number;
+}
+
 export interface TooltipContent {
   theme: TooltipTheme;
   badge: string;
   title: string;
   body: string;
   meta?: string;
+  targetType?: 'air' | 'ocean';
+  targetIdx?: number;
+  targetX?: number;
+  targetY?: number;
 }
 
 const SUBSCRIPTS = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
@@ -107,27 +124,34 @@ function unitDistChord2(a: number[], b: number[]): number {
   return dx * dx + dy * dy + dz * dz;
 }
 
+function projectUnitVecToScreen(
+  v: number[],
+  proj: d3Geo.GeoProjection,
+): [number, number] | null {
+  const x = v[0] ?? 0;
+  const y = v[1] ?? 0;
+  const z = v[2] ?? 0;
+  const r = Math.hypot(x, y, z);
+  if (r < 1e-6) return null;
+  const lat = Math.asin(Math.max(-1, Math.min(1, z / r))) * (180 / Math.PI);
+  const lon = Math.atan2(y, x) * (180 / Math.PI);
+  const pt = proj([lon, lat]);
+  if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return null;
+  return [pt[0], pt[1]];
+}
+
 export function analyzeReactionAt(
   clientX: number,
   clientY: number,
   snap: HoverSimSnapshot,
   cfg: HoverInspectConfig,
+  pickPx: number = 20,
+  includeSingletons: boolean = false,
+  pinnedTarget: TooltipTarget | null = null,
 ): TooltipContent | null {
   const proj = cfg.getProj();
   if (!proj?.invert) return null;
-  const ll = proj.invert([clientX, clientY]);
-  if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) return null;
-  const chk = proj(ll);
-  if (
-    !chk ||
-    !Number.isFinite(chk[0]) ||
-    !Number.isFinite(chk[1]) ||
-    Math.hypot(chk[0] - clientX, chk[1] - clientY) > 12
-  ) {
-    return null;
-  }
 
-  const uCur = lonLatToUnitVec(ll[0], ll[1]);
   const viewLayer = cfg.getViewLayer();
   const showAir = viewLayer !== 'ocean';
   const showOcean = viewLayer !== 'air';
@@ -139,25 +163,69 @@ export function analyzeReactionAt(
   const scalePx = Math.max(cfg.getScale(), 120);
 
   // Pick radius in unit-sphere chord units matching pointer target size on screen & physical interaction radius
-  const pxChord = 20 / scalePx;
+  const pxChord = pickPx / scalePx;
   const airPickChord = Math.min(0.18, Math.max((airRMax / R) * 1.05, pxChord));
   const airPickChord2 = airPickChord * airPickChord;
   const oceanPickChord = Math.min(0.16, Math.max((oceanRMax / R) * 1.3, pxChord));
   const oceanPickChord2 = oceanPickChord * oceanPickChord;
 
+  let uCur: [number, number, number] | null = null;
   let bestAir = -1;
   let bestAirD2 = airPickChord2;
+  let bestOcean = -1;
+  let bestOceanD2 = oceanPickChord2;
+  let pinnedPt: [number, number] | null = null;
+
+  if (pinnedTarget) {
+    if (pinnedTarget.type === 'air' && showAir && pinnedTarget.idx < snap.air.length) {
+      const p = snap.air[pinnedTarget.idx];
+      pinnedPt = projectUnitVecToScreen(p, proj);
+      if (!pinnedPt) return null;
+      uCur = [p[0], p[1], p[2]];
+      bestAir = pinnedTarget.idx;
+      bestAirD2 = 0;
+    } else if (
+      pinnedTarget.type === 'ocean' &&
+      showOcean &&
+      pinnedTarget.idx < snap.ocean.length
+    ) {
+      const op = snap.ocean[pinnedTarget.idx];
+      pinnedPt = projectUnitVecToScreen(op, proj);
+      if (!pinnedPt) return null;
+      uCur = [op[0], op[1], op[2]];
+      bestOcean = pinnedTarget.idx;
+      bestOceanD2 = 0;
+    } else {
+      return null;
+    }
+  }
+
+  if (!uCur) {
+    const ll = proj.invert([clientX, clientY]);
+    if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) return null;
+    const chk = proj(ll);
+    if (
+      !chk ||
+      !Number.isFinite(chk[0]) ||
+      !Number.isFinite(chk[1]) ||
+      Math.hypot(chk[0] - clientX, chk[1] - clientY) > 12
+    ) {
+      return null;
+    }
+    uCur = lonLatToUnitVec(ll[0], ll[1]);
+  }
+
   const localAirIdx: number[] = [];
   const localPatchR = Math.max((airRMax * 3.0) / R, airPickChord * 2.4);
   const localPatchR2 = localPatchR * localPatchR;
 
-  if (showAir && snap.air.length > 0) {
+  if (showAir && snap.air.length > 0 && bestOcean < 0) {
     for (let i = 0; i < snap.air.length; i++) {
       const p = snap.air[i];
       const d2 = unitDistChord2(p, uCur);
       if (d2 < localPatchR2) {
         localAirIdx.push(i);
-        if (d2 < bestAirD2) {
+        if (!pinnedTarget && d2 < bestAirD2) {
           bestAirD2 = d2;
           bestAir = i;
         }
@@ -165,8 +233,6 @@ export function analyzeReactionAt(
     }
   }
 
-  let bestOcean = -1;
-  let bestOceanD2 = oceanPickChord2;
   const nearbyOcean: number[] = [];
   const catChord = catRadius / R;
   const catRef = bestAir >= 0 ? snap.air[bestAir] : uCur;
@@ -175,10 +241,12 @@ export function analyzeReactionAt(
   if (showOcean && snap.ocean.length > 0) {
     for (let i = 0; i < snap.ocean.length; i++) {
       const p = snap.ocean[i];
-      const dc2 = unitDistChord2(p, uCur);
-      if (dc2 < bestOceanD2) {
-        bestOceanD2 = dc2;
-        bestOcean = i;
+      if (!pinnedTarget) {
+        const dc2 = unitDistChord2(p, uCur);
+        if (dc2 < bestOceanD2) {
+          bestOceanD2 = dc2;
+          bestOcean = i;
+        }
       }
       if (unitDistChord2(p, catRef) < catRef2) {
         nearbyOcean.push(i);
@@ -188,6 +256,9 @@ export function analyzeReactionAt(
 
   if (bestAir >= 0) {
     const p0 = snap.air[bestAir];
+    const airPt = pinnedPt ?? projectUnitVecToScreen(p0, proj);
+    const targetX = airPt?.[0] ?? clientX;
+    const targetY = airPt?.[1] ?? clientY;
     const els = snap.elements;
     const c0 = Math.max(0, Math.min(els.length - 1, Math.floor(p0[6])));
     const el0 = els[c0];
@@ -354,6 +425,10 @@ export function analyzeReactionAt(
         title: `${badge === 'HALOGEN TOXIN' ? 'Toxic' : 'Catalyzed'} ${radicalSuffix}`,
         body,
         meta,
+        targetType: 'air',
+        targetIdx: bestAir,
+        targetX,
+        targetY,
       };
     }
 
@@ -412,6 +487,27 @@ export function analyzeReactionAt(
         title,
         body,
         meta: `Anchor: Z=${el0.atomicNumber} ${sym0} [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby pairs: ${directInteract.length}`,
+        targetType: 'air',
+        targetIdx: bestAir,
+        targetX,
+        targetY,
+      };
+    }
+
+    if (includeSingletons) {
+      const inert = el0.valence === 0;
+      return {
+        theme: 'chem',
+        badge: inert ? 'NOBLE GAS' : 'FREE ATOM',
+        title: `${sym0} Atom (Z=${el0.atomicNumber})`,
+        body: inert
+          ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents with filled outer shell.`
+          : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'}, drifting until meeting a reaction partner.`,
+        meta: `Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localAirIdx.length - 1)}`,
+        targetType: 'air',
+        targetIdx: bestAir,
+        targetX,
+        targetY,
       };
     }
   }
@@ -419,6 +515,9 @@ export function analyzeReactionAt(
   // Fallback check: hovering over active Ocean Life swarm/metabolism
   if (bestOcean >= 0) {
     const op = snap.ocean[bestOcean];
+    const oceanPt = pinnedPt ?? projectUnitVecToScreen(op, proj);
+    const targetX = oceanPt?.[0] ?? clientX;
+    const targetY = oceanPt?.[1] ?? clientY;
     const os = snap.oceanState[bestOcean] ?? [0.65, 0, 0, 0];
     const sp = Math.floor(Math.max(0, op[6]));
     const roleIdx = sp % 4;
@@ -431,7 +530,7 @@ export function analyzeReactionAt(
       Math.abs(flux) > 0.015 ||
       vit > 0.04 ||
       poi > 0.04;
-    if (hasActivity) {
+    if (hasActivity || includeSingletons) {
       let theme: TooltipTheme = 'ocean';
       let statusDesc = 'Foraging along ocean current filaments.';
       if (poi > 0.15) {
@@ -457,6 +556,10 @@ export function analyzeReactionAt(
         title: `Ocean Species #${sp}`,
         body: statusDesc,
         meta: `Energy ${energy.toFixed(2)} · Vitamin ${(vit * 100).toFixed(0)}% · Poison ${(poi * 100).toFixed(0)}% · Cluster: ${nearbyOcean.length}`,
+        targetType: 'ocean',
+        targetIdx: bestOcean,
+        targetX,
+        targetY,
       };
     }
   }
@@ -466,26 +569,87 @@ export function analyzeReactionAt(
 
 export class TooltipManager {
   private el: HTMLElement | null;
+  private lensEl: HTMLElement | null;
   private cfg: HoverInspectConfig;
   private mode: 'none' | 'menu' | 'canvas' = 'none';
   private hoverCanvas = false;
+  private touchPinned = false;
+  private pinnedTarget: TooltipTarget | null = null;
+  private lensActive = false;
+  private lensX = 0;
+  private lensY = 0;
+  private lensRadius = 82;
+  private readonly lensMag = 2.2;
   private hoverX = 0;
   private hoverY = 0;
   private cachedSnapshot: HoverSimSnapshot | null = null;
-  private snapshotInFlight = false;
+  private snapshotPromise: Promise<HoverSimSnapshot | null> | null = null;
   private lastSampleTime = 0;
+  private lastTouchAt = -10000;
   private lastHtml = '';
+  private activeTouchPointers = new Set<number>();
+  private dismissUntilAllTouchUp = false;
+  private pendingTap: { x: number; y: number } | null = null;
+  private activeTouchTap: {
+    id: number;
+    startX: number;
+    startY: number;
+    startAt: number;
+    moved: boolean;
+    multi: boolean;
+  } | null = null;
 
   constructor(cfg: HoverInspectConfig) {
     this.el = document.getElementById('hoverTooltip');
+    this.lensEl = document.getElementById('particleLens');
     this.cfg = cfg;
     this.bindEvents();
+  }
+
+  private computeLensRadius(): number {
+    return Math.round(
+      Math.max(54, Math.min(72, Math.min(window.innerWidth, window.innerHeight) * 0.165)),
+    );
+  }
+
+  public getLensState(): TooltipLensState {
+    return {
+      active: this.lensActive,
+      x: this.lensX,
+      y: this.lensY,
+      radius: this.lensRadius,
+      mag: this.lensMag,
+    };
+  }
+
+  public isTouchPinned(): boolean {
+    return this.touchPinned;
+  }
+
+  private ensureSnapshot(): Promise<HoverSimSnapshot | null> {
+    if (this.snapshotPromise) return this.snapshotPromise;
+    this.lastSampleTime = performance.now();
+    this.snapshotPromise = this.cfg
+      .requestSnapshot()
+      .then((snap) => {
+        if (snap) {
+          this.cachedSnapshot = snap;
+        }
+        return snap;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.snapshotPromise = null;
+      });
+    return this.snapshotPromise;
   }
 
   private bindEvents(): void {
     const menuEl = document.querySelector<HTMLElement>('.tp-dfwv');
     if (menuEl) {
       menuEl.addEventListener('pointermove', (ev) => {
+        if (ev.pointerType !== 'mouse') return;
+        if (performance.now() - this.lastTouchAt < 700) return;
         if (!this.cfg.isEnabled()) {
           this.hide();
           return;
@@ -497,6 +661,7 @@ export class TooltipManager {
           if (this.mode === 'menu') this.hide();
           return;
         }
+        this.hide();
         this.hoverCanvas = false;
         this.mode = 'menu';
         const title = item.dataset.tipTitle ?? '';
@@ -511,6 +676,7 @@ export class TooltipManager {
           ev.clientX,
           ev.clientY,
           item,
+          false,
         );
       });
 
@@ -519,9 +685,57 @@ export class TooltipManager {
       });
     }
 
+    // Touching anywhere while a particle tooltip/lens is active clears it first
+    // before a subsequent touch may inspect another particle.
+    window.addEventListener(
+      'pointerdown',
+      (ev) => {
+        if (ev.pointerType === 'mouse') return;
+        this.lastTouchAt = performance.now();
+        this.activeTouchPointers.add(ev.pointerId);
+        if (
+          this.touchPinned ||
+          this.lensActive ||
+          this.mode !== 'none' ||
+          this.pendingTap !== null
+        ) {
+          this.dismissUntilAllTouchUp = true;
+          this.pendingTap = null;
+          this.activeTouchTap = null;
+          this.hide();
+        }
+      },
+      { capture: true },
+    );
+
+    const endTouchPointer = (ev: PointerEvent) => {
+      if (ev.pointerType === 'mouse') return;
+      this.lastTouchAt = performance.now();
+      this.activeTouchPointers.delete(ev.pointerId);
+      if (this.activeTouchPointers.size === 0) {
+        this.dismissUntilAllTouchUp = false;
+      }
+    };
+    window.addEventListener('pointerup', endTouchPointer);
+    window.addEventListener('pointercancel', endTouchPointer);
+
     const simCanvas = document.getElementById('canvas');
     if (simCanvas) {
       simCanvas.addEventListener('pointermove', (ev) => {
+        if (ev.pointerType !== 'mouse') {
+          if (
+            this.activeTouchTap &&
+            ev.pointerId === this.activeTouchTap.id &&
+            Math.hypot(
+              ev.clientX - this.activeTouchTap.startX,
+              ev.clientY - this.activeTouchTap.startY,
+            ) > 12
+          ) {
+            this.activeTouchTap.moved = true;
+          }
+          return;
+        }
+        if (performance.now() - this.lastTouchAt < 700 || this.touchPinned) return;
         if (!this.cfg.isEnabled() || ev.buttons !== 0) {
           if (this.mode === 'canvas') this.hide();
           this.hoverCanvas = false;
@@ -531,19 +745,161 @@ export class TooltipManager {
         this.hoverX = ev.clientX;
         this.hoverY = ev.clientY;
         this.mode = 'canvas';
-        this.refreshCanvasTooltip(ev.clientX, ev.clientY);
+        this.refreshCanvasTooltip(ev.clientX, ev.clientY, false, false);
       });
 
-      simCanvas.addEventListener('pointerleave', () => {
+      simCanvas.addEventListener('pointerleave', (ev) => {
+        if (ev.pointerType !== 'mouse') return;
         this.hoverCanvas = false;
-        if (this.mode === 'canvas') this.hide();
+        if (this.mode === 'canvas' && !this.touchPinned) this.hide();
       });
 
-      simCanvas.addEventListener('pointerdown', () => {
+      simCanvas.addEventListener('pointerdown', (ev) => {
         this.hoverCanvas = false;
-        if (this.mode === 'canvas') this.hide();
+        if (ev.pointerType !== 'mouse') {
+          if (this.dismissUntilAllTouchUp) return;
+          if (!this.activeTouchTap && ev.isPrimary) {
+            this.activeTouchTap = {
+              id: ev.pointerId,
+              startX: ev.clientX,
+              startY: ev.clientY,
+              startAt: performance.now(),
+              moved: false,
+              multi: false,
+            };
+            if (!this.cachedSnapshot || performance.now() - this.lastSampleTime > 120) {
+              void this.ensureSnapshot();
+            }
+          } else if (this.activeTouchTap && ev.pointerId !== this.activeTouchTap.id) {
+            // Two-finger pinch/zoom gesture: do not trigger tap tooltip
+            this.activeTouchTap.multi = true;
+          }
+          return;
+        }
+        if (this.mode === 'canvas' || this.touchPinned || this.lensActive) {
+          this.hide();
+        }
+      });
+
+      simCanvas.addEventListener('pointerup', (ev) => {
+        if (ev.pointerType === 'mouse') return;
+        if (this.dismissUntilAllTouchUp) {
+          this.activeTouchTap = null;
+          return;
+        }
+        if (!this.activeTouchTap || ev.pointerId !== this.activeTouchTap.id) return;
+        const tapInfo = this.activeTouchTap;
+        this.activeTouchTap = null;
+
+        const dist = Math.hypot(
+          ev.clientX - tapInfo.startX,
+          ev.clientY - tapInfo.startY,
+        );
+        const dt = performance.now() - tapInfo.startAt;
+        if (
+          tapInfo.moved ||
+          tapInfo.multi ||
+          dist > 12 ||
+          dt > 700 ||
+          !this.cfg.isEnabled()
+        ) {
+          return;
+        }
+
+        const tapX = ev.clientX;
+        const tapY = ev.clientY;
+        const hitNow = this.cachedSnapshot
+          ? analyzeReactionAt(tapX, tapY, this.cachedSnapshot, this.cfg, 38, true)
+          : null;
+        if (hitNow) {
+          this.activateTouchInspection(hitNow, tapX, tapY);
+          // Refresh asynchronously with latest GPU state
+          void this.ensureSnapshot().then((snap) => {
+            if (
+              snap &&
+              this.touchPinned &&
+              this.mode === 'canvas' &&
+              this.cfg.isEnabled()
+            ) {
+              this.refreshCanvasTooltip(this.lensX, this.lensY, true, true);
+            }
+          });
+          return;
+        }
+
+        // Snapshot may still be initializing or slightly behind; inspect fresh GPU state
+        this.pendingTap = { x: tapX, y: tapY };
+        void this.ensureSnapshot().then((snap) => {
+          const pending = this.pendingTap;
+          this.pendingTap = null;
+          if (
+            !snap ||
+            !pending ||
+            this.dismissUntilAllTouchUp ||
+            this.activeTouchTap ||
+            !this.cfg.isEnabled()
+          ) {
+            return;
+          }
+          const freshHit = analyzeReactionAt(pending.x, pending.y, snap, this.cfg, 38, true);
+          if (freshHit) {
+            this.activateTouchInspection(freshHit, pending.x, pending.y);
+          }
+        });
+      });
+
+      simCanvas.addEventListener('pointercancel', (ev) => {
+        if (this.activeTouchTap && ev.pointerId === this.activeTouchTap.id) {
+          this.activeTouchTap = null;
+        }
       });
     }
+
+    window.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType !== 'mouse') return;
+      const t = ev.target;
+      if (t instanceof Node && simCanvas?.contains(t)) return;
+      if (this.mode === 'canvas' || this.touchPinned || this.lensActive) {
+        this.hide();
+      }
+    });
+  }
+
+  private activateTouchInspection(info: TooltipContent, fallbackX: number, fallbackY: number): void {
+    const cx = info.targetX ?? fallbackX;
+    const cy = info.targetY ?? fallbackY;
+    this.mode = 'canvas';
+    this.touchPinned = true;
+    this.pinnedTarget =
+      info.targetType !== undefined && info.targetIdx !== undefined
+        ? { type: info.targetType, idx: info.targetIdx }
+        : null;
+    this.lensRadius = this.computeLensRadius();
+    this.lensX = cx;
+    this.lensY = cy;
+    this.lensActive = true;
+    this.hoverX = cx;
+    this.hoverY = cy;
+    this.syncLensDom(info.theme);
+    this.renderCard(info, cx, cy, null, true);
+  }
+
+  private syncLensDom(theme: TooltipTheme): void {
+    const lensEl = this.lensEl;
+    if (!lensEl) return;
+    if (!this.lensActive) {
+      lensEl.classList.remove('visible');
+      lensEl.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    const d = Math.round(this.lensRadius * 2);
+    lensEl.dataset.theme = theme;
+    lensEl.style.left = `${Math.round(this.lensX)}px`;
+    lensEl.style.top = `${Math.round(this.lensY)}px`;
+    lensEl.style.width = `${d}px`;
+    lensEl.style.height = `${d}px`;
+    lensEl.classList.add('visible');
+    lensEl.setAttribute('aria-hidden', 'false');
   }
 
   public syncEnabledState(): void {
@@ -557,50 +913,101 @@ export class TooltipManager {
       this.hide();
       return;
     }
-    if (!this.hoverCanvas || this.mode !== 'canvas') return;
+    if ((!this.hoverCanvas && !this.touchPinned) || this.mode !== 'canvas') return;
 
+    const isTouch = this.touchPinned;
     const now = performance.now();
-    if (!this.snapshotInFlight && now - this.lastSampleTime >= 200) {
-      this.snapshotInFlight = true;
-      this.lastSampleTime = now;
-      this.cfg
-        .requestSnapshot()
-        .then((snap) => {
-          if (snap) {
-            this.cachedSnapshot = snap;
-            if (this.hoverCanvas && this.mode === 'canvas' && this.cfg.isEnabled()) {
-              this.refreshCanvasTooltip(this.hoverX, this.hoverY);
-            }
-          }
-        })
-        .catch(() => {
-          // Ignore snapshot errors during resize/reset
-        })
-        .finally(() => {
-          this.snapshotInFlight = false;
-        });
-    } else if (this.cachedSnapshot) {
-      this.refreshCanvasTooltip(this.hoverX, this.hoverY);
+    const intervalMs = isTouch ? 110 : 200;
+    if (!this.snapshotPromise && now - this.lastSampleTime >= intervalMs) {
+      void this.ensureSnapshot().then((snap) => {
+        if (
+          snap &&
+          (this.hoverCanvas || this.touchPinned) &&
+          this.mode === 'canvas' &&
+          this.cfg.isEnabled()
+        ) {
+          this.refreshCanvasTooltip(this.hoverX, this.hoverY, isTouch, isTouch);
+        }
+      });
+    } else if (this.cachedSnapshot && this.hoverCanvas && !this.touchPinned) {
+      this.refreshCanvasTooltip(this.hoverX, this.hoverY, false, false);
     }
   }
 
-  public inspectAt(clientX: number, clientY: number): TooltipContent | null {
+  public inspectAt(
+    clientX: number,
+    clientY: number,
+    pickPx: number = 20,
+    includeSingletons: boolean = false,
+  ): TooltipContent | null {
     if (!this.cachedSnapshot || !this.cfg.isEnabled()) return null;
-    return analyzeReactionAt(clientX, clientY, this.cachedSnapshot, this.cfg);
+    return analyzeReactionAt(
+      clientX,
+      clientY,
+      this.cachedSnapshot,
+      this.cfg,
+      pickPx,
+      includeSingletons,
+    );
   }
 
   public setSnapshot(snap: HoverSimSnapshot): void {
     this.cachedSnapshot = snap;
   }
 
-  private refreshCanvasTooltip(clientX: number, clientY: number): void {
+  private refreshCanvasTooltip(
+    clientX: number,
+    clientY: number,
+    isTouch: boolean = false,
+    keepIfPinned: boolean = false,
+  ): void {
     if (!this.cachedSnapshot) return;
-    const info = analyzeReactionAt(clientX, clientY, this.cachedSnapshot, this.cfg);
+    let info = analyzeReactionAt(
+      clientX,
+      clientY,
+      this.cachedSnapshot,
+      this.cfg,
+      isTouch ? 38 : 20,
+      isTouch,
+      isTouch ? this.pinnedTarget : null,
+    );
+    if (!info && isTouch && this.pinnedTarget) {
+      // Target rotated/wrapped out of pinned index or bounds; probe once near last lens spot
+      info = analyzeReactionAt(
+        this.lensX,
+        this.lensY,
+        this.cachedSnapshot,
+        this.cfg,
+        38,
+        true,
+        null,
+      );
+      if (info && info.targetType !== undefined && info.targetIdx !== undefined) {
+        this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+      }
+    }
     if (!info) {
-      if (this.mode === 'canvas') this.hide();
+      if (!keepIfPinned && this.mode === 'canvas') {
+        this.hide();
+      }
       return;
     }
-    this.renderCard(info, clientX, clientY, null);
+
+    if (isTouch) {
+      this.lensRadius = this.computeLensRadius();
+      this.lensX = info.targetX ?? clientX;
+      this.lensY = info.targetY ?? clientY;
+      this.hoverX = this.lensX;
+      this.hoverY = this.lensY;
+      this.lensActive = true;
+      if (info.targetType !== undefined && info.targetIdx !== undefined) {
+        this.pinnedTarget = { type: info.targetType, idx: info.targetIdx };
+      }
+      this.syncLensDom(info.theme);
+      this.renderCard(info, this.lensX, this.lensY, null, true);
+    } else {
+      this.renderCard(info, clientX, clientY, null, false);
+    }
   }
 
   private renderCard(
@@ -608,6 +1015,7 @@ export class TooltipManager {
     clientX: number,
     clientY: number,
     menuRowEl: HTMLElement | null,
+    isTouch: boolean = false,
   ): void {
     const el = this.el;
     if (!el) return;
@@ -651,6 +1059,18 @@ export class TooltipManager {
             ? rowRect.bottom + 8
             : Math.max(pad, rowRect.top - tipH - 8);
       }
+    } else if (isTouch) {
+      left = clientX - tipW * 0.5;
+      const clearance = (this.lensActive ? this.lensRadius : 0) + 14;
+      const aboveTop = clientY - clearance - tipH;
+      const belowTop = clientY + clearance;
+      if (aboveTop >= pad) {
+        top = aboveTop;
+      } else if (belowTop + tipH <= vh - pad) {
+        top = belowTop;
+      } else {
+        top = aboveTop > vh - pad - (belowTop + tipH) ? aboveTop : belowTop;
+      }
     } else {
       if (left + tipW + pad > vw) {
         left = clientX - tipW - 16;
@@ -666,6 +1086,11 @@ export class TooltipManager {
 
   public hide(): void {
     const el = this.el;
+    this.touchPinned = false;
+    this.pinnedTarget = null;
+    this.lensActive = false;
+    this.pendingTap = null;
+    this.syncLensDom('chem');
     if (!el) return;
     if (this.mode !== 'none' || el.classList.contains('visible')) {
       el.classList.remove('visible');
