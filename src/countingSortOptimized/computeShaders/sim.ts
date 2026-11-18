@@ -1,30 +1,28 @@
 import structsShader from '../../shaders/structs.wgsl?raw';
-import covalentSimShader from '../../shaders/covalentSim.wgsl?raw';
+import valenceSimShader from '../../shaders/valenceSim.wgsl?raw';
 
 export const simComputeShader = (workgroupSize: number) => {
   return /* wgsl */ `
 ${structsShader}
-${covalentSimShader}
+${valenceSimShader}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
 
-// Current Particle Buffer
 @group(0) @binding(3) var<storage, read> input: array<Particle>;
-// Next Particle Buffer
 @group(0) @binding(4) var<storage, read_write> output: array<Particle>;
 
 @group(0) @binding(5) var<storage, read> sorted: array<SortParticle>;
-// The number of particles in each cell (counts generated in cell.wgsl)
 @group(0) @binding(6) var<storage, read> counts: array<u32>;
-// The index at which a cell's particles first appear
-// Generated from the exclusive prefix sum of counts
 @group(0) @binding(7) var<storage, read> prefixSumIndices: array<u32>;
+@group(0) @binding(8) var<storage, read> valence: array<vec4f>;
 
 fn getCellForce(
     pi: u32,
     p: Particle,
+    sP: SpeciesInfo,
+    mySlots: vec4f,
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
@@ -46,12 +44,24 @@ fn getCellForce(
         if (ip.idx.y == pi) {
             continue;
         }
-        accumulateNeighbor(pi, p, ip.pos, ip.colour, ip.theta, acc);
+        accumulateSimNeighbor(
+            pi,
+            p,
+            sP,
+            mySlots,
+            ip.pos,
+            ip.colour,
+            ip.theta,
+            valence[ip.idx.y],
+            acc,
+        );
     }
 }
 
 fn getForce(pi: u32) -> ForceResult {
     let p = input[pi];
+    let sP = getSpeciesInfo(u32(p.colour));
+    let mySlots = valence[pi];
     var acc = ForceAccum();
 
     let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
@@ -64,7 +74,7 @@ fn getForce(pi: u32) -> ForceResult {
     for (var cx = cxmin; cx <= cxmax; cx++) {
         for (var cy = cymin; cy <= cymax; cy++) {
             let c = hash3i(vec3i(cx, cy, 0)) % numCells;
-            getCellForce(pi, p, c, &acc);
+            getCellForce(pi, p, sP, mySlots, c, &acc);
         }
     }
 

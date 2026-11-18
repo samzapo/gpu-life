@@ -7,8 +7,16 @@
 
 @group(0) @binding(5) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(6) var<storage, read> indices: array<vec2<u32>>;
+@group(0) @binding(7) var<storage, read> valence: array<vec4f>;
 
-fn getCellForce(pi: u32, p: Particle, cell: u32, acc: ptr<function, ForceAccum>) {
+fn getCellForce(
+    pi: u32,
+    p: Particle,
+    sP: SpeciesInfo,
+    mySlots: vec4f,
+    cell: u32,
+    acc: ptr<function, ForceAccum>,
+) {
     let index = indices[cell];
 
     if (index.y == 0u) {
@@ -20,12 +28,24 @@ fn getCellForce(pi: u32, p: Particle, cell: u32, acc: ptr<function, ForceAccum>)
         if (ip.idx.y == pi) {
             continue;
         }
-        accumulateNeighbor(pi, p, ip.pos, ip.colour, ip.theta, acc);
+        accumulateSimNeighbor(
+            pi,
+            p,
+            sP,
+            mySlots,
+            ip.pos,
+            ip.colour,
+            ip.theta,
+            valence[ip.idx.y],
+            acc,
+        );
     }
 }
 
 fn getForce(pi: u32) -> ForceResult {
     let p = input[pi];
+    let sP = getSpeciesInfo(u32(p.colour));
+    let mySlots = valence[pi];
     var acc = ForceAccum();
 
     let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
@@ -37,7 +57,7 @@ fn getForce(pi: u32) -> ForceResult {
     for (var cx = cxmin; cx <= cxmax; cx++) {
         for (var cy = cymin; cy <= cymax; cy++) {
             let c = hash3i(vec3i(cx, cy, 0)) % numCells;
-            getCellForce(pi, p, c, &acc);
+            getCellForce(pi, p, sP, mySlots, c, &acc);
         }
     }
 

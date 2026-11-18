@@ -139,7 +139,7 @@ export async function requestTimestamps(adapter: GPUAdapter) {
 }
 
 export function setupTimestamp(device: GPUDevice, name: string) {
-  if (!canTimestamp) return;
+  if (!canTimestamp || timestamps[name]) return;
   const querySet = device.createQuerySet({
     type: 'timestamp',
     count: 2,
@@ -219,19 +219,25 @@ export function resolveTimestamp(
 
 export async function readTimestamp(name: string) {
   if (!canTimestamp) return 0;
-  if (!canTimestamp || timestamps[name].resultBuffer.mapState != 'unmapped')
-    return timestamps[name].v;
+  const entry = timestamps[name];
+  if (!entry) return 0;
+  const buf = entry.resultBuffer;
+  if (buf.mapState !== 'unmapped') return entry.v;
 
-  await timestamps[name].resultBuffer.mapAsync(GPUMapMode.READ);
+  try {
+    await buf.mapAsync(GPUMapMode.READ);
+    const times = new BigUint64Array(buf.getMappedRange());
+    entry.v = Number(times[1] - times[0]) / 1000 / 1000; // ms
+    buf.unmap();
+  } catch {
+    try {
+      buf.unmap();
+    } catch {
+      // Ignore if buffer was destroyed or not mapped.
+    }
+  }
 
-  const times = new BigUint64Array(
-    timestamps[name].resultBuffer.getMappedRange(),
-  );
-
-  timestamps[name].v = Number(times[1] - times[0]) / 1000 / 1000; // ms
-  timestamps[name].resultBuffer.unmap();
-
-  return timestamps[name].v;
+  return entry.v;
 }
 
 export function lerpn(

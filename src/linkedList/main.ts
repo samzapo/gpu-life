@@ -1,6 +1,7 @@
 import structsShader from '../shaders/structs.wgsl?raw';
-import covalentSimShader from '../shaders/covalentSim.wgsl?raw';
+import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
 import constructShader from './construct.wgsl?raw';
+import valenceShader from './valence.wgsl?raw';
 import simShader from './sim.wgsl?raw';
 import {
   linkComputeTimestamp,
@@ -10,12 +11,15 @@ import {
 } from '../utils';
 
 let constructPipeline: GPUComputePipeline | undefined;
+let valencePipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
 
 let headsBuffer: GPUBuffer | undefined;
 let headsInitBuffer: GPUBuffer | undefined;
+let linkedListBuffer: GPUBuffer | undefined;
 
 let constructBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
+let valenceBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 let simBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 
 const workgroupSize = 64;
@@ -35,10 +39,22 @@ export function setup(device: GPUDevice) {
     },
   });
 
-  //
+  const valenceModule = device.createShaderModule({
+    code: `${structsShader}\n${valenceSimShader}\n${valenceShader}`,
+  });
+
+  setupTimestamp(device, 'llValence');
+
+  valencePipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: valenceModule,
+      entryPoint: 'main',
+    },
+  });
 
   const simModule = device.createShaderModule({
-    code: `${structsShader}\n${covalentSimShader}\n${simShader}`,
+    code: `${structsShader}\n${valenceSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'sim');
@@ -57,11 +73,16 @@ export function start(
   uniformBuffer: GPUBuffer,
   simBuffer: GPUBuffer,
   matrixBuffer: GPUBuffer,
+  valenceBuffer: GPUBuffer,
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
 ) {
-  if (!constructPipeline || !simPipeline) return;
+  if (!constructPipeline || !valencePipeline || !simPipeline) return;
+
+  headsBuffer?.destroy();
+  headsInitBuffer?.destroy();
+  linkedListBuffer?.destroy();
 
   headsBuffer = device.createBuffer({
     size: (1 + cellAmt) * Uint32Array.BYTES_PER_ELEMENT,
@@ -84,102 +105,60 @@ export function start(
 
   headsInitBuffer.unmap();
 
-  const linkedListBuffer = device.createBuffer({
+  linkedListBuffer = device.createBuffer({
     size: 6 * Float32Array.BYTES_PER_ELEMENT * particleAmt,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'linkedListBuffer',
   });
 
   const constructGroups = [];
+  const valenceGroups = [];
+  const simGroups = [];
   for (let i = 0; i < 2; i++) {
     constructGroups.push(
       device.createBindGroup({
         layout: constructPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: headsBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: linkedListBuffer,
-            },
-          },
+          { binding: 0, resource: { buffer: simBuffer } },
+          { binding: 1, resource: { buffer: particleBuffers[i] } },
+          { binding: 2, resource: { buffer: headsBuffer } },
+          { binding: 3, resource: { buffer: linkedListBuffer } },
+        ],
+      }),
+    );
+
+    valenceGroups.push(
+      device.createBindGroup({
+        layout: valencePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: valenceBuffer } },
+          { binding: 5, resource: { buffer: headsBuffer } },
+          { binding: 6, resource: { buffer: linkedListBuffer } },
+        ],
+      }),
+    );
+
+    simGroups.push(
+      device.createBindGroup({
+        layout: simPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
+          { binding: 5, resource: { buffer: headsBuffer } },
+          { binding: 6, resource: { buffer: linkedListBuffer } },
+          { binding: 7, resource: { buffer: valenceBuffer } },
         ],
       }),
     );
   }
   constructBindGroups = [constructGroups[0], constructGroups[1]];
-
-  //
-
-  const simGroups = [];
-  for (let i = 0; i < 2; i++) {
-    simGroups.push(
-      device.createBindGroup({
-        layout: simPipeline.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: uniformBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: matrixBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 4,
-            resource: {
-              buffer: particleBuffers[1 - i],
-            },
-          },
-          {
-            binding: 5,
-            resource: {
-              buffer: headsBuffer,
-            },
-          },
-          {
-            binding: 6,
-            resource: {
-              buffer: linkedListBuffer,
-            },
-          },
-        ],
-      }),
-    );
-  }
+  valenceBindGroups = [valenceGroups[0], valenceGroups[1]];
   simBindGroups = [simGroups[0], simGroups[1]];
 }
 
@@ -191,8 +170,10 @@ export function tick(
 ) {
   if (
     !constructPipeline ||
+    !valencePipeline ||
     !simPipeline ||
     !constructBindGroups ||
+    !valenceBindGroups ||
     !headsInitBuffer ||
     !headsBuffer ||
     !simBindGroups
@@ -210,8 +191,16 @@ export function tick(
     Math.ceil(particleAmt / workgroupSize),
   );
   constructPassEncoder.end();
-
   resolveTimestamp(commandEncoder, 'construct');
+
+  const valencePassEncoder = commandEncoder.beginComputePass(
+    linkComputeTimestamp(device, 'llValence'),
+  );
+  valencePassEncoder.setPipeline(valencePipeline);
+  valencePassEncoder.setBindGroup(0, valenceBindGroups[alternate]);
+  valencePassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+  valencePassEncoder.end();
+  resolveTimestamp(commandEncoder, 'llValence');
 
   const simPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'sim'),
@@ -220,13 +209,15 @@ export function tick(
   simPassEncoder.setBindGroup(0, simBindGroups[alternate]);
   simPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
   simPassEncoder.end();
-
   resolveTimestamp(commandEncoder, 'sim');
 }
 
 export function updateDisplays(params: Record<string, number>) {
   readTimestamp('construct').then((time) => {
     params.construct = time;
+  });
+  readTimestamp('llValence').then((time) => {
+    params.valence = time;
   });
   readTimestamp('sim').then((time) => {
     params.sim = time;

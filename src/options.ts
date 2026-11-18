@@ -1,4 +1,5 @@
-import { THETA_SAMPLES, generateRandomSeed } from './matrix';
+import { generateRandomSeed } from './matrix';
+import { getElement2D } from './periodicTable2D';
 
 const urlParams = new URLSearchParams(window.location.search);
 
@@ -19,23 +20,25 @@ function validateURLParam(
 
 export const particleAmt = Math.max(
   1,
-  Math.floor(validateURLParam('particleCount', 50000)),
+  Math.floor(validateURLParam('particleCount', 20000)),
 );
 export const colourAmt = Math.max(
   1,
-  Math.floor(validateURLParam('colours', 200)),
+  Math.floor(validateURLParam('colours', 14)),
 );
 const cellAmt = Math.max(
   1,
   Math.floor(validateURLParam('cellCount', 2000)),
 );
-const defaultEngine = validateURLParam('engine', 'linkedList');
-const defaultRadius = validateURLParam('radius', 15);
-const defaultWorldSize = validateURLParam('worldSize', 6);
-const defaultTorque = validateURLParam('torque', 12);
-const defaultAngularFriction = validateURLParam('angularFriction', 0.05);
-const defaultValency = validateURLParam('valency', 0.5);
-const defaultTemperature = validateURLParam('temperature', 0);
+const defaultEngine = validateURLParam('engine', 'prefixSum');
+const defaultRadius = validateURLParam('radius', 12);
+const defaultWorldSize = validateURLParam('worldSize', 4.0);
+const defaultTorque = validateURLParam('torque', 22);
+const defaultAngularFriction = validateURLParam('angularFriction', 0.04);
+const defaultValency = validateURLParam('valency', 1.15);
+const defaultTemperature = validateURLParam('temperature', 0.2);
+const defaultActivation = validateURLParam('activation', 0.15);
+const defaultOrbitalSharpness = validateURLParam('orbitalSharpness', 4);
 const defaultSeed = validateURLParam('seed', generateRandomSeed());
 
 export const params = {
@@ -50,14 +53,17 @@ export const params = {
 export const optionParams = {
   colours: colourAmt,
   r: defaultRadius,
-  force: 1,
-  beta: 0.3,
+  force: 2.5,
+  beta: 0.4,
   delta: 0.02,
   friction: 0.04,
   torque: defaultTorque,
   angularFriction: defaultAngularFriction,
   valency: defaultValency,
   temperature: defaultTemperature,
+  activation: defaultActivation,
+  orbitalSharpness: defaultOrbitalSharpness,
+  showOrbitals: true,
   cells: cellAmt,
   avoidance: 4,
   worldSize: defaultWorldSize,
@@ -91,8 +97,10 @@ export function setSim(
   simData[13] = Math.pow(0.5, dt / angFriction);
   simData[14] = optionParams.valency;
   simData[15] = optionParams.temperature;
-  simData[16] = THETA_SAMPLES;
-  simData[17] = frameCount;
+  simData[16] = optionParams.activation;
+  simData[17] = optionParams.orbitalSharpness;
+  simData[18] = frameCount;
+  simData[19] = 0;
   device.queue.writeBuffer(simBuffer, 0, simData);
 }
 
@@ -104,16 +112,15 @@ import {
 } from '@tweakpane/core';
 import { isSample } from './input';
 
-const pane = new Pane({ title: 'Complex Life' });
+const pane = new Pane({ title: 'Complex Life · 2D Chemistry' });
 
 pane.addBinding(params, 'fps', { readonly: true });
 
 export const engineSelect = pane.addBinding(params, 'engine', {
   options: {
+    'Prefix Sum': 'prefixSum',
     'Counting Sort': 'countingSort',
     'Atomic Linked Lists': 'linkedList',
-    NSquared: 'nSquared',
-    'Prefix Sum': 'prefixSum',
   },
 });
 
@@ -126,11 +133,11 @@ export const randomizeBtn = pane.addButton({ title: 'Randomize' });
 const constantOptions = ['colours', 'cells'];
 
 const constants: Record<string, BindingParams> = {
-  colours: { min: 1, step: 1 },
+  colours: { min: 1, max: 62, step: 1 },
   cells: { min: 1, step: 1 },
 };
 
-const constantsFolder = pane.addFolder({ title: 'Constants' });
+const constantsFolder = pane.addFolder({ title: 'Constants', expanded: false });
 const optionBindings: Record<string, BindingApi> = {};
 for (const param in optionParams) {
   if (!constantOptions.includes(param)) continue;
@@ -145,18 +152,20 @@ for (const param in optionParams) {
 const optionsFolder = pane.addFolder({ title: 'Options' });
 
 const options: Record<string, BindingParams> = {
-  beta: { min: 0, max: 1 },
+  beta: { min: 0.05, max: 0.7 },
   r: { min: 0.01 },
-  delta: { min: 0.001, max: 0.2 },
+  force: { min: 0, max: 10 },
+  delta: { min: 0.001, max: 0.1 },
   friction: { min: 0.001 },
   torque: { min: 0, max: 100 },
   angularFriction: { label: 'angFriction', min: 0.001 },
-  valency: { min: 0, max: 10 },
-  temperature: { min: 0, max: 5 },
+  valency: { min: 0, max: 3 },
+  temperature: { min: 0, max: 3 },
+  activation: { min: 0, max: 1.5 },
+  orbitalSharpness: { label: 'lobeFocus', min: 1, max: 12, step: 0.5 },
+  showOrbitals: { label: 'showValence' },
   avoidance: { min: 0 },
   worldSize: { min: 0.01 },
-  colours: { min: 1, step: 1 },
-  cells: { min: 1, step: 1 },
 };
 
 for (const param in optionParams) {
@@ -180,6 +189,32 @@ export function bindOptions(
     });
 }
 
+// 2D Periodic Table legend folder
+const periodicFolder = pane.addFolder({
+  title: '2D Periodic Table',
+  expanded: false,
+});
+const periodicState: Record<string, string> = {};
+const periodicBindings: BindingApi[] = [];
+
+export function updatePeriodicLegend(colourCount: number) {
+  for (const b of periodicBindings) {
+    periodicFolder.remove(b);
+  }
+  periodicBindings.length = 0;
+  const shown = Math.min(colourCount, 24);
+  for (let c = 0; c < shown; c++) {
+    const el = getElement2D(c);
+    const key = `Z${el.atomicNumber}`;
+    periodicState[key] = el.name.replace(`Z=${el.atomicNumber} `, '');
+    periodicBindings.push(
+      periodicFolder.addBinding(periodicState, key, { readonly: true }),
+    );
+  }
+}
+
+updatePeriodicLegend(colourAmt);
+
 //
 
 export const performanceParams = {
@@ -187,19 +222,19 @@ export const performanceParams = {
     cell: 0,
     prefix: 0,
     sort: 0,
+    valence: 0,
     sim: 0,
   },
   prefixSum: {
     cell: 0,
     prefix: 0,
     sort: 0,
+    valence: 0,
     sim: 0,
   },
   linkedList: {
     construct: 0,
-    sim: 0,
-  },
-  nSquared: {
+    valence: 0,
     sim: 0,
   },
 };

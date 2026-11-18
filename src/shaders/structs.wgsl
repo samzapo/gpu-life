@@ -1,10 +1,14 @@
 const PI: f32 = 3.14159265359;
 const TWO_PI: f32 = 6.28318530718;
+const SPECIES_STRIDE: u32 = 8u;
 
 struct Uniforms {
     aspect: f32,
     mouse: vec4<f32>,
     size: f32,
+    showOrbitals: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 struct Sim {
@@ -24,8 +28,21 @@ struct Sim {
     angularFriction: f32,
     valency: f32,
     temperature: f32,
-    thetaSamples: f32,
+    activation: f32,
+    orbitalSharpness: f32,
     frame: f32,
+    _pad: f32,
+}
+
+struct SpeciesInfo {
+    valence: f32,
+    role: f32,
+    outerElectrons: f32,
+    outerCapacity: f32,
+    slotAngle0: f32,
+    slotAngle1: f32,
+    slotAngle2: f32,
+    atomicNumber: f32,
 }
 
 struct Particle {
@@ -53,11 +70,10 @@ struct ListParticle {
 }
 
 struct ForceAccum {
-    attractForce: vec2f,
+    bondForce: vec2f,
     repelForce: vec2f,
     avoidForce: vec2f,
     div: f32,
-    bondLoad: f32,
     torque: f32,
 }
 

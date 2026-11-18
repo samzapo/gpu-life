@@ -4,9 +4,12 @@
 
 @group(0) @binding(3) var<storage, read> input: array<Particle>;
 @group(0) @binding(4) var<storage, read_write> output: array<Particle>;
+@group(0) @binding(5) var<storage, read> valence: array<vec4f>;
 
 fn getForce(pi: u32) -> ForceResult {
     let p = input[pi];
+    let sP = getSpeciesInfo(u32(p.colour));
+    let mySlots = valence[pi];
     var acc = ForceAccum();
     let l = arrayLength(&input);
 
@@ -15,7 +18,17 @@ fn getForce(pi: u32) -> ForceResult {
             continue;
         }
         let ip = input[i];
-        accumulateNeighbor(pi, p, ip.pos, ip.colour, ip.theta, &acc);
+        accumulateSimNeighbor(
+            pi,
+            p,
+            sP,
+            mySlots,
+            ip.pos,
+            ip.colour,
+            ip.theta,
+            valence[i],
+            &acc,
+        );
     }
 
     return finalizeForces(acc);

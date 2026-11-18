@@ -1,16 +1,11 @@
 import { tcamera, mouse } from './input';
+import { createSeededRng, generateRandomSeed } from './matrix';
 import {
-  THETA_SAMPLES,
-  createSeededRng,
-  generateRandomSeed,
-  makeRandomMatrix,
-  sampleMatrix,
-  type MatrixGrid,
-  type ThetaFunction,
-} from './matrix';
+  buildPackedChemistryBuffer,
+  type Element2D,
+} from './periodicTable2D';
 import renderShaders from './render.wgsl?raw';
 import {
-  hslToRgb,
   lerp5,
   linkRenderTimestamp,
   readTimestamp,
@@ -32,6 +27,7 @@ import {
   particleAmt as particleAmtOptn,
   colourAmt as colourAmtOptn,
   bindOptions,
+  updatePeriodicLegend,
 } from './options';
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -44,13 +40,18 @@ const simData = new Float32Array(simSize);
 const frameBuf = new Float32Array(1);
 
 let colourAmt = colourAmtOptn;
-let colours: [number, number, number][] = [];
-for (let i = 0; i < colourAmt; i++) {
-  colours.push(hslToRgb((i / colourAmt) * 360, 1, 0.5));
+let elements: Element2D[] = [];
+let chemistryData: Float32Array<ArrayBuffer> = new Float32Array(0);
+
+function refreshChemistryDefinition() {
+  const built = buildPackedChemistryBuffer(colourAmt);
+  elements = built.elements;
+  chemistryData = built.packedData;
 }
-let matrix: MatrixGrid = makeRandomMatrix(colourAmt, params.seed);
+refreshChemistryDefinition();
 
 const particleStride = 32;
+const valenceStride = 16;
 
 const multistep = 1;
 
@@ -68,6 +69,7 @@ let cameraBuffer: GPUBuffer | undefined;
 
 let matrixBuffer: GPUBuffer | undefined;
 let colourBuffer: GPUBuffer | undefined;
+let valenceBuffer: GPUBuffer | undefined;
 
 let particleBuffers: [GPUBuffer, GPUBuffer] | undefined;
 
@@ -77,70 +79,47 @@ let alternate = 0;
 let fpsc = 0;
 let frameCount = 0;
 
-import * as nSquared from './nSquared/main';
 import * as linkedList from './linkedList/main';
 import * as countingSort from './countingSort/main';
 import * as prefixSum from './countingSortOptimized/main';
 const engines: Record<
   string,
-  typeof nSquared | typeof linkedList | typeof countingSort | typeof prefixSum
+  typeof linkedList | typeof countingSort | typeof prefixSum
 > = {
-  nSquared,
   linkedList,
   countingSort,
 };
 
-let engine: string = params.engine in engines ? params.engine : 'linkedList';
+let engine: string =
+  params.engine in performanceParams ? params.engine : 'prefixSum';
 setEngineDisplay(engine);
-
-function writeMatrixBuffer() {
-  if (!device || !matrixBuffer) return;
-  const matrixData = sampleMatrix(matrix, colourAmt, THETA_SAMPLES);
-  device.queue.writeBuffer(matrixBuffer, 0, matrixData.buffer);
-}
-
-function setMatrixFunction(c1: number, c2: number, fn: ThetaFunction) {
-  if (c1 < 0 || c1 >= colourAmt || c2 < 0 || c2 >= colourAmt) {
-    throw new RangeError(`Colour index out of range [0, ${colourAmt})`);
-  }
-  matrix[c1][c2] = fn;
-  if (!device || !matrixBuffer) return;
-  const slice = new Float32Array(THETA_SAMPLES);
-  const step = (Math.PI * 2) / THETA_SAMPLES;
-  for (let k = 0; k < THETA_SAMPLES; k++) {
-    slice[k] = fn(k * step);
-  }
-  const byteOffset =
-    (c1 * colourAmt + c2) * THETA_SAMPLES * Float32Array.BYTES_PER_ELEMENT;
-  device.queue.writeBuffer(matrixBuffer, byteOffset, slice.buffer);
-}
 
 let suppressSeedChange = false;
 
-function applyMatrixSeed(seed: string, updateInput: boolean = true) {
-  params.seed = seed;
-  if (updateInput) {
-    suppressSeedChange = true;
-    seedInput.refresh();
-    suppressSeedChange = false;
+function writeChemistryBuffers() {
+  if (!device || !matrixBuffer || !colourBuffer) return;
+  device.queue.writeBuffer(matrixBuffer, 0, chemistryData.buffer);
+
+  const colourData = new Float32Array(colourAmt * 3);
+  for (let c = 0; c < colourAmt; c++) {
+    colourData[c * 3] = elements[c].color[0];
+    colourData[c * 3 + 1] = elements[c].color[1];
+    colourData[c * 3 + 2] = elements[c].color[2];
   }
-  matrix = makeRandomMatrix(colourAmt, seed);
-  writeMatrixBuffer();
+  device.queue.writeBuffer(colourBuffer, 0, colourData.buffer);
 }
 
 declare global {
   interface Window {
     complexLife?: {
-      getMatrix: () => MatrixGrid;
-      setMatrix: (nextMatrix: MatrixGrid) => void;
-      setMatrixFunction: (c1: number, c2: number, fn: ThetaFunction) => void;
+      getElements: () => Element2D[];
       randomizeMatrix: (seed?: string) => void;
       getSeed: () => string;
-      getThetaSamples: () => number;
       getEngine: () => string;
       getParticleCount: () => number;
       getColourCount: () => number;
       readParticles: (count?: number) => Promise<number[][]>;
+      readValence: (count?: number) => Promise<number[][]>;
     };
   }
 }
@@ -176,22 +155,54 @@ async function readParticles(count: number = 16): Promise<number[][]> {
   return out;
 }
 
+async function readValence(count: number = 16): Promise<number[][]> {
+  if (!device || !valenceBuffer) return [];
+  const n = Math.min(count, particleAmt);
+  const byteLength = n * valenceStride;
+  const staging = device.createBuffer({
+    size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(valenceBuffer, 0, staging, 0, byteLength);
+  device.queue.submit([enc.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const f32 = new Float32Array(staging.getMappedRange());
+  const out: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    out.push([
+      f32[i * 4],
+      f32[i * 4 + 1],
+      f32[i * 4 + 2],
+      f32[i * 4 + 3],
+    ]);
+  }
+  staging.unmap();
+  staging.destroy();
+  return out;
+}
+
+function applySeed(seed: string, updateInput: boolean = true) {
+  params.seed = seed;
+  if (updateInput) {
+    suppressSeedChange = true;
+    seedInput.refresh();
+    suppressSeedChange = false;
+  }
+  startParticles();
+}
+
 window.complexLife = {
-  getMatrix: () => matrix,
-  setMatrix: (nextMatrix: MatrixGrid) => {
-    matrix = nextMatrix;
-    writeMatrixBuffer();
-  },
-  setMatrixFunction,
+  getElements: () => elements,
   randomizeMatrix: (seed?: string) => {
-    applyMatrixSeed(seed ?? generateRandomSeed(), true);
+    applySeed(seed ?? generateRandomSeed(), true);
   },
   getSeed: () => params.seed,
-  getThetaSamples: () => THETA_SAMPLES,
   getEngine: () => engine,
   getParticleCount: () => particleAmt,
   getColourCount: () => colourAmt,
   readParticles,
+  readValence,
 };
 
 (async () => {
@@ -224,8 +235,6 @@ window.complexLife = {
 
   context.configure({ device, format: presentationFormat });
 
-  //
-
   uniformBuffer = device.createBuffer({
     size: uniformsSize * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -243,8 +252,6 @@ window.complexLife = {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'cameraBuffer',
   });
-
-  //
 
   for (const engineName in engines) {
     engines[engineName].setup(device);
@@ -265,6 +272,14 @@ window.complexLife = {
             { shaderLocation: 0, offset: 0, format: 'float32x2' },
             { shaderLocation: 1, offset: 8, format: 'float32x2' },
             { shaderLocation: 2, offset: 16, format: 'float32' },
+            { shaderLocation: 3, offset: 20, format: 'float32' },
+          ],
+        },
+        {
+          arrayStride: valenceStride,
+          stepMode: 'instance',
+          attributes: [
+            { shaderLocation: 4, offset: 0, format: 'float32x4' },
           ],
         },
       ],
@@ -312,7 +327,14 @@ function tick(commandEncoder: GPUCommandEncoder) {
 }
 
 function render(context: GPUCanvasContext, commandEncoder: GPUCommandEncoder) {
-  if (!renderPipeline || !particleBuffers || !device) return;
+  if (
+    !renderPipeline ||
+    !particleBuffers ||
+    !valenceBuffer ||
+    !device ||
+    !renderBindGroup
+  )
+    return;
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     colorAttachments: [
@@ -329,7 +351,8 @@ function render(context: GPUCanvasContext, commandEncoder: GPUCommandEncoder) {
     linkRenderTimestamp(device, renderPassDescriptor, 'render'),
   );
   passEncoder.setPipeline(renderPipeline);
-  passEncoder.setVertexBuffer(0, particleBuffers[(alternate + 1) % 2]);
+  passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
+  passEncoder.setVertexBuffer(1, valenceBuffer);
   passEncoder.setBindGroup(0, renderBindGroup);
   passEncoder.draw(6, particleAmt, 0, 0);
   passEncoder.end();
@@ -353,6 +376,9 @@ function startParticles() {
   }
   matrixBuffer?.destroy();
   colourBuffer?.destroy();
+  valenceBuffer?.destroy();
+
+  refreshChemistryDefinition();
 
   const bufferSize = particleAmt * particleStride;
   particleBuffers = [
@@ -374,34 +400,66 @@ function startParticles() {
     }),
   ];
 
+  valenceBuffer = device.createBuffer({
+    size: particleAmt * valenceStride,
+    usage:
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.VERTEX |
+      GPUBufferUsage.COPY_DST |
+      GPUBufferUsage.COPY_SRC,
+    label: 'valenceBuffer',
+  });
+
   alternate = 0;
   frameCount = 0;
-  const particleRng = createSeededRng(`${params.seed}:particles`);
-  const data = new Float32Array(bufferSize / 4);
-  let pi = 0;
-  while (pi < particleAmt) {
-    const spawnAmt = ((particleRng() * (particleAmt - pi)) / colourAmt) * 5;
-    const c = Math.floor(particleRng() * colourAmt);
+  const rng = createSeededRng(`${params.seed}:chem`);
 
-    const a = particleRng() * Math.PI * 2;
-    const d = particleRng() * optionParams.worldSize * 0.9;
+  // Seeded elemental stoichiometry weights (favoring covalent backbones & H slightly while including all elements)
+  const weights: number[] = [];
+  let totalWeight = 0;
+  for (let c = 0; c < colourAmt; c++) {
+    const el = elements[c];
+    const baseW =
+      el.valence === 0
+        ? 0.25
+        : el.role === 0 && el.valence === 3
+          ? 1.5
+          : el.atomicNumber === 1
+            ? 1.6
+            : 1.0;
+    const w = baseW * (0.4 + 1.2 * rng());
+    weights.push(w);
+    totalWeight += w;
+  }
+  const cdf: number[] = [];
+  let accW = 0;
+  for (let c = 0; c < colourAmt; c++) {
+    accW += weights[c] / totalWeight;
+    cdf.push(accW);
+  }
 
-    const x = Math.cos(a) * d;
-    const y = Math.sin(a) * d;
-    for (let i = 0; i < spawnAmt && pi < particleAmt; i++) {
-      const a2 = particleRng() * Math.PI * 2;
-      const d2 = (particleRng() ** 3 / 10) * optionParams.worldSize;
-      data[pi * 8] = x + Math.cos(a2) * d2;
-      data[pi * 8 + 1] = y + Math.sin(a2) * d2;
-      data[pi * 8 + 2] = 0;
-      data[pi * 8 + 3] = 0;
-      data[pi * 8 + 4] = c;
-      data[pi * 8 + 5] = particleRng() * Math.PI * 2;
-      data[pi * 8 + 6] = 0;
-      data[pi * 8 + 7] = 0;
-
-      pi++;
+  const pickElement = () => {
+    const u = rng();
+    for (let c = 0; c < colourAmt; c++) {
+      if (u <= cdf[c]) return c;
     }
+    return colourAmt - 1;
+  };
+
+  // Spawn mixed atoms smoothly across the disk so elements meet and react immediately
+  const data = new Float32Array(bufferSize / 4);
+  for (let pi = 0; pi < particleAmt; pi++) {
+    const angle = rng() * Math.PI * 2;
+    const radius = Math.sqrt(rng()) * optionParams.worldSize * 0.9;
+    const c = pickElement();
+    data[pi * 8] = Math.cos(angle) * radius;
+    data[pi * 8 + 1] = Math.sin(angle) * radius;
+    data[pi * 8 + 2] = 0;
+    data[pi * 8 + 3] = 0;
+    data[pi * 8 + 4] = c;
+    data[pi * 8 + 5] = rng() * Math.PI * 2;
+    data[pi * 8 + 6] = 0;
+    data[pi * 8 + 7] = 0;
   }
 
   device.queue.writeBuffer(particleBuffers[0], 0, data.buffer);
@@ -409,22 +467,14 @@ function startParticles() {
   setSim(device, simData, simBuffer, frameCount);
 
   matrixBuffer = device.createBuffer({
-    size: colourAmt * colourAmt * THETA_SAMPLES * 4,
+    size: chemistryData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  writeMatrixBuffer();
-
   colourBuffer = device.createBuffer({
     size: colourAmt * 3 * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  const colourData = new Float32Array(colourAmt * 3);
-  for (let c = 0; c < colourAmt; c++) {
-    colourData[c * 3] = colours[c][0];
-    colourData[c * 3 + 1] = colours[c][1];
-    colourData[c * 3 + 2] = colours[c][2];
-  }
-  device.queue.writeBuffer(colourBuffer, 0, colourData.buffer);
+  writeChemistryBuffers();
 
   for (const engineName in engines) {
     engines[engineName].start(
@@ -432,6 +482,7 @@ function startParticles() {
       uniformBuffer,
       simBuffer,
       matrixBuffer,
+      valenceBuffer,
       particleBuffers,
       particleAmt,
       params.cells,
@@ -441,24 +492,10 @@ function startParticles() {
   renderBindGroup = device.createBindGroup({
     layout: renderPipeline.getBindGroupLayout(0),
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: uniformBuffer,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: cameraBuffer,
-        },
-      },
-      {
-        binding: 2,
-        resource: {
-          buffer: colourBuffer,
-        },
-      },
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: cameraBuffer } },
+      { binding: 2, resource: { buffer: colourBuffer } },
+      { binding: 3, resource: { buffer: matrixBuffer } },
     ],
   });
 }
@@ -485,8 +522,8 @@ function update() {
   frameCount = (frameCount + 1) % 1000000;
   if (simBuffer && optionParams.temperature > 0) {
     frameBuf[0] = frameCount;
-    simData[17] = frameCount;
-    device.queue.writeBuffer(simBuffer, 17 * 4, frameBuf);
+    simData[18] = frameCount;
+    device.queue.writeBuffer(simBuffer, 18 * 4, frameBuf);
   }
 
   const commandEncoder = device.createCommandEncoder();
@@ -499,7 +536,8 @@ function update() {
     uniformData[6] = mouse.down;
     uniformData[7] = mouse.type;
 
-    uniformData[8] = (1 / optionParams.r) * 0.015;
+    uniformData[8] = (1 / optionParams.r) * optionParams.beta * 0.34;
+    uniformData[9] = optionParams.showOrbitals ? 1 : 0;
 
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
   }
@@ -523,7 +561,6 @@ function update() {
 
   device.popErrorScope().then((error) => {
     if (error && !window.location.search.includes('noTimestamp')) {
-      // some weird bug happened with timestamps, just disable it and restart the simulation
       window.location.href +=
         (window.location.search ? '&' : '?') + 'noTimestamp';
     }
@@ -552,28 +589,24 @@ function update() {
 requestAnimationFrame(update);
 
 newSimBtn.on('click', () => {
-  colourAmt = Math.max(1, Math.floor(optionParams.colours));
+  colourAmt = Math.max(1, Math.min(62, Math.floor(optionParams.colours)));
   params.colours = colourAmt;
-  colours = [];
-  for (let i = 0; i < colourAmt; i++) {
-    colours.push(hslToRgb((i / colourAmt) * 360, 1, 0.5));
-  }
+  updatePeriodicLegend(colourAmt);
 
   params.cells = Math.max(1, Math.floor(optionParams.cells));
   particleAmt = Math.max(1, Math.floor(params.particles));
 
-  matrix = makeRandomMatrix(colourAmt, params.seed);
   startParticles();
 });
 
 randomizeBtn.on('click', () => {
   if (!device || !matrixBuffer) return;
-  applyMatrixSeed(generateRandomSeed(), true);
+  applySeed(generateRandomSeed(), true);
 });
 
 seedInput.on('change', () => {
   if (suppressSeedChange || !device || !matrixBuffer) return;
-  applyMatrixSeed(params.seed, false);
+  applySeed(params.seed, false);
 });
 
 setInterval(() => {

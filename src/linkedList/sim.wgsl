@@ -16,8 +16,16 @@ struct LinkedList {
 
 @group(0) @binding(5) var<storage, read> heads: Heads;
 @group(0) @binding(6) var<storage, read> linkedList: LinkedList;
+@group(0) @binding(7) var<storage, read> valence: array<vec4f>;
 
-fn getCellForce(pi: u32, p: Particle, cell: u32, acc: ptr<function, ForceAccum>) {
+fn getCellForce(
+    pi: u32,
+    p: Particle,
+    sP: SpeciesInfo,
+    mySlots: vec4f,
+    cell: u32,
+    acc: ptr<function, ForceAccum>,
+) {
     const maxParticles = 5000u;
 
     var numParticles = 0u;
@@ -26,7 +34,17 @@ fn getCellForce(pi: u32, p: Particle, cell: u32, acc: ptr<function, ForceAccum>)
     while (elementIndex != 0xFFFFFFFFu && numParticles < maxParticles) {
         let ip = linkedList.data[elementIndex];
         if (ip.idx != pi) {
-            accumulateNeighbor(pi, p, ip.pos, ip.colour, ip.theta, acc);
+            accumulateSimNeighbor(
+                pi,
+                p,
+                sP,
+                mySlots,
+                ip.pos,
+                ip.colour,
+                ip.theta,
+                valence[ip.idx],
+                acc,
+            );
         }
 
         numParticles++;
@@ -36,6 +54,8 @@ fn getCellForce(pi: u32, p: Particle, cell: u32, acc: ptr<function, ForceAccum>)
 
 fn getForce(pi: u32) -> ForceResult {
     let p = input[pi];
+    let sP = getSpeciesInfo(u32(p.colour));
+    let mySlots = valence[pi];
     var acc = ForceAccum();
 
     let cxmin = i32(floor((p.pos.x - sim.rMax) / sim.cellSize));
@@ -47,7 +67,7 @@ fn getForce(pi: u32) -> ForceResult {
     for (var cx = cxmin; cx <= cxmax; cx++) {
         for (var cy = cymin; cy <= cymax; cy++) {
             let c = hash3i(vec3i(cx, cy, 0)) % headCount;
-            getCellForce(pi, p, c, &acc);
+            getCellForce(pi, p, sP, mySlots, c, &acc);
         }
     }
 

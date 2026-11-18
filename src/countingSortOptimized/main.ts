@@ -7,6 +7,7 @@ import {
 
 import { cellComputeShader } from './computeShaders/cell';
 import { sortComputeShader } from './computeShaders/sort';
+import { valenceComputeShader } from './computeShaders/valence';
 import { simComputeShader } from './computeShaders/sim';
 import { InclusivePrefixSum } from './InclusivePrefixSum';
 
@@ -14,10 +15,12 @@ let workgroupSize = 128;
 
 let cellPipeline: GPUComputePipeline | undefined;
 let sortPipeline: GPUComputePipeline | undefined;
+let valencePipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
 
 let cellBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 let sortBindGroup: GPUBindGroup | undefined;
+let valenceBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 let simBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 
 let cellBuffer: GPUBuffer | undefined;
@@ -26,13 +29,9 @@ let prefixSumBuffer: GPUBuffer | undefined;
 let zeroBuffer: GPUBuffer | undefined;
 let sortedBuffer: GPUBuffer | undefined;
 
-let device: GPUDevice | undefined;
-
 let prefixSumModule: InclusivePrefixSum | undefined;
 
-export function setup(device2: GPUDevice) {
-  device = device2;
-
+export function setup(device: GPUDevice) {
   workgroupSize = device.limits.maxComputeWorkgroupSizeX;
 
   const cellModule = device.createShaderModule({
@@ -49,8 +48,6 @@ export function setup(device2: GPUDevice) {
     },
   });
 
-  //
-
   const sortModule = device.createShaderModule({
     code: sortComputeShader(workgroupSize),
   });
@@ -65,7 +62,19 @@ export function setup(device2: GPUDevice) {
     },
   });
 
-  //
+  const valenceModule = device.createShaderModule({
+    code: valenceComputeShader(workgroupSize),
+  });
+
+  setupTimestamp(device, 'psValence');
+
+  valencePipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: valenceModule,
+      entryPoint: 'main',
+    },
+  });
 
   const simModule = device.createShaderModule({
     code: simComputeShader(workgroupSize),
@@ -87,11 +96,19 @@ export function start(
   uniformBuffer: GPUBuffer,
   simBuffer: GPUBuffer,
   matrixBuffer: GPUBuffer,
+  valenceBuffer: GPUBuffer,
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
 ) {
-  if (!cellPipeline || !sortPipeline || !simPipeline) return;
+  if (!cellPipeline || !sortPipeline || !valencePipeline || !simPipeline)
+    return;
+
+  cellBuffer?.destroy();
+  sortedBuffer?.destroy();
+  countBuffer?.destroy();
+  prefixSumBuffer?.destroy();
+  zeroBuffer?.destroy();
 
   cellBuffer = device.createBuffer({
     size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
@@ -113,10 +130,15 @@ export function start(
   });
 
   prefixSumBuffer = device.createBuffer({
-    size: cellAmt * Uint32Array.BYTES_PER_ELEMENT + (2 * Uint32Array.BYTES_PER_ELEMENT),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-    label: 'prefixSumBuffer'
-  })
+    size:
+      cellAmt * Uint32Array.BYTES_PER_ELEMENT +
+      2 * Uint32Array.BYTES_PER_ELEMENT,
+    usage:
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.COPY_DST |
+      GPUBufferUsage.COPY_SRC,
+    label: 'prefixSumBuffer',
+  });
 
   zeroBuffer = device.createBuffer({
     size: cellAmt * Uint32Array.BYTES_PER_ELEMENT,
@@ -132,30 +154,10 @@ export function start(
       device.createBindGroup({
         layout: cellPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: cellBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: countBuffer,
-            },
-          },
+          { binding: 0, resource: { buffer: simBuffer } },
+          { binding: 1, resource: { buffer: particleBuffers[i] } },
+          { binding: 2, resource: { buffer: cellBuffer } },
+          { binding: 3, resource: { buffer: countBuffer } },
         ],
       }),
     );
@@ -165,92 +167,54 @@ export function start(
   sortBindGroup = device.createBindGroup({
     layout: sortPipeline.getBindGroupLayout(0),
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: cellBuffer,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: sortedBuffer,
-        },
-      },
-      {
-        binding: 2,
-        resource: {
-          buffer: prefixSumBuffer,
-        },
-      },
+      { binding: 0, resource: { buffer: cellBuffer } },
+      { binding: 1, resource: { buffer: sortedBuffer } },
+      { binding: 2, resource: { buffer: prefixSumBuffer } },
     ],
   });
 
+  const valenceGroups = [];
   const simGroups = [];
   for (let i = 0; i < 2; i++) {
+    valenceGroups.push(
+      device.createBindGroup({
+        layout: valencePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: valenceBuffer } },
+          { binding: 5, resource: { buffer: sortedBuffer } },
+          { binding: 6, resource: { buffer: countBuffer } },
+          { binding: 7, resource: { buffer: prefixSumBuffer } },
+        ],
+      }),
+    );
     simGroups.push(
       device.createBindGroup({
         layout: simPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: uniformBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: matrixBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 4,
-            resource: {
-              buffer: particleBuffers[1 - i],
-            },
-          },
-          {
-            binding: 5,
-            resource: {
-              buffer: sortedBuffer,
-            },
-          },
-          {
-            binding: 6,
-            resource: {
-              buffer: countBuffer
-            }
-          },
-          {
-            binding: 7,
-            resource: {
-              buffer: prefixSumBuffer,
-            },
-          },
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
+          { binding: 5, resource: { buffer: sortedBuffer } },
+          { binding: 6, resource: { buffer: countBuffer } },
+          { binding: 7, resource: { buffer: prefixSumBuffer } },
+          { binding: 8, resource: { buffer: valenceBuffer } },
         ],
       }),
     );
   }
+  valenceBindGroups = [valenceGroups[0], valenceGroups[1]];
   simBindGroups = [simGroups[0], simGroups[1]];
 
   prefixSumModule = new InclusivePrefixSum(
     device,
     countBuffer,
     prefixSumBuffer,
-    2
+    2,
   );
 }
 
@@ -267,13 +231,21 @@ export function tick(
     !countBuffer ||
     !sortPipeline ||
     !sortBindGroup ||
+    !valencePipeline ||
+    !valenceBindGroups ||
     !simPipeline ||
     !simBindGroups ||
     !prefixSumModule
   )
     return;
 
-  commandEncoder.copyBufferToBuffer(zeroBuffer, 0, countBuffer, 0, countBuffer.size);
+  commandEncoder.copyBufferToBuffer(
+    zeroBuffer,
+    0,
+    countBuffer,
+    0,
+    countBuffer.size,
+  );
 
   const cellPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'cell'),
@@ -284,9 +256,7 @@ export function tick(
   cellPassEncoder.end();
   resolveTimestamp(commandEncoder, 'cell');
 
-  //
-
-  prefixSumModule?.run(commandEncoder)
+  prefixSumModule?.run(commandEncoder);
 
   const sortPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'sort'),
@@ -297,7 +267,14 @@ export function tick(
   sortPassEncoder.end();
   resolveTimestamp(commandEncoder, 'sort');
 
-  //
+  const valencePassEncoder = commandEncoder.beginComputePass(
+    linkComputeTimestamp(device, 'psValence'),
+  );
+  valencePassEncoder.setPipeline(valencePipeline);
+  valencePassEncoder.setBindGroup(0, valenceBindGroups[alternate]);
+  valencePassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+  valencePassEncoder.end();
+  resolveTimestamp(commandEncoder, 'psValence');
 
   const simPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'countSim'),
@@ -306,7 +283,6 @@ export function tick(
   simPassEncoder.setBindGroup(0, simBindGroups[alternate]);
   simPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
   simPassEncoder.end();
-
   resolveTimestamp(commandEncoder, 'countSim');
 }
 
@@ -320,6 +296,9 @@ export function updateDisplays(params: Record<string, number>) {
   prefixSumModule?.updateDisplays(params);
   readTimestamp('sort').then((time) => {
     params.sort = time;
+  });
+  readTimestamp('psValence').then((time) => {
+    params.valence = time;
   });
   readTimestamp('countSim').then((time) => {
     params.sim = time;

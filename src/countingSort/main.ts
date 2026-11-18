@@ -6,10 +6,11 @@ import {
 } from '../utils';
 
 import structsShader from '../shaders/structs.wgsl?raw';
-import covalentSimShader from '../shaders/covalentSim.wgsl?raw';
+import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
 import cellShader from './cell.wgsl?raw';
 import prefixShader from './prefix.wgsl?raw';
 import sortShader from './sort.wgsl?raw';
+import valenceShader from './valence.wgsl?raw';
 import simShader from './sim.wgsl?raw';
 
 const workgroupSize = 128;
@@ -17,11 +18,13 @@ const workgroupSize = 128;
 let cellPipeline: GPUComputePipeline | undefined;
 let prefixPipeline: GPUComputePipeline | undefined;
 let sortPipeline: GPUComputePipeline | undefined;
+let valencePipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
 
 let cellBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 let prefixBindGroup: GPUBindGroup | undefined;
 let sortBindGroup: GPUBindGroup | undefined;
+let valenceBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 let simBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
 
 let cellBuffer: GPUBuffer | undefined;
@@ -30,11 +33,7 @@ let zeroBuffer: GPUBuffer | undefined;
 let sortedBuffer: GPUBuffer | undefined;
 let indicesBuffer: GPUBuffer | undefined;
 
-let device: GPUDevice | undefined;
-
-export function setup(device2: GPUDevice) {
-  device = device2;
-
+export function setup(device: GPUDevice) {
   const cellModule = device.createShaderModule({
     code: `${structsShader}\n${cellShader}`,
   });
@@ -48,8 +47,6 @@ export function setup(device2: GPUDevice) {
       entryPoint: 'main',
     },
   });
-
-  //
 
   const prefixModule = device.createShaderModule({
     code: prefixShader,
@@ -65,8 +62,6 @@ export function setup(device2: GPUDevice) {
     },
   });
 
-  //
-
   const sortModule = device.createShaderModule({
     code: `${structsShader}\n${sortShader}`,
   });
@@ -81,10 +76,22 @@ export function setup(device2: GPUDevice) {
     },
   });
 
-  //
+  const valenceModule = device.createShaderModule({
+    code: `${structsShader}\n${valenceSimShader}\n${valenceShader}`,
+  });
+
+  setupTimestamp(device, 'csValence');
+
+  valencePipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: valenceModule,
+      entryPoint: 'main',
+    },
+  });
 
   const simModule = device.createShaderModule({
-    code: `${structsShader}\n${covalentSimShader}\n${simShader}`,
+    code: `${structsShader}\n${valenceSimShader}\n${simShader}`,
   });
 
   setupTimestamp(device, 'countSim');
@@ -103,11 +110,25 @@ export function start(
   uniformBuffer: GPUBuffer,
   simBuffer: GPUBuffer,
   matrixBuffer: GPUBuffer,
+  valenceBuffer: GPUBuffer,
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
 ) {
-  if (!cellPipeline || !prefixPipeline || !sortPipeline || !simPipeline) return;
+  if (
+    !cellPipeline ||
+    !prefixPipeline ||
+    !sortPipeline ||
+    !valencePipeline ||
+    !simPipeline
+  )
+    return;
+
+  cellBuffer?.destroy();
+  sortedBuffer?.destroy();
+  countBuffer?.destroy();
+  indicesBuffer?.destroy();
+  zeroBuffer?.destroy();
 
   cellBuffer = device.createBuffer({
     size: particleAmt * 6 * Float32Array.BYTES_PER_ELEMENT,
@@ -147,30 +168,10 @@ export function start(
       device.createBindGroup({
         layout: cellPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: cellBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: countBuffer,
-            },
-          },
+          { binding: 0, resource: { buffer: simBuffer } },
+          { binding: 1, resource: { buffer: particleBuffers[i] } },
+          { binding: 2, resource: { buffer: cellBuffer } },
+          { binding: 3, resource: { buffer: countBuffer } },
         ],
       }),
     );
@@ -180,97 +181,53 @@ export function start(
   prefixBindGroup = device.createBindGroup({
     layout: prefixPipeline.getBindGroupLayout(0),
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: countBuffer,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: indicesBuffer,
-        },
-      },
+      { binding: 0, resource: { buffer: countBuffer } },
+      { binding: 1, resource: { buffer: indicesBuffer } },
     ],
   });
 
   sortBindGroup = device.createBindGroup({
     layout: sortPipeline.getBindGroupLayout(0),
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: cellBuffer,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: sortedBuffer,
-        },
-      },
-      {
-        binding: 2,
-        resource: {
-          buffer: countBuffer,
-        },
-      },
+      { binding: 0, resource: { buffer: cellBuffer } },
+      { binding: 1, resource: { buffer: sortedBuffer } },
+      { binding: 2, resource: { buffer: countBuffer } },
     ],
   });
 
+  const valenceGroups = [];
   const simGroups = [];
   for (let i = 0; i < 2; i++) {
+    valenceGroups.push(
+      device.createBindGroup({
+        layout: valencePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: valenceBuffer } },
+          { binding: 5, resource: { buffer: sortedBuffer } },
+          { binding: 6, resource: { buffer: indicesBuffer } },
+        ],
+      }),
+    );
     simGroups.push(
       device.createBindGroup({
         layout: simPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: uniformBuffer,
-            },
-          },
-          {
-            binding: 1,
-            resource: {
-              buffer: simBuffer,
-            },
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: matrixBuffer,
-            },
-          },
-          {
-            binding: 3,
-            resource: {
-              buffer: particleBuffers[i],
-            },
-          },
-          {
-            binding: 4,
-            resource: {
-              buffer: particleBuffers[1 - i],
-            },
-          },
-          {
-            binding: 5,
-            resource: {
-              buffer: sortedBuffer,
-            },
-          },
-          {
-            binding: 6,
-            resource: {
-              buffer: indicesBuffer,
-            },
-          },
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: simBuffer } },
+          { binding: 2, resource: { buffer: matrixBuffer } },
+          { binding: 3, resource: { buffer: particleBuffers[i] } },
+          { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
+          { binding: 5, resource: { buffer: sortedBuffer } },
+          { binding: 6, resource: { buffer: indicesBuffer } },
+          { binding: 7, resource: { buffer: valenceBuffer } },
         ],
       }),
     );
   }
+  valenceBindGroups = [valenceGroups[0], valenceGroups[1]];
   simBindGroups = [simGroups[0], simGroups[1]];
 }
 
@@ -289,6 +246,8 @@ export function tick(
     !prefixBindGroup ||
     !sortPipeline ||
     !sortBindGroup ||
+    !valencePipeline ||
+    !valenceBindGroups ||
     !simPipeline ||
     !simBindGroups
   )
@@ -305,8 +264,6 @@ export function tick(
   cellPassEncoder.end();
   resolveTimestamp(commandEncoder, 'cell');
 
-  //
-
   const prefixPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'prefix'),
   );
@@ -315,8 +272,6 @@ export function tick(
   prefixPassEncoder.dispatchWorkgroups(1);
   prefixPassEncoder.end();
   resolveTimestamp(commandEncoder, 'prefix');
-
-  //
 
   const sortPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'sort'),
@@ -327,7 +282,14 @@ export function tick(
   sortPassEncoder.end();
   resolveTimestamp(commandEncoder, 'sort');
 
-  //
+  const valencePassEncoder = commandEncoder.beginComputePass(
+    linkComputeTimestamp(device, 'csValence'),
+  );
+  valencePassEncoder.setPipeline(valencePipeline);
+  valencePassEncoder.setBindGroup(0, valenceBindGroups[alternate]);
+  valencePassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+  valencePassEncoder.end();
+  resolveTimestamp(commandEncoder, 'csValence');
 
   const simPassEncoder = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'countSim'),
@@ -336,7 +298,6 @@ export function tick(
   simPassEncoder.setBindGroup(0, simBindGroups[alternate]);
   simPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
   simPassEncoder.end();
-
   resolveTimestamp(commandEncoder, 'countSim');
 }
 
@@ -349,6 +310,9 @@ export function updateDisplays(params: Record<string, number>) {
   });
   readTimestamp('sort').then((time) => {
     params.sort = time;
+  });
+  readTimestamp('csValence').then((time) => {
+    params.valence = time;
   });
   readTimestamp('countSim').then((time) => {
     params.sim = time;
