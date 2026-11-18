@@ -70,11 +70,12 @@
           <button id="configCloseBtn" type="button" aria-label="Close">×</button>
         </div>
         <p class="config-hint">
-          Settings auto-save across refreshes in this browser. Copy JSON below to save or paste into another prompt/session, or paste a saved JSON config / URL and click Apply.
+          Settings auto-save locally and sync live into the browser URL (params + view only). Share the URL link or copy JSON below, or paste any saved JSON / URL and click Apply.
         </p>
         <textarea id="configTextarea" spellcheck="false" rows="12" aria-label="Configuration JSON"></textarea>
         <div id="configModalStatus" class="config-status" aria-live="polite"></div>
         <div class="config-actions">
+          <button id="configLinkBtn" type="button">Copy Link</button>
           <button id="configCopyBtn" type="button">Copy JSON</button>
           <button id="configApplyBtn" type="button" class="primary">Apply Config</button>
           <button id="configResetBtn" type="button" class="danger">Reset Defaults</button>

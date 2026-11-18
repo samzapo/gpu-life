@@ -66,8 +66,10 @@ import {
   engineSelect,
   getCachedConfig,
   globalPerformanceParams,
+  hasExplicitUrlConfig,
   hasExplicitUrlHash,
   initialOrientation,
+  initialUrlPan,
   lifeOpacityBinding,
   mouseToolBinding,
   newOceanSimBtn,
@@ -104,6 +106,7 @@ import {
 } from './options';
 import { setMouseToolMode } from './input';
 import {
+  buildUrlPartsFromConfig,
   clearCachedConfig,
   parseConfigInput,
   saveCachedConfig,
@@ -163,7 +166,10 @@ refreshChemistryDefinition();
 let oceanColourAmt = oceanColourAmtOptn;
 const cachedBootCfg = getCachedConfig();
 const urlOceanSeed = new URLSearchParams(window.location.search).get('oceanSeed');
-let oceanSeed = urlOceanSeed ?? cachedBootCfg?.oceanSeed ?? generateRandomSeed();
+let oceanSeed =
+  urlOceanSeed ??
+  (hasExplicitUrlConfig ? generateRandomSeed() : cachedBootCfg?.oceanSeed) ??
+  generateRandomSeed();
 let oceanMatrixData: Float32Array<ArrayBuffer> = new Float32Array(0);
 
 function buildRandomOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
@@ -239,7 +245,8 @@ let engine: string =
 setEngineDisplay(engine);
 
 const initSpec = PROJECTIONS[earthParams.projection];
-const useCachedView = !hasExplicitUrlHash && Boolean(cachedBootCfg?.view);
+const useCachedView =
+  !hasExplicitUrlHash && !hasExplicitUrlConfig && Boolean(cachedBootCfg?.view);
 const initScale =
   initialOrientation && initialOrientation[2] > 50
     ? initialOrientation[2]
@@ -255,13 +262,14 @@ const initScale =
           );
 
 const initRotate: [number, number, number] = initialOrientation
-  ? [-initialOrientation[0], -initialOrientation[1], 0]
+  ? [-initialOrientation[0], -initialOrientation[1], initSpec.defaultRotate[2]]
   : useCachedView && cachedBootCfg?.view?.rotate
     ? [...cachedBootCfg.view.rotate]
     : [...initSpec.defaultRotate];
 
 const initPan: [number, number] =
-  useCachedView && cachedBootCfg?.view?.pan ? [...cachedBootCfg.view.pan] : [0, 0];
+  initialUrlPan ??
+  (useCachedView && cachedBootCfg?.view?.pan ? [...cachedBootCfg.view.pan] : [0, 0]);
 
 const viewState: GlobeViewState = {
   projectionId: earthParams.projection,
@@ -340,30 +348,38 @@ function refreshOceanHud(grid: OceanGrid) {
   refreshHudVisibility();
 }
 
-function syncUrlHashDebounced() {
+function getCurrentShareUrl(): string {
+  const { search, hash } = buildUrlPartsFromConfig(
+    exportCurrentConfig(),
+    window.location.search,
+  );
+  return `${window.location.origin}${window.location.pathname}${search}${hash}`;
+}
+
+function syncUrlStateNow() {
+  if (hashSyncTimer !== undefined) {
+    window.clearTimeout(hashSyncTimer);
+    hashSyncTimer = undefined;
+  }
+  const { search, hash } = buildUrlPartsFromConfig(
+    exportCurrentConfig(),
+    window.location.search,
+  );
+  const nextRel = `${window.location.pathname}${search}${hash}`;
+  const curRel = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (curRel !== nextRel) {
+    window.history.replaceState(null, '', nextRel);
+  }
+}
+
+function syncUrlStateDebounced() {
   if (hashSyncTimer !== undefined) {
     window.clearTimeout(hashSyncTimer);
   }
   hashSyncTimer = window.setTimeout(() => {
-    const spec = WIND_LEVELS[earthParams.windLevel];
-    const r = viewState.rotate;
-    const lon = (-r[0]).toFixed(2);
-    const lat = (-r[1]).toFixed(2);
-    const sc = Math.round(viewState.scale);
-    const nextHash =
-      earthParams.viewLayer === 'ocean'
-        ? `#current/ocean/surface/currents/${viewState.projectionId}=${lon},${lat},${sc}`
-        : earthParams.viewLayer === 'air'
-          ? `#current/air/${spec.surfaceType === 'surface' ? 'surface/level' : `isobaric/${spec.id}`}/${viewState.projectionId}=${lon},${lat},${sc}`
-          : `#current/both/${spec.surfaceType === 'surface' ? 'surface/level' : `isobaric/${spec.id}`}/${viewState.projectionId}=${lon},${lat},${sc}`;
-    if (window.location.hash !== nextHash) {
-      window.history.replaceState(
-        null,
-        '',
-        `${window.location.pathname}${window.location.search}${nextHash}`,
-      );
-    }
-  }, 150);
+    hashSyncTimer = undefined;
+    syncUrlStateNow();
+  }, 180);
 }
 
 function exportCurrentConfig(): SimConfigV1 {
@@ -451,6 +467,7 @@ async function resetToFactoryDefaults(): Promise<SimConfigV1> {
       configSaveTimer = undefined;
     }
     clearCachedConfig();
+    syncUrlStateNow();
     return res;
   } finally {
     skipAutoSave = false;
@@ -458,12 +475,14 @@ async function resetToFactoryDefaults(): Promise<SimConfigV1> {
 }
 
 function saveConfigNow() {
+  syncUrlStateNow();
   if (!configPersistenceReady || skipAutoSave) return;
   saveCachedConfig(exportCurrentConfig());
 }
 
 function scheduleSaveConfig() {
   if (!configPersistenceReady || skipAutoSave) return;
+  syncUrlStateDebounced();
   if (configSaveTimer !== undefined) {
     window.clearTimeout(configSaveTimer);
   }
@@ -665,6 +684,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     suppressPaneEvents = false;
   }
   saveConfigNow();
+  syncUrlStateNow();
   return exportCurrentConfig();
 }
 
@@ -676,7 +696,7 @@ function updateProjectionState() {
     watermanDirty = true;
   }
   viewSignature = `${viewState.projectionId}:${viewState.rotate.map((v) => v.toFixed(2)).join(',')}:${viewState.scale.toFixed(1)}:${viewState.pan.map((v) => v.toFixed(1)).join(',')}:${viewState.width}x${viewState.height}`;
-  syncUrlHashDebounced();
+  syncUrlStateDebounced();
   scheduleSaveConfig();
 }
 
@@ -813,6 +833,7 @@ declare global {
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
       inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
       exportConfig: () => SimConfigV1;
+      getShareUrl: () => string;
       importConfig: (input: string | SimConfigV1) => Promise<SimConfigV1>;
       resetDefaultConfig: () => Promise<SimConfigV1>;
       randomizeOceanMatrix: (seed?: string) => void;
@@ -1080,7 +1101,7 @@ function setViewLayerChoice(layer: ViewLayerMode) {
     windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
   }
   syncBioUniformState();
-  syncUrlHashDebounced();
+  syncUrlStateDebounced();
 }
 
 function setProjectionChoice(projId: ProjectionId) {
@@ -1211,6 +1232,7 @@ window.complexLife = {
   inspectReactionAt: (clientX: number, clientY: number) =>
     tooltipManager.inspectAt(clientX, clientY),
   exportConfig: exportCurrentConfig,
+  getShareUrl: getCurrentShareUrl,
   importConfig: importConfiguration,
   resetDefaultConfig: resetToFactoryDefaults,
   randomizeOceanMatrix: (seed?: string) => {
@@ -1498,6 +1520,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     if (!suppressPaneEvents) scheduleSaveConfig();
   });
   configPersistenceReady = true;
+  syncUrlStateNow();
   loadWindLevel(earthParams.windLevel);
 })();
 
@@ -2108,6 +2131,7 @@ const configModal = document.getElementById('configModal') as HTMLElement | null
 const configTextarea = document.getElementById('configTextarea') as HTMLTextAreaElement | null;
 const configModalStatus = document.getElementById('configModalStatus') as HTMLElement | null;
 const configCloseBtn = document.getElementById('configCloseBtn') as HTMLButtonElement | null;
+const configLinkBtn = document.getElementById('configLinkBtn') as HTMLButtonElement | null;
 const configCopyBtn = document.getElementById('configCopyBtn') as HTMLButtonElement | null;
 const configApplyBtn = document.getElementById('configApplyBtn') as HTMLButtonElement | null;
 const configResetBtn = document.getElementById('configResetBtn') as HTMLButtonElement | null;
@@ -2138,7 +2162,7 @@ function closeConfigModal() {
   if (configModal) configModal.hidden = true;
 }
 
-async function copyConfigTextWithFallback(text: string): Promise<boolean> {
+async function copyConfigTextWithFallback(text: string, restoreTextarea: boolean = false): Promise<boolean> {
   let syncCopied = false;
   if (configTextarea) {
     const prevVal = configTextarea.value;
@@ -2150,6 +2174,9 @@ async function copyConfigTextWithFallback(text: string): Promise<boolean> {
       syncCopied = Boolean(document.execCommand?.('copy'));
     } catch {
       syncCopied = false;
+    }
+    if (restoreTextarea && prevVal !== text) {
+      configTextarea.value = prevVal;
     }
   }
   if (navigator.clipboard?.writeText) {
@@ -2196,6 +2223,19 @@ configModal?.addEventListener('click', (ev) => {
 window.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && configModal && !configModal.hidden) {
     closeConfigModal();
+  }
+});
+
+configLinkBtn?.addEventListener('click', async () => {
+  syncUrlStateNow();
+  const url = getCurrentShareUrl();
+  const copied = await copyConfigTextWithFallback(url, true);
+  if (copied) {
+    setModalStatus('Copied shareable world URL to clipboard.');
+  } else if (configTextarea) {
+    configTextarea.value = url;
+    configTextarea.select();
+    setModalStatus('Tap & hold URL above to Copy.');
   }
 });
 

@@ -18,7 +18,11 @@ import {
 import { WIND_LEVELS, type WindLevelId } from './earth/windData';
 import { setMouseToolMode } from './input';
 import {
+  FACTORY_DEFAULTS,
+  hasConfigQueryParams,
   loadCachedConfig,
+  parsePanParam,
+  type ConfigMouseTool,
   type SimConfigV1,
 } from './config';
 
@@ -31,6 +35,8 @@ export function getCachedConfig(): SimConfigV1 | null {
 }
 
 export const hasExplicitUrlHash = window.location.hash.length > 1;
+export const hasExplicitUrlConfig = hasConfigQueryParams(window.location.search);
+const effectiveCachedConfig: SimConfigV1 | null = hasExplicitUrlConfig ? null : cachedConfig;
 
 function validateURLParam(key: string, defaultValue: number): number;
 function validateURLParam(key: string, defaultValue: string): string;
@@ -74,34 +80,34 @@ function resolveBool(
 
 export const particleAmt = Math.max(
   1,
-  Math.floor(resolveNumber('particleCount', cachedConfig?.particles, 20000, 1)),
+  Math.floor(resolveNumber('particleCount', effectiveCachedConfig?.particles, FACTORY_DEFAULTS.particles, 1)),
 );
 export const colourAmt = Math.max(
   1,
-  Math.floor(resolveNumber('colours', cachedConfig?.colours, 14, 1)),
+  Math.floor(resolveNumber('colours', effectiveCachedConfig?.colours, FACTORY_DEFAULTS.colours, 1)),
 );
 const cellAmt = Math.max(
   1,
-  Math.floor(resolveNumber('cellCount', cachedConfig?.cells, 4096, 1)),
+  Math.floor(resolveNumber('cellCount', effectiveCachedConfig?.cells, FACTORY_DEFAULTS.cells, 1)),
 );
 const defaultEngine = urlParams.has('engine')
-  ? validateURLParam('engine', 'prefixSum')
-  : (cachedConfig?.engine ?? 'prefixSum');
-const defaultRadius = resolveNumber('radius', cachedConfig?.air?.r, 12);
-const defaultWorldSize = resolveNumber('worldSize', cachedConfig?.air?.worldSize, 1.8);
-const defaultTorque = resolveNumber('torque', cachedConfig?.air?.torque, 42);
-const defaultAngularFriction = resolveNumber('angularFriction', cachedConfig?.air?.angularFriction, 0.03);
-const defaultValency = resolveNumber('valency', cachedConfig?.air?.valency, 1.35);
-const defaultTemperature = resolveNumber('temperature', cachedConfig?.air?.temperature, 0.1);
-const defaultActivation = resolveNumber('activation', cachedConfig?.air?.activation, 0.12);
-const defaultOrbitalSharpness = resolveNumber('orbitalSharpness', cachedConfig?.air?.orbitalSharpness, 6);
-const defaultBondStability = resolveNumber('bondStability', cachedConfig?.air?.bondStability, 0.82, 0);
-const defaultExchangeDrive = resolveNumber('exchangeDrive', cachedConfig?.air?.exchangeDrive, 0.85, 0);
-const defaultShearBreak = resolveNumber('shearBreak', cachedConfig?.air?.shearBreak, 1.1, 0);
-const defaultShearFloor = resolveNumber('shearFloor', cachedConfig?.air?.shearFloor, 0.2, 0);
+  ? validateURLParam('engine', FACTORY_DEFAULTS.engine)
+  : (effectiveCachedConfig?.engine ?? FACTORY_DEFAULTS.engine);
+const defaultRadius = resolveNumber('radius', effectiveCachedConfig?.air?.r, FACTORY_DEFAULTS.air.r);
+const defaultWorldSize = resolveNumber('worldSize', effectiveCachedConfig?.air?.worldSize, FACTORY_DEFAULTS.air.worldSize);
+const defaultTorque = resolveNumber('torque', effectiveCachedConfig?.air?.torque, FACTORY_DEFAULTS.air.torque);
+const defaultAngularFriction = resolveNumber('angularFriction', effectiveCachedConfig?.air?.angularFriction, FACTORY_DEFAULTS.air.angularFriction);
+const defaultValency = resolveNumber('valency', effectiveCachedConfig?.air?.valency, FACTORY_DEFAULTS.air.valency);
+const defaultTemperature = resolveNumber('temperature', effectiveCachedConfig?.air?.temperature, FACTORY_DEFAULTS.air.temperature);
+const defaultActivation = resolveNumber('activation', effectiveCachedConfig?.air?.activation, FACTORY_DEFAULTS.air.activation);
+const defaultOrbitalSharpness = resolveNumber('orbitalSharpness', effectiveCachedConfig?.air?.orbitalSharpness, FACTORY_DEFAULTS.air.orbitalSharpness);
+const defaultBondStability = resolveNumber('bondStability', effectiveCachedConfig?.air?.bondStability, FACTORY_DEFAULTS.air.bondStability, 0);
+const defaultExchangeDrive = resolveNumber('exchangeDrive', effectiveCachedConfig?.air?.exchangeDrive, FACTORY_DEFAULTS.air.exchangeDrive, 0);
+const defaultShearBreak = resolveNumber('shearBreak', effectiveCachedConfig?.air?.shearBreak, FACTORY_DEFAULTS.air.shearBreak, 0);
+const defaultShearFloor = resolveNumber('shearFloor', effectiveCachedConfig?.air?.shearFloor, FACTORY_DEFAULTS.air.shearFloor, 0);
 const defaultSeed = urlParams.has('seed')
   ? validateURLParam('seed', generateRandomSeed())
-  : (cachedConfig?.seed ?? generateRandomSeed());
+  : (effectiveCachedConfig?.seed ?? generateRandomSeed());
 
 const urlProj = validateURLParam('projection', '');
 const initialProjection: ProjectionId =
@@ -109,9 +115,9 @@ const initialProjection: ProjectionId =
     ? (urlProj as ProjectionId)
     : hasExplicitUrlHash && parsedHash.projection && parsedHash.projection in PROJECTIONS
       ? parsedHash.projection
-      : cachedConfig?.earth?.projection && cachedConfig.earth.projection in PROJECTIONS
-        ? cachedConfig.earth.projection
-        : 'orthographic';
+      : effectiveCachedConfig?.earth?.projection && effectiveCachedConfig.earth.projection in PROJECTIONS
+        ? effectiveCachedConfig.earth.projection
+        : FACTORY_DEFAULTS.earth.projection;
 
 const urlLevel = validateURLParam('windLevel', '');
 const initialLevel: WindLevelId =
@@ -119,9 +125,9 @@ const initialLevel: WindLevelId =
     ? (urlLevel as WindLevelId)
     : hasExplicitUrlHash && parsedHash.level && parsedHash.level in WIND_LEVELS
       ? (parsedHash.level as WindLevelId)
-      : cachedConfig?.earth?.windLevel && cachedConfig.earth.windLevel in WIND_LEVELS
-        ? cachedConfig.earth.windLevel
-        : 'surface';
+      : effectiveCachedConfig?.earth?.windLevel && effectiveCachedConfig.earth.windLevel in WIND_LEVELS
+        ? effectiveCachedConfig.earth.windLevel
+        : FACTORY_DEFAULTS.earth.windLevel;
 
 const urlLayer = validateURLParam('layer', '');
 export type ViewLayerMode = 'both' | 'ocean' | 'air';
@@ -130,18 +136,19 @@ const initialViewLayer: ViewLayerMode =
     ? urlLayer
     : hasExplicitUrlHash && parsedHash.mode
       ? parsedHash.mode
-      : (cachedConfig?.earth?.viewLayer ?? 'both');
+      : (effectiveCachedConfig?.earth?.viewLayer ?? FACTORY_DEFAULTS.earth.viewLayer);
 
 export const oceanParticleAmt = Math.max(
   1,
-  Math.floor(resolveNumber('oceanParticles', cachedConfig?.ocean?.particles, 12000, 1)),
+  Math.floor(resolveNumber('oceanParticles', effectiveCachedConfig?.ocean?.particles, FACTORY_DEFAULTS.ocean.particles, 1)),
 );
 export const oceanColourAmt = Math.max(
   1,
-  Math.floor(resolveNumber('oceanColours', cachedConfig?.ocean?.colours, 12, 1)),
+  Math.floor(resolveNumber('oceanColours', effectiveCachedConfig?.ocean?.colours, FACTORY_DEFAULTS.ocean.colours, 1)),
 );
 
 export const initialOrientation = parsedHash.orientation;
+export const initialUrlPan = parsePanParam(urlParams.get('pan'));
 
 export const params = {
   fps: 0,
@@ -165,25 +172,35 @@ function parseOpacityParam(key: string, cachedVal: number | undefined, defaultVa
   return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : base;
 }
 
+const urlMouseTool = urlParams.get('mouseTool');
+const initialMouseTool: ConfigMouseTool =
+  urlMouseTool === 'globe' || urlMouseTool === 'attract' || urlMouseTool === 'repel'
+    ? urlMouseTool
+    : (effectiveCachedConfig?.earth?.mouseTool ?? FACTORY_DEFAULTS.earth.mouseTool);
+
+const initialWindMix = urlParams.has('windMix')
+  ? urlParams.get('windMix') !== 'false'
+  : resolveBool('vortex', effectiveCachedConfig?.earth?.vortex, FACTORY_DEFAULTS.earth.vortex);
+
 export const earthParams = {
   viewLayer: initialViewLayer,
   projection: initialProjection,
   windLevel: initialLevel,
-  vortex: resolveBool(null, cachedConfig?.earth?.vortex, true),
-  windStrength: resolveNumber('windStrength', cachedConfig?.earth?.windStrength, 1.0),
-  windLines: parseOpacityParam('windLines', cachedConfig?.earth?.windLines, 0.2),
-  windColors: parseOpacityParam('windColors', cachedConfig?.earth?.windColors, 0.2),
-  oceanMix: resolveBool('oceanMix', cachedConfig?.earth?.oceanMix, true),
-  oceanStrength: resolveNumber('oceanStrength', cachedConfig?.earth?.oceanStrength, 1.0),
-  oceanLines: parseOpacityParam('oceanLines', cachedConfig?.earth?.oceanLines, 0.2),
-  oceanColors: parseOpacityParam('oceanColors', cachedConfig?.earth?.oceanColors, 0.2),
-  chemOpacity: parseOpacityParam('chemOpacity', cachedConfig?.earth?.chemOpacity, 1.0),
-  lifeOpacity: parseOpacityParam('lifeOpacity', cachedConfig?.earth?.lifeOpacity, 1.0),
-  coastlines: resolveBool('coastlines', cachedConfig?.earth?.coastlines, true),
-  bioLink: resolveBool('bioLink', cachedConfig?.earth?.bioLink, true),
-  bioRate: resolveNumber('bioRate', cachedConfig?.earth?.bioRate, 1.0),
-  tooltips: resolveBool('tooltips', cachedConfig?.earth?.tooltips, true),
-  mouseTool: (cachedConfig?.earth?.mouseTool ?? 'globe') as 'globe' | 'attract' | 'repel',
+  vortex: initialWindMix,
+  windStrength: resolveNumber('windStrength', effectiveCachedConfig?.earth?.windStrength, FACTORY_DEFAULTS.earth.windStrength),
+  windLines: parseOpacityParam('windLines', effectiveCachedConfig?.earth?.windLines, FACTORY_DEFAULTS.earth.windLines),
+  windColors: parseOpacityParam('windColors', effectiveCachedConfig?.earth?.windColors, FACTORY_DEFAULTS.earth.windColors),
+  oceanMix: resolveBool('oceanMix', effectiveCachedConfig?.earth?.oceanMix, FACTORY_DEFAULTS.earth.oceanMix),
+  oceanStrength: resolveNumber('oceanStrength', effectiveCachedConfig?.earth?.oceanStrength, FACTORY_DEFAULTS.earth.oceanStrength),
+  oceanLines: parseOpacityParam('oceanLines', effectiveCachedConfig?.earth?.oceanLines, FACTORY_DEFAULTS.earth.oceanLines),
+  oceanColors: parseOpacityParam('oceanColors', effectiveCachedConfig?.earth?.oceanColors, FACTORY_DEFAULTS.earth.oceanColors),
+  chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
+  lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
+  coastlines: resolveBool('coastlines', effectiveCachedConfig?.earth?.coastlines, FACTORY_DEFAULTS.earth.coastlines),
+  bioLink: resolveBool('bioLink', effectiveCachedConfig?.earth?.bioLink, FACTORY_DEFAULTS.earth.bioLink),
+  bioRate: resolveNumber('bioRate', effectiveCachedConfig?.earth?.bioRate, FACTORY_DEFAULTS.earth.bioRate),
+  tooltips: resolveBool('tooltips', effectiveCachedConfig?.earth?.tooltips, FACTORY_DEFAULTS.earth.tooltips),
+  mouseTool: initialMouseTool,
   windStatus: 'Loading GFS…',
   oceanStatus: 'Loading CoastWatch…',
 };
@@ -193,13 +210,13 @@ setMouseToolMode(earthParams.mouseTool);
 export const oceanOptionParams = {
   particles: oceanParticleAmt,
   colours: oceanColourAmt,
-  r: resolveNumber('oceanR', cachedConfig?.ocean?.r, 20),
-  force: resolveNumber(null, cachedConfig?.ocean?.force, 1.0),
-  beta: resolveNumber(null, cachedConfig?.ocean?.beta, 0.3),
-  delta: resolveNumber(null, cachedConfig?.ocean?.delta, 0.02),
-  friction: resolveNumber(null, cachedConfig?.ocean?.friction, 0.04),
-  avoidance: resolveNumber(null, cachedConfig?.ocean?.avoidance, 4.0),
-  cells: Math.max(1, Math.floor(resolveNumber(null, cachedConfig?.ocean?.cells, cellAmt, 1))),
+  r: resolveNumber('oceanR', effectiveCachedConfig?.ocean?.r, FACTORY_DEFAULTS.ocean.r),
+  force: resolveNumber('oceanForce', effectiveCachedConfig?.ocean?.force, FACTORY_DEFAULTS.ocean.force),
+  beta: resolveNumber('oceanBeta', effectiveCachedConfig?.ocean?.beta, FACTORY_DEFAULTS.ocean.beta),
+  delta: resolveNumber('oceanDelta', effectiveCachedConfig?.ocean?.delta, FACTORY_DEFAULTS.ocean.delta),
+  friction: resolveNumber('oceanFriction', effectiveCachedConfig?.ocean?.friction, FACTORY_DEFAULTS.ocean.friction),
+  avoidance: resolveNumber('oceanAvoidance', effectiveCachedConfig?.ocean?.avoidance, FACTORY_DEFAULTS.ocean.avoidance),
+  cells: Math.max(1, Math.floor(resolveNumber('oceanCells', effectiveCachedConfig?.ocean?.cells, cellAmt, 1))),
   worldSize: defaultWorldSize,
 };
 
@@ -257,10 +274,10 @@ export function setBioLink(
 export const optionParams = {
   colours: colourAmt,
   r: defaultRadius,
-  force: resolveNumber(null, cachedConfig?.air?.force, 3.8),
-  beta: resolveNumber(null, cachedConfig?.air?.beta, 0.4),
-  delta: resolveNumber(null, cachedConfig?.air?.delta, 0.016),
-  friction: resolveNumber(null, cachedConfig?.air?.friction, 0.04),
+  force: resolveNumber('force', effectiveCachedConfig?.air?.force, FACTORY_DEFAULTS.air.force),
+  beta: resolveNumber('beta', effectiveCachedConfig?.air?.beta, FACTORY_DEFAULTS.air.beta),
+  delta: resolveNumber('delta', effectiveCachedConfig?.air?.delta, FACTORY_DEFAULTS.air.delta),
+  friction: resolveNumber('friction', effectiveCachedConfig?.air?.friction, FACTORY_DEFAULTS.air.friction),
   torque: defaultTorque,
   angularFriction: defaultAngularFriction,
   valency: defaultValency,
@@ -271,9 +288,9 @@ export const optionParams = {
   exchangeDrive: defaultExchangeDrive,
   shearBreak: defaultShearBreak,
   shearFloor: defaultShearFloor,
-  showOrbitals: resolveBool(null, cachedConfig?.air?.showOrbitals, true),
+  showOrbitals: resolveBool('showOrbitals', effectiveCachedConfig?.air?.showOrbitals, FACTORY_DEFAULTS.air.showOrbitals),
   cells: cellAmt,
-  avoidance: resolveNumber(null, cachedConfig?.air?.avoidance, 4),
+  avoidance: resolveNumber('avoidance', effectiveCachedConfig?.air?.avoidance, FACTORY_DEFAULTS.air.avoidance),
   worldSize: defaultWorldSize,
 };
 
@@ -809,63 +826,15 @@ export function refreshAllPane() {
 export function buildFactoryConfig(seed: string, oceanSeed: string): SimConfigV1 {
   return {
     v: 1,
-    engine: 'prefixSum',
-    particles: 20000,
-    colours: 14,
-    cells: 4096,
+    engine: FACTORY_DEFAULTS.engine,
+    particles: FACTORY_DEFAULTS.particles,
+    colours: FACTORY_DEFAULTS.colours,
+    cells: FACTORY_DEFAULTS.cells,
     seed,
     oceanSeed,
-    air: {
-      r: 12,
-      beta: 0.4,
-      force: 3.8,
-      delta: 0.016,
-      friction: 0.04,
-      torque: 42,
-      angularFriction: 0.03,
-      valency: 1.35,
-      temperature: 0.1,
-      activation: 0.12,
-      orbitalSharpness: 6,
-      bondStability: 0.82,
-      exchangeDrive: 0.85,
-      shearBreak: 1.1,
-      shearFloor: 0.2,
-      showOrbitals: true,
-      avoidance: 4,
-      worldSize: 1.8,
-    },
-    ocean: {
-      particles: 12000,
-      colours: 12,
-      r: 20,
-      force: 1.0,
-      beta: 0.3,
-      delta: 0.02,
-      friction: 0.04,
-      avoidance: 4.0,
-      cells: 4096,
-    },
-    earth: {
-      viewLayer: 'both',
-      projection: 'orthographic',
-      windLevel: 'surface',
-      vortex: true,
-      windStrength: 1.0,
-      windLines: 0.2,
-      windColors: 0.2,
-      chemOpacity: 1.0,
-      oceanMix: true,
-      oceanStrength: 1.0,
-      oceanLines: 0.2,
-      oceanColors: 0.2,
-      lifeOpacity: 1.0,
-      coastlines: true,
-      bioLink: true,
-      bioRate: 1.0,
-      tooltips: true,
-      mouseTool: 'globe',
-    },
+    air: { ...FACTORY_DEFAULTS.air },
+    ocean: { ...FACTORY_DEFAULTS.ocean },
+    earth: { ...FACTORY_DEFAULTS.earth },
     view: {
       rotate: [...PROJECTIONS.orthographic.defaultRotate],
       pan: [0, 0],
