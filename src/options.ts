@@ -17,9 +17,20 @@ import {
 } from './earth/projections';
 import { WIND_LEVELS, type WindLevelId } from './earth/windData';
 import { setMouseToolMode } from './input';
+import {
+  loadCachedConfig,
+  type SimConfigV1,
+} from './config';
 
 const urlParams = new URLSearchParams(window.location.search);
 const parsedHash = parseNullschoolHash(window.location.hash);
+const cachedConfig: SimConfigV1 | null = loadCachedConfig();
+
+export function getCachedConfig(): SimConfigV1 | null {
+  return cachedConfig;
+}
+
+export const hasExplicitUrlHash = window.location.hash.length > 1;
 
 function validateURLParam(key: string, defaultValue: number): number;
 function validateURLParam(key: string, defaultValue: string): string;
@@ -36,59 +47,94 @@ function validateURLParam(
   return val;
 }
 
+function resolveNumber(
+  urlKey: string | null,
+  cachedVal: number | undefined,
+  factoryVal: number,
+  min?: number,
+): number {
+  let out = typeof cachedVal === 'number' && Number.isFinite(cachedVal) ? cachedVal : factoryVal;
+  if (urlKey && urlParams.has(urlKey)) {
+    out = validateURLParam(urlKey, out);
+  }
+  return min !== undefined ? Math.max(min, out) : out;
+}
+
+function resolveBool(
+  urlKey: string | null,
+  cachedVal: boolean | undefined,
+  factoryVal: boolean,
+): boolean {
+  let out = typeof cachedVal === 'boolean' ? cachedVal : factoryVal;
+  if (urlKey && urlParams.has(urlKey)) {
+    out = urlParams.get(urlKey) !== 'false';
+  }
+  return out;
+}
+
 export const particleAmt = Math.max(
   1,
-  Math.floor(validateURLParam('particleCount', 20000)),
+  Math.floor(resolveNumber('particleCount', cachedConfig?.particles, 20000, 1)),
 );
 export const colourAmt = Math.max(
   1,
-  Math.floor(validateURLParam('colours', 14)),
+  Math.floor(resolveNumber('colours', cachedConfig?.colours, 14, 1)),
 );
 const cellAmt = Math.max(
   1,
-  Math.floor(validateURLParam('cellCount', 4096)),
+  Math.floor(resolveNumber('cellCount', cachedConfig?.cells, 4096, 1)),
 );
-const defaultEngine = validateURLParam('engine', 'prefixSum');
-const defaultRadius = validateURLParam('radius', 12);
-const defaultWorldSize = validateURLParam('worldSize', 1.8);
-const defaultTorque = validateURLParam('torque', 22);
-const defaultAngularFriction = validateURLParam('angularFriction', 0.04);
-const defaultValency = validateURLParam('valency', 1.15);
-const defaultTemperature = validateURLParam('temperature', 0.12);
-const defaultActivation = validateURLParam('activation', 0.15);
-const defaultOrbitalSharpness = validateURLParam('orbitalSharpness', 4);
-const defaultSeed = validateURLParam('seed', generateRandomSeed());
+const defaultEngine = urlParams.has('engine')
+  ? validateURLParam('engine', 'prefixSum')
+  : (cachedConfig?.engine ?? 'prefixSum');
+const defaultRadius = resolveNumber('radius', cachedConfig?.air?.r, 12);
+const defaultWorldSize = resolveNumber('worldSize', cachedConfig?.air?.worldSize, 1.8);
+const defaultTorque = resolveNumber('torque', cachedConfig?.air?.torque, 22);
+const defaultAngularFriction = resolveNumber('angularFriction', cachedConfig?.air?.angularFriction, 0.04);
+const defaultValency = resolveNumber('valency', cachedConfig?.air?.valency, 1.15);
+const defaultTemperature = resolveNumber('temperature', cachedConfig?.air?.temperature, 0.12);
+const defaultActivation = resolveNumber('activation', cachedConfig?.air?.activation, 0.15);
+const defaultOrbitalSharpness = resolveNumber('orbitalSharpness', cachedConfig?.air?.orbitalSharpness, 4);
+const defaultSeed = urlParams.has('seed')
+  ? validateURLParam('seed', generateRandomSeed())
+  : (cachedConfig?.seed ?? generateRandomSeed());
 
 const urlProj = validateURLParam('projection', '');
 const initialProjection: ProjectionId =
   urlProj in PROJECTIONS
     ? (urlProj as ProjectionId)
-    : parsedHash.projection && parsedHash.projection in PROJECTIONS
+    : hasExplicitUrlHash && parsedHash.projection && parsedHash.projection in PROJECTIONS
       ? parsedHash.projection
-      : 'orthographic';
+      : cachedConfig?.earth?.projection && cachedConfig.earth.projection in PROJECTIONS
+        ? cachedConfig.earth.projection
+        : 'orthographic';
 
 const urlLevel = validateURLParam('windLevel', '');
 const initialLevel: WindLevelId =
   urlLevel in WIND_LEVELS
     ? (urlLevel as WindLevelId)
-    : parsedHash.level && parsedHash.level in WIND_LEVELS
+    : hasExplicitUrlHash && parsedHash.level && parsedHash.level in WIND_LEVELS
       ? (parsedHash.level as WindLevelId)
-      : 'surface';
+      : cachedConfig?.earth?.windLevel && cachedConfig.earth.windLevel in WIND_LEVELS
+        ? cachedConfig.earth.windLevel
+        : 'surface';
 
 const urlLayer = validateURLParam('layer', '');
 export type ViewLayerMode = 'both' | 'ocean' | 'air';
 const initialViewLayer: ViewLayerMode =
   urlLayer === 'ocean' || urlLayer === 'air' || urlLayer === 'both'
     ? urlLayer
-    : parsedHash.mode ?? 'both';
+    : hasExplicitUrlHash && parsedHash.mode
+      ? parsedHash.mode
+      : (cachedConfig?.earth?.viewLayer ?? 'both');
 
 export const oceanParticleAmt = Math.max(
   1,
-  Math.floor(validateURLParam('oceanParticles', 12000)),
+  Math.floor(resolveNumber('oceanParticles', cachedConfig?.ocean?.particles, 12000, 1)),
 );
 export const oceanColourAmt = Math.max(
   1,
-  Math.floor(validateURLParam('oceanColours', 12)),
+  Math.floor(resolveNumber('oceanColours', cachedConfig?.ocean?.colours, 12, 1)),
 );
 
 export const initialOrientation = parsedHash.orientation;
@@ -102,49 +148,54 @@ export const params = {
   seed: defaultSeed,
 };
 
-function parseOpacityParam(key: string, defaultValue: number): number {
+function parseOpacityParam(key: string, cachedVal: number | undefined, defaultValue: number): number {
+  const base =
+    typeof cachedVal === 'number' && Number.isFinite(cachedVal)
+      ? Math.max(0, Math.min(1, cachedVal))
+      : defaultValue;
   const val = urlParams.get(key);
-  if (val === null) return defaultValue;
+  if (val === null) return base;
   if (val === 'false') return 0;
   if (val === 'true') return 1;
   const parsed = Number(val);
-  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : defaultValue;
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : base;
 }
 
 export const earthParams = {
   viewLayer: initialViewLayer,
   projection: initialProjection,
   windLevel: initialLevel,
-  vortex: true,
-  windStrength: validateURLParam('windStrength', 1.0),
-  windLines: parseOpacityParam('windLines', 0.2),
-  windColors: parseOpacityParam('windColors', 0.2),
-  oceanMix: urlParams.get('oceanMix') !== 'false',
-  oceanStrength: validateURLParam('oceanStrength', 1.0),
-  oceanLines: parseOpacityParam('oceanLines', 0.2),
-  oceanColors: parseOpacityParam('oceanColors', 0.2),
-  chemOpacity: parseOpacityParam('chemOpacity', 1.0),
-  lifeOpacity: parseOpacityParam('lifeOpacity', 1.0),
-  coastlines: urlParams.get('coastlines') !== 'false',
-  bioLink: urlParams.get('bioLink') !== 'false',
-  bioRate: validateURLParam('bioRate', 1.0),
-  tooltips: urlParams.get('tooltips') !== 'false',
-  mouseTool: 'globe' as 'globe' | 'attract' | 'repel',
+  vortex: resolveBool(null, cachedConfig?.earth?.vortex, true),
+  windStrength: resolveNumber('windStrength', cachedConfig?.earth?.windStrength, 1.0),
+  windLines: parseOpacityParam('windLines', cachedConfig?.earth?.windLines, 0.2),
+  windColors: parseOpacityParam('windColors', cachedConfig?.earth?.windColors, 0.2),
+  oceanMix: resolveBool('oceanMix', cachedConfig?.earth?.oceanMix, true),
+  oceanStrength: resolveNumber('oceanStrength', cachedConfig?.earth?.oceanStrength, 1.0),
+  oceanLines: parseOpacityParam('oceanLines', cachedConfig?.earth?.oceanLines, 0.2),
+  oceanColors: parseOpacityParam('oceanColors', cachedConfig?.earth?.oceanColors, 0.2),
+  chemOpacity: parseOpacityParam('chemOpacity', cachedConfig?.earth?.chemOpacity, 1.0),
+  lifeOpacity: parseOpacityParam('lifeOpacity', cachedConfig?.earth?.lifeOpacity, 1.0),
+  coastlines: resolveBool('coastlines', cachedConfig?.earth?.coastlines, true),
+  bioLink: resolveBool('bioLink', cachedConfig?.earth?.bioLink, true),
+  bioRate: resolveNumber('bioRate', cachedConfig?.earth?.bioRate, 1.0),
+  tooltips: resolveBool('tooltips', cachedConfig?.earth?.tooltips, true),
+  mouseTool: (cachedConfig?.earth?.mouseTool ?? 'globe') as 'globe' | 'attract' | 'repel',
   windStatus: 'Loading GFS…',
   oceanStatus: 'Loading CoastWatch…',
 };
+setMouseToolMode(earthParams.mouseTool);
 
 // Classic Particle Life parameters preserved from the original fork (51bc381)
 export const oceanOptionParams = {
   particles: oceanParticleAmt,
   colours: oceanColourAmt,
-  r: validateURLParam('oceanR', 20),
-  force: 1.0,
-  beta: 0.3,
-  delta: 0.02,
-  friction: 0.04,
-  avoidance: 4.0,
-  cells: cellAmt,
+  r: resolveNumber('oceanR', cachedConfig?.ocean?.r, 20),
+  force: resolveNumber(null, cachedConfig?.ocean?.force, 1.0),
+  beta: resolveNumber(null, cachedConfig?.ocean?.beta, 0.3),
+  delta: resolveNumber(null, cachedConfig?.ocean?.delta, 0.02),
+  friction: resolveNumber(null, cachedConfig?.ocean?.friction, 0.04),
+  avoidance: resolveNumber(null, cachedConfig?.ocean?.avoidance, 4.0),
+  cells: Math.max(1, Math.floor(resolveNumber(null, cachedConfig?.ocean?.cells, cellAmt, 1))),
   worldSize: defaultWorldSize,
 };
 
@@ -202,19 +253,19 @@ export function setBioLink(
 export const optionParams = {
   colours: colourAmt,
   r: defaultRadius,
-  force: 2.5,
-  beta: 0.4,
-  delta: 0.02,
-  friction: 0.04,
+  force: resolveNumber(null, cachedConfig?.air?.force, 2.5),
+  beta: resolveNumber(null, cachedConfig?.air?.beta, 0.4),
+  delta: resolveNumber(null, cachedConfig?.air?.delta, 0.02),
+  friction: resolveNumber(null, cachedConfig?.air?.friction, 0.04),
   torque: defaultTorque,
   angularFriction: defaultAngularFriction,
   valency: defaultValency,
   temperature: defaultTemperature,
   activation: defaultActivation,
   orbitalSharpness: defaultOrbitalSharpness,
-  showOrbitals: true,
+  showOrbitals: resolveBool(null, cachedConfig?.air?.showOrbitals, true),
   cells: cellAmt,
-  avoidance: 4,
+  avoidance: resolveNumber(null, cachedConfig?.air?.avoidance, 4),
   worldSize: defaultWorldSize,
 };
 
@@ -302,7 +353,7 @@ export const engineSelect = withTooltip(
   'GPU parallel neighbor-search backend: Prefix Sum (subgroups), Counting Sort, or Atomic Linked Lists.',
 );
 
-withTooltip(
+export const particlesBinding = withTooltip(
   pane.addBinding(params, 'particles', { min: 1, step: 1 }),
   'Chemistry Particle Count',
   'Total atmospheric & surface chemistry atoms simulated on the globe (takes effect on New Sim).',
@@ -321,6 +372,16 @@ export const randomizeBtn = withTooltip(
   pane.addButton({ title: 'Randomize' }),
   'Randomize Seed',
   'Pick a new random seed and respawn atmospheric chemistry particles.',
+);
+export const copyConfigBtn = withTooltip(
+  pane.addButton({ title: 'Copy Config' }),
+  'Copy Configuration JSON',
+  'Copy all current simulation, chemistry, ocean, bioChem, opacity, and camera settings to clipboard for prompts or reuse.',
+);
+export const pasteConfigBtn = withTooltip(
+  pane.addButton({ title: 'Paste / Load Config' }),
+  'Paste / Load Configuration',
+  'Open config box to paste a saved JSON config or URL from another run, or reset defaults & clear browser cache.',
 );
 
 // Earth & Wind / Ocean folder (emulating earth.nullschool.net layers, levels & projections)
@@ -483,7 +544,7 @@ export const tooltipsBinding = withTooltip(
   'Hover Tooltips',
   'Show or hide mouse-over tooltips on ongoing globe chemical reactions and parameter menu controls.',
 );
-const mouseToolBinding = withTooltip(
+export const mouseToolBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'mouseTool', {
     label: 'tool',
     options: {
@@ -530,7 +591,7 @@ const oceanLifeFolder = withTooltip(
   'Ocean Life Parameters',
   'Species attraction matrix and physical Swarm parameters for marine Particle Life on Earth oceans.',
 );
-withTooltip(
+export const oceanCountBinding = withTooltip(
   oceanLifeFolder.addBinding(oceanOptionParams, 'particles', {
     label: 'oceanCount',
     min: 500,
@@ -719,6 +780,107 @@ export function bindOptions(
   oceanStrengthBinding.on('change', () =>
     setOceanSim(device, oceanSimData, oceanSimBuffer),
   );
+}
+
+export function refreshAllPane() {
+  pane.refresh();
+}
+
+export function buildFactoryConfig(seed: string, oceanSeed: string): SimConfigV1 {
+  return {
+    v: 1,
+    engine: 'prefixSum',
+    particles: 20000,
+    colours: 14,
+    cells: 4096,
+    seed,
+    oceanSeed,
+    air: {
+      r: 12,
+      beta: 0.4,
+      force: 2.5,
+      delta: 0.02,
+      friction: 0.04,
+      torque: 22,
+      angularFriction: 0.04,
+      valency: 1.15,
+      temperature: 0.12,
+      activation: 0.15,
+      orbitalSharpness: 4,
+      showOrbitals: true,
+      avoidance: 4,
+      worldSize: 1.8,
+    },
+    ocean: {
+      particles: 12000,
+      colours: 12,
+      r: 20,
+      force: 1.0,
+      beta: 0.3,
+      delta: 0.02,
+      friction: 0.04,
+      avoidance: 4.0,
+      cells: 4096,
+    },
+    earth: {
+      viewLayer: 'both',
+      projection: 'orthographic',
+      windLevel: 'surface',
+      vortex: true,
+      windStrength: 1.0,
+      windLines: 0.2,
+      windColors: 0.2,
+      chemOpacity: 1.0,
+      oceanMix: true,
+      oceanStrength: 1.0,
+      oceanLines: 0.2,
+      oceanColors: 0.2,
+      lifeOpacity: 1.0,
+      coastlines: true,
+      bioLink: true,
+      bioRate: 1.0,
+      tooltips: true,
+      mouseTool: 'globe',
+    },
+    view: {
+      rotate: [...PROJECTIONS.orthographic.defaultRotate],
+      pan: [0, 0],
+      scale: 586,
+    },
+  };
+}
+
+export function bindConfigPersistence(onChange: () => void) {
+  const tracked: BindingApi[] = [
+    engineSelect,
+    particlesBinding,
+    seedInput,
+    viewLayerSelect,
+    projectionSelect,
+    windLevelSelect,
+    windMixBinding,
+    windStrengthBinding,
+    windLinesBinding,
+    windColorsBinding,
+    chemOpacityBinding,
+    oceanMixBinding,
+    oceanStrengthBinding,
+    oceanLinesBinding,
+    oceanColorsBinding,
+    lifeOpacityBinding,
+    coastlinesBinding,
+    bioLinkBinding,
+    bioRateBinding,
+    tooltipsBinding,
+    mouseToolBinding,
+    oceanCountBinding,
+    oceanColoursBinding,
+    ...oceanParamBindings,
+    ...Object.values(optionBindings),
+  ];
+  for (const b of tracked) {
+    b.on('change', onChange);
+  }
 }
 
 // 2D Periodic Table legend folder

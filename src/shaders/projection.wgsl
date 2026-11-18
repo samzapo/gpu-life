@@ -297,7 +297,7 @@ fn projectUnitPos(
 
     let v = rotateToView(u, n);
     if (pType == 0u) {
-        if (v.x < -0.02) {
+        if (v.x < 0.005) {
             return vec3f(0.0, 0.0, 0.0);
         }
         return vec3f(v.y, -v.z, 1.0);

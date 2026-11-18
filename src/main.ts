@@ -53,17 +53,23 @@ import {
   setupTimestamp,
 } from './utils';
 import {
+  bindConfigPersistence,
   bindOptions,
   bioLinkBinding,
   bioRateBinding,
+  buildFactoryConfig,
   chemOpacityBinding,
   coastlinesBinding,
   colourAmt as colourAmtOptn,
+  copyConfigBtn,
   earthParams,
   engineSelect,
+  getCachedConfig,
   globalPerformanceParams,
+  hasExplicitUrlHash,
   initialOrientation,
   lifeOpacityBinding,
+  mouseToolBinding,
   newOceanSimBtn,
   newSimBtn,
   oceanColorsBinding,
@@ -75,10 +81,12 @@ import {
   optionParams,
   params,
   particleAmt as particleAmtOptn,
+  pasteConfigBtn,
   performanceParams,
   projectionSelect,
   randomizeBtn,
   randomizeOceanRulesBtn,
+  refreshAllPane,
   resetViewBtn,
   seedInput,
   setBioLink,
@@ -94,6 +102,13 @@ import {
   windLinesBinding,
   windStatusBinding,
 } from './options';
+import { setMouseToolMode } from './input';
+import {
+  clearCachedConfig,
+  parseConfigInput,
+  saveCachedConfig,
+  type SimConfigV1,
+} from './config';
 import {
   TooltipManager,
   type HoverSimSnapshot,
@@ -146,7 +161,9 @@ function refreshChemistryDefinition() {
 refreshChemistryDefinition();
 
 let oceanColourAmt = oceanColourAmtOptn;
-let oceanSeed = generateRandomSeed();
+const cachedBootCfg = getCachedConfig();
+const urlOceanSeed = new URLSearchParams(window.location.search).get('oceanSeed');
+let oceanSeed = urlOceanSeed ?? cachedBootCfg?.oceanSeed ?? generateRandomSeed();
 let oceanMatrixData: Float32Array<ArrayBuffer> = new Float32Array(0);
 
 function buildRandomOceanMatrix(nColours: number, seed: string): Float32Array<ArrayBuffer> {
@@ -222,27 +239,35 @@ let engine: string =
 setEngineDisplay(engine);
 
 const initSpec = PROJECTIONS[earthParams.projection];
+const useCachedView = !hasExplicitUrlHash && Boolean(cachedBootCfg?.view);
 const initScale =
   initialOrientation && initialOrientation[2] > 50
     ? initialOrientation[2]
-    : earthParams.projection === 'orthographic'
-      ? Math.round(586 * Math.min(window.innerWidth / 1280, window.innerHeight / 800) || 586)
-      : fitScaleForProjection(
-          earthParams.projection,
-          initSpec.defaultRotate,
-          window.innerWidth,
-          window.innerHeight,
-        );
+    : useCachedView && typeof cachedBootCfg?.view?.scale === 'number'
+      ? cachedBootCfg.view.scale
+      : earthParams.projection === 'orthographic'
+        ? Math.round(586 * Math.min(window.innerWidth / 1280, window.innerHeight / 800) || 586)
+        : fitScaleForProjection(
+            earthParams.projection,
+            initSpec.defaultRotate,
+            window.innerWidth,
+            window.innerHeight,
+          );
 
 const initRotate: [number, number, number] = initialOrientation
   ? [-initialOrientation[0], -initialOrientation[1], 0]
-  : [...initSpec.defaultRotate];
+  : useCachedView && cachedBootCfg?.view?.rotate
+    ? [...cachedBootCfg.view.rotate]
+    : [...initSpec.defaultRotate];
+
+const initPan: [number, number] =
+  useCachedView && cachedBootCfg?.view?.pan ? [...cachedBootCfg.view.pan] : [0, 0];
 
 const viewState: GlobeViewState = {
   projectionId: earthParams.projection,
   rotate: initRotate,
   scale: Math.max(140, initScale),
-  pan: [0, 0],
+  pan: initPan,
   width: window.innerWidth,
   height: window.innerHeight,
 };
@@ -255,6 +280,9 @@ let watermanDirty = true;
 let mapDirty = true;
 let viewSignature = '';
 let hashSyncTimer: number | undefined;
+let configSaveTimer: number | undefined;
+let configPersistenceReady = false;
+let suppressPaneEvents = false;
 
 function createEmptyWindGrid(): WindGrid {
   return {
@@ -338,6 +366,300 @@ function syncUrlHashDebounced() {
   }, 150);
 }
 
+function exportCurrentConfig(): SimConfigV1 {
+  return {
+    v: 1,
+    engine,
+    particles: particleAmt,
+    colours: colourAmt,
+    cells: params.cells,
+    seed: params.seed,
+    oceanSeed,
+    air: {
+      r: optionParams.r,
+      beta: optionParams.beta,
+      force: optionParams.force,
+      delta: optionParams.delta,
+      friction: optionParams.friction,
+      torque: optionParams.torque,
+      angularFriction: optionParams.angularFriction,
+      valency: optionParams.valency,
+      temperature: optionParams.temperature,
+      activation: optionParams.activation,
+      orbitalSharpness: optionParams.orbitalSharpness,
+      showOrbitals: optionParams.showOrbitals,
+      avoidance: optionParams.avoidance,
+      worldSize: optionParams.worldSize,
+    },
+    ocean: {
+      particles: oceanParticleAmt,
+      colours: oceanColourAmt,
+      r: oceanOptionParams.r,
+      beta: oceanOptionParams.beta,
+      force: oceanOptionParams.force,
+      delta: oceanOptionParams.delta,
+      friction: oceanOptionParams.friction,
+      avoidance: oceanOptionParams.avoidance,
+      cells: oceanOptionParams.cells,
+    },
+    earth: {
+      viewLayer: earthParams.viewLayer,
+      projection: earthParams.projection,
+      windLevel: earthParams.windLevel,
+      vortex: earthParams.vortex,
+      windStrength: earthParams.windStrength,
+      windLines: earthParams.windLines,
+      windColors: earthParams.windColors,
+      chemOpacity: earthParams.chemOpacity,
+      oceanMix: earthParams.oceanMix,
+      oceanStrength: earthParams.oceanStrength,
+      oceanLines: earthParams.oceanLines,
+      oceanColors: earthParams.oceanColors,
+      lifeOpacity: earthParams.lifeOpacity,
+      coastlines: earthParams.coastlines,
+      bioLink: earthParams.bioLink,
+      bioRate: earthParams.bioRate,
+      tooltips: earthParams.tooltips,
+      mouseTool: earthParams.mouseTool,
+    },
+    view: {
+      rotate: [...viewState.rotate],
+      pan: [...viewState.pan],
+      scale: viewState.scale,
+    },
+  };
+}
+
+let skipAutoSave = false;
+
+async function resetToFactoryDefaults(): Promise<SimConfigV1> {
+  skipAutoSave = true;
+  if (configSaveTimer !== undefined) {
+    window.clearTimeout(configSaveTimer);
+    configSaveTimer = undefined;
+  }
+  clearCachedConfig();
+  try {
+    const factory = buildFactoryConfig(generateRandomSeed(), generateRandomSeed());
+    const res = await importConfiguration(factory);
+    if (configSaveTimer !== undefined) {
+      window.clearTimeout(configSaveTimer);
+      configSaveTimer = undefined;
+    }
+    clearCachedConfig();
+    return res;
+  } finally {
+    skipAutoSave = false;
+  }
+}
+
+function saveConfigNow() {
+  if (!configPersistenceReady || skipAutoSave) return;
+  saveCachedConfig(exportCurrentConfig());
+}
+
+function scheduleSaveConfig() {
+  if (!configPersistenceReady || skipAutoSave) return;
+  if (configSaveTimer !== undefined) {
+    window.clearTimeout(configSaveTimer);
+  }
+  configSaveTimer = window.setTimeout(() => {
+    configSaveTimer = undefined;
+    if (!skipAutoSave) {
+      saveCachedConfig(exportCurrentConfig());
+    }
+  }, 220);
+}
+
+async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimConfigV1> {
+  const cfg = parseConfigInput(rawInput);
+
+  let resetAir = false;
+  let resetOcean = false;
+  let nextWindLevel: WindLevelId | null = null;
+  let nextViewLayer: ViewLayerMode | null = null;
+  let projUpdated = false;
+
+  if (cfg.engine && cfg.engine in engines) {
+    engine = cfg.engine;
+    params.engine = cfg.engine;
+    setEngineDisplay(engine);
+  }
+
+  if (cfg.particles !== undefined) {
+    const p = Math.max(1, Math.floor(cfg.particles));
+    if (p !== particleAmt) resetAir = true;
+    particleAmt = p;
+    params.particles = p;
+  }
+  if (cfg.colours !== undefined) {
+    const c = Math.max(1, Math.min(62, Math.floor(cfg.colours)));
+    if (c !== colourAmt) resetAir = true;
+    colourAmt = c;
+    params.colours = c;
+    optionParams.colours = c;
+  }
+  if (cfg.cells !== undefined) {
+    const cl = Math.max(1, Math.floor(cfg.cells));
+    if (cl !== params.cells) resetAir = true;
+    params.cells = cl;
+    optionParams.cells = cl;
+  }
+  if (cfg.seed !== undefined && cfg.seed !== params.seed) {
+    params.seed = cfg.seed;
+    resetAir = true;
+  }
+  if (cfg.oceanSeed !== undefined && cfg.oceanSeed !== oceanSeed) {
+    oceanSeed = cfg.oceanSeed;
+    resetOcean = true;
+  }
+
+  if (cfg.air) {
+    const a = cfg.air;
+    if (a.r !== undefined) optionParams.r = a.r;
+    if (a.beta !== undefined) optionParams.beta = a.beta;
+    if (a.force !== undefined) optionParams.force = a.force;
+    if (a.delta !== undefined) optionParams.delta = a.delta;
+    if (a.friction !== undefined) optionParams.friction = a.friction;
+    if (a.torque !== undefined) optionParams.torque = a.torque;
+    if (a.angularFriction !== undefined) optionParams.angularFriction = a.angularFriction;
+    if (a.valency !== undefined) optionParams.valency = a.valency;
+    if (a.temperature !== undefined) optionParams.temperature = a.temperature;
+    if (a.activation !== undefined) optionParams.activation = a.activation;
+    if (a.orbitalSharpness !== undefined) optionParams.orbitalSharpness = a.orbitalSharpness;
+    if (a.showOrbitals !== undefined) optionParams.showOrbitals = a.showOrbitals;
+    if (a.avoidance !== undefined) optionParams.avoidance = a.avoidance;
+    if (a.worldSize !== undefined) {
+      optionParams.worldSize = a.worldSize;
+      oceanOptionParams.worldSize = a.worldSize;
+    }
+  }
+
+  if (cfg.ocean) {
+    const o = cfg.ocean;
+    if (o.particles !== undefined) {
+      const op = Math.max(1, Math.floor(o.particles));
+      if (op !== oceanParticleAmt) resetOcean = true;
+      oceanParticleAmt = op;
+      oceanOptionParams.particles = op;
+    }
+    if (o.colours !== undefined) {
+      const oc = Math.max(1, Math.min(200, Math.floor(o.colours)));
+      if (oc !== oceanColourAmt) resetOcean = true;
+      oceanColourAmt = oc;
+      oceanOptionParams.colours = oc;
+    }
+    if (o.cells !== undefined) {
+      const ocl = Math.max(1, Math.floor(o.cells));
+      if (ocl !== oceanOptionParams.cells) resetOcean = true;
+      oceanOptionParams.cells = ocl;
+    }
+    if (o.r !== undefined) oceanOptionParams.r = o.r;
+    if (o.beta !== undefined) oceanOptionParams.beta = o.beta;
+    if (o.force !== undefined) oceanOptionParams.force = o.force;
+    if (o.delta !== undefined) oceanOptionParams.delta = o.delta;
+    if (o.friction !== undefined) oceanOptionParams.friction = o.friction;
+    if (o.avoidance !== undefined) oceanOptionParams.avoidance = o.avoidance;
+  }
+
+  if (cfg.earth) {
+    const e = cfg.earth;
+    if (e.viewLayer && e.viewLayer !== earthParams.viewLayer) {
+      nextViewLayer = e.viewLayer;
+    }
+    if (e.projection && e.projection !== earthParams.projection) {
+      earthParams.projection = e.projection;
+      viewState.projectionId = e.projection;
+      projUpdated = true;
+    }
+    if (e.windLevel && e.windLevel !== earthParams.windLevel) {
+      earthParams.windLevel = e.windLevel;
+      nextWindLevel = e.windLevel;
+    }
+    if (e.vortex !== undefined) earthParams.vortex = e.vortex;
+    if (e.windStrength !== undefined) earthParams.windStrength = e.windStrength;
+    if (e.windLines !== undefined) earthParams.windLines = e.windLines;
+    if (e.windColors !== undefined) earthParams.windColors = e.windColors;
+    if (e.chemOpacity !== undefined) earthParams.chemOpacity = e.chemOpacity;
+    if (e.oceanMix !== undefined) earthParams.oceanMix = e.oceanMix;
+    if (e.oceanStrength !== undefined) earthParams.oceanStrength = e.oceanStrength;
+    if (e.oceanLines !== undefined) earthParams.oceanLines = e.oceanLines;
+    if (e.oceanColors !== undefined) earthParams.oceanColors = e.oceanColors;
+    if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
+    if (e.coastlines !== undefined) {
+      earthParams.coastlines = e.coastlines;
+      mapDirty = true;
+    }
+    if (e.bioLink !== undefined) earthParams.bioLink = e.bioLink;
+    if (e.bioRate !== undefined) earthParams.bioRate = e.bioRate;
+    if (e.tooltips !== undefined) earthParams.tooltips = e.tooltips;
+    if (e.mouseTool !== undefined) {
+      earthParams.mouseTool = e.mouseTool;
+      setMouseToolMode(e.mouseTool);
+    }
+  }
+
+  if (cfg.view) {
+    if (cfg.view.rotate) {
+      viewState.rotate = [...cfg.view.rotate];
+      projUpdated = true;
+    }
+    if (cfg.view.pan) {
+      viewState.pan = [...cfg.view.pan];
+      projUpdated = true;
+    }
+    if (cfg.view.scale !== undefined) {
+      viewState.scale = Math.max(120, Math.min(30000, cfg.view.scale));
+      projUpdated = true;
+    }
+  }
+
+  syncStreamCanvasOpacity();
+  if (earthParams.windLines <= 0.001 && windCtx) {
+    windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
+  }
+  if (earthParams.oceanLines <= 0.001 && oceanCtx) {
+    oceanStreamRenderer.clear(oceanCtx, viewState.width, viewState.height);
+  }
+  tooltipManager.syncEnabledState();
+
+  if (nextViewLayer) {
+    setViewLayerChoice(nextViewLayer);
+  } else {
+    refreshHudVisibility();
+  }
+
+  if (device && simBuffer) setSim(device, simData, simBuffer, frameCount);
+  if (device && oceanSimBuffer) setOceanSim(device, oceanSimData, oceanSimBuffer);
+  syncBioUniformState();
+
+  if (projUpdated) {
+    updateProjectionState();
+  }
+
+  updatePeriodicLegend(colourAmt);
+  if (resetAir) {
+    refreshChemistryDefinition();
+    startParticles();
+  }
+  if (resetOcean) {
+    startOceanParticles();
+  }
+  if (nextWindLevel) {
+    await loadWindLevel(nextWindLevel);
+  }
+
+  suppressPaneEvents = true;
+  try {
+    refreshAllPane();
+    mouseToolBinding.refresh();
+  } finally {
+    suppressPaneEvents = false;
+  }
+  saveConfigNow();
+  return exportCurrentConfig();
+}
+
 function updateProjectionState() {
   d3Proj = buildConfiguredD3Projection(viewState);
   refreshBoundProjection(d3Proj);
@@ -347,6 +669,7 @@ function updateProjectionState() {
   }
   viewSignature = `${viewState.projectionId}:${viewState.rotate.map((v) => v.toFixed(2)).join(',')}:${viewState.scale.toFixed(1)}:${viewState.pan.map((v) => v.toFixed(1)).join(',')}:${viewState.width}x${viewState.height}`;
   syncUrlHashDebounced();
+  scheduleSaveConfig();
 }
 
 bindGlobeInput(viewState, () => d3Proj, updateProjectionState);
@@ -481,6 +804,9 @@ declare global {
       setWindLines: (val: boolean | number) => void;
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
       inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
+      exportConfig: () => SimConfigV1;
+      importConfig: (input: string | SimConfigV1) => Promise<SimConfigV1>;
+      resetDefaultConfig: () => Promise<SimConfigV1>;
       randomizeOceanMatrix: (seed?: string) => void;
       getOceanInfo: () => {
         nx: number;
@@ -876,6 +1202,9 @@ window.complexLife = {
   },
   inspectReactionAt: (clientX: number, clientY: number) =>
     tooltipManager.inspectAt(clientX, clientY),
+  exportConfig: exportCurrentConfig,
+  importConfig: importConfiguration,
+  resetDefaultConfig: resetToFactoryDefaults,
   randomizeOceanMatrix: (seed?: string) => {
     oceanSeed = seed ?? generateRandomSeed();
     oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
@@ -1157,6 +1486,10 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     oceanSimBuffer,
     syncBioUniformState,
   );
+  bindConfigPersistence(() => {
+    if (!suppressPaneEvents) scheduleSaveConfig();
+  });
+  configPersistenceReady = true;
   loadWindLevel(earthParams.windLevel);
 })();
 
@@ -1754,22 +2087,108 @@ newSimBtn.on('click', () => {
   particleAmt = Math.max(1, Math.floor(params.particles));
 
   startParticles();
+  saveConfigNow();
 });
 
 randomizeBtn.on('click', () => {
   if (!device || !matrixBuffer) return;
   applySeed(generateRandomSeed(), true);
+  saveConfigNow();
+});
+
+const configModal = document.getElementById('configModal') as HTMLElement | null;
+const configTextarea = document.getElementById('configTextarea') as HTMLTextAreaElement | null;
+const configModalStatus = document.getElementById('configModalStatus') as HTMLElement | null;
+const configCloseBtn = document.getElementById('configCloseBtn') as HTMLButtonElement | null;
+const configCopyBtn = document.getElementById('configCopyBtn') as HTMLButtonElement | null;
+const configApplyBtn = document.getElementById('configApplyBtn') as HTMLButtonElement | null;
+const configResetBtn = document.getElementById('configResetBtn') as HTMLButtonElement | null;
+
+let copyBtnResetTimer: number | undefined;
+
+function setModalStatus(msg: string, isErr = false) {
+  if (!configModalStatus) return;
+  configModalStatus.textContent = msg;
+  configModalStatus.classList.toggle('err', isErr);
+}
+
+function openConfigModal(initialMsg = '') {
+  if (!configModal || !configTextarea) return;
+  configTextarea.value = JSON.stringify(exportCurrentConfig(), null, 2);
+  setModalStatus(initialMsg, false);
+  configModal.hidden = false;
+  configTextarea.focus();
+  configTextarea.select();
+}
+
+function closeConfigModal() {
+  if (configModal) configModal.hidden = true;
+}
+
+copyConfigBtn.on('click', async () => {
+  const json = JSON.stringify(exportCurrentConfig(), null, 2);
+  try {
+    await navigator.clipboard.writeText(json);
+    copyConfigBtn.title = 'Copied ✓';
+    if (copyBtnResetTimer !== undefined) window.clearTimeout(copyBtnResetTimer);
+    copyBtnResetTimer = window.setTimeout(() => {
+      copyConfigBtn.title = 'Copy Config';
+    }, 1500);
+  } catch {
+    openConfigModal('Clipboard permission unavailable — copy the selected JSON below.');
+  }
+});
+
+pasteConfigBtn.on('click', () => {
+  openConfigModal();
+});
+
+configCloseBtn?.addEventListener('click', closeConfigModal);
+configModal?.addEventListener('click', (ev) => {
+  if (ev.target === configModal) closeConfigModal();
+});
+
+configCopyBtn?.addEventListener('click', async () => {
+  if (!configTextarea) return;
+  const text = configTextarea.value.trim() || JSON.stringify(exportCurrentConfig(), null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    setModalStatus('Copied JSON configuration to clipboard.');
+  } catch {
+    configTextarea.select();
+    setModalStatus('Press Ctrl+C / Cmd+C to copy selected JSON.');
+  }
+});
+
+configApplyBtn?.addEventListener('click', async () => {
+  if (!configTextarea) return;
+  try {
+    await importConfiguration(configTextarea.value);
+    setModalStatus('Configuration applied & cached cleanly.');
+  } catch (err) {
+    setModalStatus(err instanceof Error ? err.message : 'Invalid configuration.', true);
+  }
+});
+
+configResetBtn?.addEventListener('click', async () => {
+  await resetToFactoryDefaults();
+  if (configTextarea) {
+    configTextarea.value = JSON.stringify(exportCurrentConfig(), null, 2);
+  }
+  setModalStatus('Cleared saved cache & restored factory defaults.');
 });
 
 seedInput.on('change', () => {
-  if (suppressSeedChange || !device || !matrixBuffer) return;
+  if (suppressPaneEvents || suppressSeedChange || !device || !matrixBuffer) return;
   applySeed(params.seed, false);
+  saveConfigNow();
 });
 
 newOceanSimBtn.on('click', () => {
   oceanColourAmt = Math.max(1, Math.min(200, Math.floor(oceanOptionParams.colours)));
   oceanParticleAmt = Math.max(1, Math.floor(oceanOptionParams.particles));
   startOceanParticles();
+  saveConfigNow();
 });
 
 randomizeOceanRulesBtn.on('click', () => {
@@ -1781,30 +2200,37 @@ randomizeOceanRulesBtn.on('click', () => {
     oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
     writeOceanRuleBuffers();
   }
+  saveConfigNow();
 });
 
 viewLayerSelect.on('change', (ev) => {
+  if (suppressPaneEvents) return;
   setViewLayerChoice(ev.value);
   syncBioUniformState();
 });
 
 bioLinkBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   syncBioUniformState();
 });
 
 bioRateBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   syncBioUniformState();
 });
 
 projectionSelect.on('change', (ev) => {
+  if (suppressPaneEvents) return;
   setProjectionChoice(ev.value);
 });
 
 windLevelSelect.on('change', (ev) => {
+  if (suppressPaneEvents) return;
   loadWindLevel(ev.value);
 });
 
 windLinesBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   syncStreamCanvasOpacity();
   if (earthParams.windLines <= 0.001 && windCtx) {
     windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
@@ -1812,6 +2238,7 @@ windLinesBinding.on('change', () => {
 });
 
 oceanLinesBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   syncStreamCanvasOpacity();
   if (earthParams.oceanLines <= 0.001 && oceanCtx) {
     oceanStreamRenderer.clear(oceanCtx, viewState.width, viewState.height);
@@ -1819,6 +2246,7 @@ oceanLinesBinding.on('change', () => {
 });
 
 tooltipsBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   tooltipManager.syncEnabledState();
 });
 
@@ -1831,12 +2259,15 @@ oceanColorsBinding.on('change', () => {
 });
 
 coastlinesBinding.on('change', () => {
+  if (suppressPaneEvents) return;
   mapDirty = true;
 });
 
 resetViewBtn.on('click', () => {
   earthParams.projection = 'orthographic';
+  suppressPaneEvents = true;
   projectionSelect.refresh();
+  suppressPaneEvents = false;
   viewState.projectionId = 'orthographic';
   viewState.rotate = [...PROJECTIONS.orthographic.defaultRotate];
   viewState.pan = [0, 0];
@@ -1853,6 +2284,7 @@ setInterval(() => {
 }, 1000);
 
 engineSelect.on('change', (event) => {
+  if (suppressPaneEvents) return;
   if (event.value in engines) {
     engine = event.value;
     setEngineDisplay(engine);
