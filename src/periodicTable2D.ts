@@ -123,6 +123,27 @@ function computeEarthSurfaceWeight(
   return 0.045 * periodScale * blockFactor * evenOdd * noblePenalty;
 }
 
+const SYMBOLS_P1_TO_P3: Record<number, string> = {
+  1: 'H',
+  2: 'He',
+  3: 'Li',
+  4: 'Be',
+  5: 'C',
+  6: 'O',
+  7: 'F',
+  8: 'Ne',
+  9: 'Na',
+  10: 'Mg',
+  11: 'Si',
+  12: 'S',
+  13: 'Cl',
+  14: 'Ar',
+};
+
+export function getElementSymbol(atomicNumber: number): string {
+  return SYMBOLS_P1_TO_P3[atomicNumber] ?? `Z${atomicNumber}`;
+}
+
 export function getElement2D(speciesIndex: number): Element2D {
   const z = (Math.max(0, Math.floor(speciesIndex)) % 62) + 1;
   let remaining = z;

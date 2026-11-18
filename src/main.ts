@@ -56,12 +56,14 @@ import {
   bindOptions,
   bioLinkBinding,
   bioRateBinding,
+  chemOpacityBinding,
   coastlinesBinding,
   colourAmt as colourAmtOptn,
   earthParams,
   engineSelect,
   globalPerformanceParams,
   initialOrientation,
+  lifeOpacityBinding,
   newOceanSimBtn,
   newSimBtn,
   oceanColorsBinding,
@@ -83,6 +85,7 @@ import {
   setEngineDisplay,
   setOceanSim,
   setSim,
+  tooltipsBinding,
   updatePeriodicLegend,
   viewLayerSelect,
   type ViewLayerMode,
@@ -91,6 +94,11 @@ import {
   windLinesBinding,
   windStatusBinding,
 } from './options';
+import {
+  TooltipManager,
+  type HoverSimSnapshot,
+  type TooltipContent,
+} from './tooltip';
 
 import * as linkedList from './linkedList/main';
 import * as countingSort from './countingSort/main';
@@ -455,8 +463,24 @@ declare global {
       setBioLink: (on: boolean) => void;
       getBioRate: () => number;
       setBioRate: (rate: number) => void;
-      setOceanColors: (on: boolean) => void;
-      setOceanLines: (on: boolean) => void;
+      getTooltips: () => boolean;
+      setTooltips: (on: boolean) => void;
+      getOpacities: () => {
+        windLines: number;
+        windColors: number;
+        chemOpacity: number;
+        oceanLines: number;
+        oceanColors: number;
+        lifeOpacity: number;
+      };
+      setChemOpacity: (val: number) => void;
+      setLifeOpacity: (val: number) => void;
+      setOceanColors: (val: boolean | number) => void;
+      setOceanLines: (val: boolean | number) => void;
+      setWindColors: (val: boolean | number) => void;
+      setWindLines: (val: boolean | number) => void;
+      refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
+      inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
       randomizeOceanMatrix: (seed?: string) => void;
       getOceanInfo: () => {
         nx: number;
@@ -487,6 +511,36 @@ declare global {
   }
 }
 
+function unpackParticlesF32(f32: Float32Array, n: number): number[][] {
+  const out: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = i * 12;
+    out[i] = [
+      f32[b + 0],
+      f32[b + 1],
+      f32[b + 2],
+      f32[b + 4],
+      f32[b + 5],
+      f32[b + 6],
+      f32[b + 3],
+      f32[b + 8],
+      f32[b + 9],
+      f32[b + 10],
+      f32[b + 7],
+    ];
+  }
+  return out;
+}
+
+function unpackVec4F32(f32: Float32Array, n: number): number[][] {
+  const out: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = i * 4;
+    out[i] = [f32[b], f32[b + 1], f32[b + 2], f32[b + 3]];
+  }
+  return out;
+}
+
 async function readParticleBuffer(
   buffers: [GPUBuffer, GPUBuffer] | undefined,
   altIdx: number,
@@ -504,24 +558,7 @@ async function readParticleBuffer(
   enc.copyBufferToBuffer(buffers[altIdx], 0, staging, 0, byteLength);
   device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
-  const f32 = new Float32Array(staging.getMappedRange());
-  const out: number[][] = [];
-  for (let i = 0; i < n; i++) {
-    const b = i * 12;
-    out.push([
-      f32[b + 0],
-      f32[b + 1],
-      f32[b + 2],
-      f32[b + 4],
-      f32[b + 5],
-      f32[b + 6],
-      f32[b + 3],
-      f32[b + 8],
-      f32[b + 9],
-      f32[b + 10],
-      f32[b + 7],
-    ]);
-  }
+  const out = unpackParticlesF32(new Float32Array(staging.getMappedRange()), n);
   staging.unmap();
   staging.destroy();
   return out;
@@ -543,19 +580,82 @@ async function readVec4Buffer(
   enc.copyBufferToBuffer(buf, 0, staging, 0, byteLength);
   device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
-  const f32 = new Float32Array(staging.getMappedRange());
-  const out: number[][] = [];
-  for (let i = 0; i < n; i++) {
-    out.push([
-      f32[i * 4],
-      f32[i * 4 + 1],
-      f32[i * 4 + 2],
-      f32[i * 4 + 3],
-    ]);
-  }
+  const out = unpackVec4F32(new Float32Array(staging.getMappedRange()), n);
   staging.unmap();
   staging.destroy();
   return out;
+}
+
+async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
+  if (!device) return null;
+  const runAir = earthParams.viewLayer !== 'ocean' && particleBuffers && valenceBuffer;
+  const runOcean = earthParams.viewLayer !== 'air' && oceanParticleBuffers && oceanValenceBuffer;
+  if (!runAir && !runOcean) return null;
+
+  const enc = device.createCommandEncoder();
+  const stg: Record<string, { buf: GPUBuffer; count: number; isVec4: boolean }> = {};
+  const queueRead = (name: string, src: GPUBuffer, byteLength: number, count: number, isVec4: boolean) => {
+    const buf = device!.createBuffer({
+      size: byteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    enc.copyBufferToBuffer(src, 0, buf, 0, byteLength);
+    stg[name] = { buf, count, isVec4 };
+  };
+
+  if (runAir) {
+    queueRead('air', particleBuffers![alternate], particleAmt * particleStride, particleAmt, false);
+    queueRead('valence', valenceBuffer!, particleAmt * valenceStride, particleAmt, true);
+    if (airBioReactBuffer) {
+      queueRead('bioReact', airBioReactBuffer, particleAmt * valenceStride, particleAmt, true);
+    }
+  }
+  if (runOcean) {
+    queueRead(
+      'ocean',
+      oceanParticleBuffers![oceanAlternate],
+      oceanParticleAmt * particleStride,
+      oceanParticleAmt,
+      false,
+    );
+    queueRead(
+      'oceanState',
+      oceanValenceBuffer!,
+      oceanParticleAmt * valenceStride,
+      oceanParticleAmt,
+      true,
+    );
+  }
+
+  device.queue.submit([enc.finish()]);
+  const keys = Object.keys(stg);
+  try {
+    await Promise.all(keys.map((k) => stg[k].buf.mapAsync(GPUMapMode.READ)));
+    const readArr = (k: string): number[][] => {
+      const entry = stg[k];
+      if (!entry) return [];
+      const f32 = new Float32Array(entry.buf.getMappedRange());
+      return entry.isVec4 ? unpackVec4F32(f32, entry.count) : unpackParticlesF32(f32, entry.count);
+    };
+    return {
+      elements,
+      air: readArr('air'),
+      valence: readArr('valence'),
+      bioReact: readArr('bioReact'),
+      ocean: readArr('ocean'),
+      oceanState: readArr('oceanState'),
+      capturedAt: performance.now(),
+    };
+  } finally {
+    for (const k of keys) {
+      try {
+        stg[k].buf.unmap();
+      } catch {
+        // Already unmapped
+      }
+      stg[k].buf.destroy();
+    }
+  }
 }
 
 function writeNeutralOceanState() {
@@ -665,6 +765,29 @@ function setProjectionChoice(projId: ProjectionId) {
   updateProjectionState();
 }
 
+const clampOpacity = (val: boolean | number) =>
+  typeof val === 'number' ? Math.max(0, Math.min(1, val)) : val ? 0.2 : 0;
+
+function syncStreamCanvasOpacity() {
+  oceanCanvas.style.opacity = String(earthParams.oceanLines);
+  windCanvas.style.opacity = String(earthParams.windLines);
+}
+syncStreamCanvasOpacity();
+
+const tooltipManager = new TooltipManager({
+  isEnabled: () => earthParams.tooltips,
+  getProj: () => d3Proj,
+  getViewLayer: () => earthParams.viewLayer,
+  isBioLinked: () => earthParams.bioLink && earthParams.bioRate > 0,
+  getAirRMax: () => 1 / Math.max(optionParams.r, 0.5),
+  getOceanRMax: () => 1 / Math.max(oceanOptionParams.r, 0.5),
+  getWorldSize: () => Math.max(optionParams.worldSize, 0.25),
+  getBeta: () => optionParams.beta,
+  getTemperature: () => optionParams.temperature,
+  getScale: () => viewState.scale,
+  requestSnapshot: captureHoverSnapshot,
+});
+
 window.complexLife = {
   getElements: () => elements,
   randomizeMatrix: (seed?: string) => {
@@ -698,17 +821,61 @@ window.complexLife = {
     bioRateBinding.refresh();
     syncBioUniformState();
   },
-  setOceanColors: (on: boolean) => {
-    earthParams.oceanColors = on;
+  getTooltips: () => earthParams.tooltips,
+  setTooltips: (on: boolean) => {
+    earthParams.tooltips = on;
+    tooltipsBinding.refresh();
+    tooltipManager.syncEnabledState();
+  },
+  getOpacities: () => ({
+    windLines: earthParams.windLines,
+    windColors: earthParams.windColors,
+    chemOpacity: earthParams.chemOpacity,
+    oceanLines: earthParams.oceanLines,
+    oceanColors: earthParams.oceanColors,
+    lifeOpacity: earthParams.lifeOpacity,
+  }),
+  setChemOpacity: (val: number) => {
+    earthParams.chemOpacity = clampOpacity(val);
+    chemOpacityBinding.refresh();
+  },
+  setLifeOpacity: (val: number) => {
+    earthParams.lifeOpacity = clampOpacity(val);
+    lifeOpacityBinding.refresh();
+  },
+  setOceanColors: (val: boolean | number) => {
+    earthParams.oceanColors = clampOpacity(val);
     oceanColorsBinding.refresh();
   },
-  setOceanLines: (on: boolean) => {
-    earthParams.oceanLines = on;
+  setOceanLines: (val: boolean | number) => {
+    earthParams.oceanLines = clampOpacity(val);
     oceanLinesBinding.refresh();
-    if (!on && oceanCtx) {
+    syncStreamCanvasOpacity();
+    if (earthParams.oceanLines <= 0.001 && oceanCtx) {
       oceanStreamRenderer.clear(oceanCtx, viewState.width, viewState.height);
     }
   },
+  setWindColors: (val: boolean | number) => {
+    earthParams.windColors = clampOpacity(val);
+    windColorsBinding.refresh();
+  },
+  setWindLines: (val: boolean | number) => {
+    earthParams.windLines = clampOpacity(val);
+    windLinesBinding.refresh();
+    syncStreamCanvasOpacity();
+    if (earthParams.windLines <= 0.001 && windCtx) {
+      windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
+    }
+  },
+  refreshTooltipSnapshot: async () => {
+    const snap = await captureHoverSnapshot();
+    if (snap) {
+      tooltipManager.setSnapshot(snap);
+    }
+    return snap;
+  },
+  inspectReactionAt: (clientX: number, clientY: number) =>
+    tooltipManager.inspectAt(clientX, clientY),
   randomizeOceanMatrix: (seed?: string) => {
     oceanSeed = seed ?? generateRandomSeed();
     oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
@@ -1093,6 +1260,7 @@ function render(commandEncoder: GPUCommandEncoder) {
 
   if (
     earthParams.viewLayer !== 'air' &&
+    earthParams.lifeOpacity > 0.001 &&
     oceanRenderBindGroup &&
     oceanParticleBuffers &&
     oceanValenceBuffer
@@ -1105,6 +1273,7 @@ function render(commandEncoder: GPUCommandEncoder) {
 
   if (
     earthParams.viewLayer !== 'ocean' &&
+    earthParams.chemOpacity > 0.001 &&
     renderBindGroup &&
     particleBuffers &&
     valenceBuffer
@@ -1428,17 +1597,17 @@ function writeUniforms() {
   uniformData[11] = PROJECTIONS[viewState.projectionId].shaderType;
 
   uniformData[12] = optionParams.showOrbitals ? 1 : 0;
-  uniformData[13] = showAir && earthParams.windColors ? 1 : 0;
+  uniformData[13] = showAir ? earthParams.windColors : 0;
   uniformData[14] = spec.scaleMax;
   uniformData[15] = spec.streamMax;
 
   const rotCols = buildD3RotationMatrixColMajor(viewState.rotate);
   uniformData.set(rotCols, 16);
 
-  uniformData[28] = showOcean && earthParams.oceanColors ? 1 : 0;
+  uniformData[28] = showOcean ? earthParams.oceanColors : 0;
   uniformData[29] = OCEAN_CURRENTS_SPEC.scaleMax;
   uniformData[30] = earthParams.oceanStrength;
-  uniformData[31] = 0;
+  uniformData[31] = earthParams.chemOpacity;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
@@ -1447,6 +1616,7 @@ function writeUniforms() {
   const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
   oceanUniformData[3] = (oceanRMax / R) * Math.max(oceanOptionParams.beta, 0.25) * 0.42;
   oceanUniformData[12] = 0;
+  oceanUniformData[31] = earthParams.lifeOpacity;
   device.queue.writeBuffer(oceanUniformBuffer, 0, oceanUniformData);
 }
 
@@ -1499,9 +1669,11 @@ function update() {
   const showAir = earthParams.viewLayer !== 'ocean';
   const showOcean = earthParams.viewLayer !== 'air';
 
+  syncStreamCanvasOpacity();
+
   if (oceanCtx && currentOceanGrid) {
     const oceanTint: [number, number, number] =
-      showAir && earthParams.windLines ? [115, 235, 255] : [235, 250, 255];
+      showAir && earthParams.windLines > 0.01 ? [115, 235, 255] : [235, 250, 255];
     oceanStreamRenderer.stepAndDraw(
       oceanCtx,
       viewState.width,
@@ -1509,7 +1681,7 @@ function update() {
       d3Proj,
       oceanGridToSampler(currentOceanGrid, oceanTint),
       viewSignature,
-      showOcean && earthParams.oceanLines,
+      showOcean && earthParams.oceanLines > 0.001,
     );
   }
 
@@ -1521,9 +1693,11 @@ function update() {
       d3Proj,
       currentWindGrid,
       viewSignature,
-      showAir && earthParams.windLines,
+      showAir && earthParams.windLines > 0.001,
     );
   }
+
+  tooltipManager.tick();
 
   frameCount = (frameCount + 1) % 1000000;
   if (simBuffer && optionParams.temperature > 0) {
@@ -1631,15 +1805,21 @@ windLevelSelect.on('change', (ev) => {
 });
 
 windLinesBinding.on('change', () => {
-  if (!earthParams.windLines && windCtx) {
+  syncStreamCanvasOpacity();
+  if (earthParams.windLines <= 0.001 && windCtx) {
     windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
   }
 });
 
 oceanLinesBinding.on('change', () => {
-  if (!earthParams.oceanLines && oceanCtx) {
+  syncStreamCanvasOpacity();
+  if (earthParams.oceanLines <= 0.001 && oceanCtx) {
     oceanStreamRenderer.clear(oceanCtx, viewState.width, viewState.height);
   }
+});
+
+tooltipsBinding.on('change', () => {
+  tooltipManager.syncEnabledState();
 });
 
 windColorsBinding.on('change', () => {

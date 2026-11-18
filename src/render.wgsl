@@ -98,7 +98,8 @@ fn fragment(
     let cIdx = u32(colour);
     let baseCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
     let d = length(uv);
-    if (d > 1.0) {
+    let layerOpacity = clamp(uniforms.earthFlags.w, 0.0, 1.0);
+    if (d > 1.0 || layerOpacity <= 0.001) {
         discard;
     }
 
@@ -118,7 +119,8 @@ fn fragment(
             let glowRim = smoothstep(0.70, 0.95, d) * clamp((vit - 0.25) * 0.6, 0.0, 0.45);
             lifeCol = mix(lifeCol, vec3f(0.32, 0.98, 0.78), glowRim);
         }
-        return vec4f(lifeCol * alpha, alpha);
+        let lifeA = alpha * layerOpacity;
+        return vec4f(lifeCol * lifeA, lifeA);
     }
 
     let delta = max(fwidth(d), 0.025);
@@ -184,5 +186,5 @@ fn fragment(
     if (finalAlpha <= 0.001) {
         discard;
     }
-    return vec4f(premulCol, finalAlpha);
+    return vec4f(premulCol * layerOpacity, finalAlpha * layerOpacity);
 }

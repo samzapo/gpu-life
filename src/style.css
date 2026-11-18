@@ -193,6 +193,107 @@ canvas {
   color: #c7d2e0;
 }
 
+#hoverTooltip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  max-width: min(300px, calc(100vw - 20px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(13, 19, 30, 0.92);
+  border: 1px solid rgba(110, 155, 210, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  color: #e6eef8;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.38;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.1s ease, transform 0.1s ease;
+  visibility: hidden;
+}
+
+#hoverTooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+#hoverTooltip[data-theme='anabolic'] {
+  border-color: rgba(52, 232, 185, 0.58);
+}
+
+#hoverTooltip[data-theme='catabolic'] {
+  border-color: rgba(255, 146, 72, 0.60);
+}
+
+#hoverTooltip[data-theme='toxic'] {
+  border-color: rgba(226, 86, 250, 0.62);
+}
+
+#hoverTooltip[data-theme='cofactor'] {
+  border-color: rgba(88, 224, 255, 0.58);
+}
+
+#hoverTooltip[data-theme='chem'] {
+  border-color: rgba(145, 195, 255, 0.48);
+}
+
+#hoverTooltip .tip-head {
+  margin-bottom: 3px;
+}
+
+#hoverTooltip .tip-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(120, 165, 220, 0.18);
+  color: #9ecbff;
+}
+
+#hoverTooltip .tip-badge-anabolic {
+  background: rgba(45, 220, 175, 0.18);
+  color: #5ef2ca;
+}
+
+#hoverTooltip .tip-badge-catabolic {
+  background: rgba(255, 140, 68, 0.18);
+  color: #ffb178;
+}
+
+#hoverTooltip .tip-badge-toxic {
+  background: rgba(220, 82, 245, 0.20);
+  color: #f09bff;
+}
+
+#hoverTooltip .tip-badge-cofactor {
+  background: rgba(75, 215, 255, 0.18);
+  color: #7ee8ff;
+}
+
+#hoverTooltip .tip-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #f4f8ff;
+  margin-bottom: 3px;
+}
+
+#hoverTooltip .tip-body {
+  color: #cdd9e8;
+}
+
+#hoverTooltip .tip-meta {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  font-size: 10px;
+  color: #8ea7c4;
+}
+
 .tp-dfwv {
   z-index: 20 !important;
   max-height: calc(100vh - 16px);

@@ -52,25 +52,25 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
         }
     }
 
-    let showOceanCol = uniforms.earthFlags.x > 0.5;
-    if (showOceanCol) {
+    let oceanColOpacity = clamp(uniforms.earthFlags.x, 0.0, 1.0);
+    if (oceanColOpacity > 0.001) {
         let oc = sampleOceanTexture(oceanTex, inv.xyz);
         if (oc.w >= 0.42) {
             let ocCol = oceanCurrentsColor(oc.z);
-            let ocAlpha = smoothstep(0.42, 0.72, oc.w) * 0.86;
+            let ocAlpha = smoothstep(0.42, 0.72, oc.w) * oceanColOpacity;
             baseCol = mix(baseCol, ocCol, ocAlpha);
         } else {
             // Subtle dark land relief so continents stand out cleanly against ocean basins
-            baseCol *= 0.82;
+            baseCol *= mix(1.0, 0.82, clamp(0.35 + 0.65 * oceanColOpacity, 0.0, 1.0));
         }
     }
 
-    if (uniforms.flags.y > 0.5) {
+    let windColOpacity = clamp(uniforms.flags.y, 0.0, 1.0);
+    if (windColOpacity > 0.001) {
         let w = sampleWindTexture(windTex, inv.xyz);
         let t = clamp(w.z / max(uniforms.flags.z, 1.0), 0.0, 1.0);
         let speedCol = extendedSinebowColor(t);
-        let windAlpha = select(0.44, 0.34, showOceanCol);
-        baseCol = mix(baseCol, speedCol, windAlpha);
+        baseCol = mix(baseCol, speedCol, windColOpacity);
     }
 
     return vec4f(baseCol, 1.0);
