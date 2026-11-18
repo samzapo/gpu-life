@@ -8,11 +8,28 @@ import {
 import structsShader from '../shaders/structs.wgsl?raw';
 import projectionShader from '../shaders/projection.wgsl?raw';
 import valenceSimShader from '../shaders/valenceSim.wgsl?raw';
+import oceanSimHelperShader from '../shaders/oceanSim.wgsl?raw';
 import cellShader from './cell.wgsl?raw';
 import prefixShader from './prefix.wgsl?raw';
 import sortShader from './sort.wgsl?raw';
 import valenceShader from './valence.wgsl?raw';
 import simShader from './sim.wgsl?raw';
+import oceanSimShader from './oceanSim.wgsl?raw';
+
+export type SimSlot = 'air' | 'ocean';
+
+interface CountingSlotState {
+  cellBuffer: GPUBuffer;
+  countBuffer: GPUBuffer;
+  zeroBuffer: GPUBuffer;
+  sortedBuffer: GPUBuffer;
+  indicesBuffer: GPUBuffer;
+  cellBindGroups: [GPUBindGroup, GPUBindGroup];
+  prefixBindGroup: GPUBindGroup;
+  sortBindGroup: GPUBindGroup;
+  valenceBindGroups?: [GPUBindGroup, GPUBindGroup];
+  simBindGroups: [GPUBindGroup, GPUBindGroup];
+}
 
 const workgroupSize = 128;
 
@@ -21,86 +38,77 @@ let prefixPipeline: GPUComputePipeline | undefined;
 let sortPipeline: GPUComputePipeline | undefined;
 let valencePipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
+let oceanSimPipeline: GPUComputePipeline | undefined;
 
-let cellBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
-let prefixBindGroup: GPUBindGroup | undefined;
-let sortBindGroup: GPUBindGroup | undefined;
-let valenceBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
-let simBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
+const slots: Partial<Record<SimSlot, CountingSlotState>> = {};
 
-let cellBuffer: GPUBuffer | undefined;
-let countBuffer: GPUBuffer | undefined;
-let zeroBuffer: GPUBuffer | undefined;
-let sortedBuffer: GPUBuffer | undefined;
-let indicesBuffer: GPUBuffer | undefined;
+function destroySlot(slot: SimSlot) {
+  const s = slots[slot];
+  if (!s) return;
+  s.cellBuffer.destroy();
+  s.sortedBuffer.destroy();
+  s.countBuffer.destroy();
+  s.indicesBuffer.destroy();
+  s.zeroBuffer.destroy();
+  delete slots[slot];
+}
 
 export function setup(device: GPUDevice) {
-  const cellModule = device.createShaderModule({
-    code: `${structsShader}\n${cellShader}`,
-  });
-
   setupTimestamp(device, 'cell');
-
   cellPipeline = device.createComputePipeline({
     layout: 'auto',
     compute: {
-      module: cellModule,
+      module: device.createShaderModule({ code: `${structsShader}\n${cellShader}` }),
       entryPoint: 'main',
     },
-  });
-
-  const prefixModule = device.createShaderModule({
-    code: prefixShader,
   });
 
   setupTimestamp(device, 'prefix');
-
   prefixPipeline = device.createComputePipeline({
     layout: 'auto',
     compute: {
-      module: prefixModule,
+      module: device.createShaderModule({ code: prefixShader }),
       entryPoint: 'main',
     },
-  });
-
-  const sortModule = device.createShaderModule({
-    code: `${structsShader}\n${sortShader}`,
   });
 
   setupTimestamp(device, 'sort');
-
   sortPipeline = device.createComputePipeline({
     layout: 'auto',
     compute: {
-      module: sortModule,
+      module: device.createShaderModule({ code: `${structsShader}\n${sortShader}` }),
       entryPoint: 'main',
     },
-  });
-
-  const valenceModule = device.createShaderModule({
-    code: `${structsShader}\n${valenceSimShader}\n${valenceShader}`,
   });
 
   setupTimestamp(device, 'csValence');
-
   valencePipeline = device.createComputePipeline({
     layout: 'auto',
     compute: {
-      module: valenceModule,
+      module: device.createShaderModule({
+        code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${valenceShader}`,
+      }),
       entryPoint: 'main',
     },
   });
 
-  const simModule = device.createShaderModule({
-    code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${simShader}`,
-  });
-
   setupTimestamp(device, 'countSim');
-
   simPipeline = device.createComputePipeline({
     layout: 'auto',
     compute: {
-      module: simModule,
+      module: device.createShaderModule({
+        code: `${structsShader}\n${projectionShader}\n${valenceSimShader}\n${simShader}`,
+      }),
+      entryPoint: 'main',
+    },
+  });
+
+  oceanSimPipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: device.createShaderModule({
+        code: `${structsShader}\n${projectionShader}\n${oceanSimHelperShader}\n${oceanSimShader}`,
+      }),
       entryPoint: 'main',
     },
   });
@@ -115,51 +123,46 @@ export function start(
   particleBuffers: [GPUBuffer, GPUBuffer],
   particleAmt: number,
   cellAmt: number,
-  windTexView: GPUTextureView,
+  fieldTexView: GPUTextureView,
+  slot: SimSlot = 'air',
 ) {
   if (
     !cellPipeline ||
     !prefixPipeline ||
     !sortPipeline ||
     !valencePipeline ||
-    !simPipeline
-  )
+    !simPipeline ||
+    !oceanSimPipeline
+  ) {
     return;
+  }
 
-  cellBuffer?.destroy();
-  sortedBuffer?.destroy();
-  countBuffer?.destroy();
-  indicesBuffer?.destroy();
-  zeroBuffer?.destroy();
+  destroySlot(slot);
 
-  cellBuffer = device.createBuffer({
+  const cellBuffer = device.createBuffer({
     size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    label: 'cellBuffer',
+    label: `${slot}CellBuffer`,
   });
-  sortedBuffer = device.createBuffer({
+  const sortedBuffer = device.createBuffer({
     size: particleAmt * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    label: 'sortedBuffer',
+    label: `${slot}SortedBuffer`,
   });
-  countBuffer = device.createBuffer({
+  const countBuffer = device.createBuffer({
     size: cellAmt * Uint32Array.BYTES_PER_ELEMENT,
-    usage:
-      GPUBufferUsage.STORAGE |
-      GPUBufferUsage.COPY_SRC |
-      GPUBufferUsage.COPY_DST,
-    label: 'countBuffer',
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    label: `${slot}CountBuffer`,
   });
-  indicesBuffer = device.createBuffer({
+  const indicesBuffer = device.createBuffer({
     size: cellAmt * 2 * Uint32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    label: 'indicesBuffer',
+    label: `${slot}IndicesBuffer`,
   });
-
-  zeroBuffer = device.createBuffer({
+  const zeroBuffer = device.createBuffer({
     size: cellAmt * Uint32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    label: 'zeroBuffer',
+    label: `${slot}ZeroBuffer`,
   });
 
   device.queue.writeBuffer(zeroBuffer, 0, new Uint32Array(cellAmt));
@@ -178,9 +181,8 @@ export function start(
       }),
     );
   }
-  cellBindGroups = [cellGroups[0], cellGroups[1]];
 
-  prefixBindGroup = device.createBindGroup({
+  const prefixBindGroup = device.createBindGroup({
     layout: prefixPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: countBuffer } },
@@ -188,7 +190,7 @@ export function start(
     ],
   });
 
-  sortBindGroup = device.createBindGroup({
+  const sortBindGroup = device.createBindGroup({
     layout: sortPipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: cellBuffer } },
@@ -197,41 +199,75 @@ export function start(
     ],
   });
 
-  const valenceGroups = [];
-  const simGroups = [];
-  for (let i = 0; i < 2; i++) {
-    valenceGroups.push(
-      device.createBindGroup({
-        layout: valencePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 1, resource: { buffer: simBuffer } },
-          { binding: 2, resource: { buffer: matrixBuffer } },
-          { binding: 3, resource: { buffer: particleBuffers[i] } },
-          { binding: 4, resource: { buffer: valenceBuffer } },
-          { binding: 5, resource: { buffer: sortedBuffer } },
-          { binding: 6, resource: { buffer: indicesBuffer } },
-        ],
-      }),
-    );
-    simGroups.push(
-      device.createBindGroup({
-        layout: simPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: uniformBuffer } },
-          { binding: 1, resource: { buffer: simBuffer } },
-          { binding: 2, resource: { buffer: matrixBuffer } },
-          { binding: 3, resource: { buffer: particleBuffers[i] } },
-          { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
-          { binding: 5, resource: { buffer: sortedBuffer } },
-          { binding: 6, resource: { buffer: indicesBuffer } },
-          { binding: 7, resource: { buffer: valenceBuffer } },
-          { binding: 8, resource: windTexView },
-        ],
-      }),
-    );
+  let valenceBindGroups: [GPUBindGroup, GPUBindGroup] | undefined;
+  const simGroups: GPUBindGroup[] = [];
+
+  if (slot === 'air') {
+    const vGroups: GPUBindGroup[] = [];
+    for (let i = 0; i < 2; i++) {
+      vGroups.push(
+        device.createBindGroup({
+          layout: valencePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 1, resource: { buffer: simBuffer } },
+            { binding: 2, resource: { buffer: matrixBuffer } },
+            { binding: 3, resource: { buffer: particleBuffers[i] } },
+            { binding: 4, resource: { buffer: valenceBuffer } },
+            { binding: 5, resource: { buffer: sortedBuffer } },
+            { binding: 6, resource: { buffer: indicesBuffer } },
+          ],
+        }),
+      );
+      simGroups.push(
+        device.createBindGroup({
+          layout: simPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniformBuffer } },
+            { binding: 1, resource: { buffer: simBuffer } },
+            { binding: 2, resource: { buffer: matrixBuffer } },
+            { binding: 3, resource: { buffer: particleBuffers[i] } },
+            { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
+            { binding: 5, resource: { buffer: sortedBuffer } },
+            { binding: 6, resource: { buffer: indicesBuffer } },
+            { binding: 7, resource: { buffer: valenceBuffer } },
+            { binding: 8, resource: fieldTexView },
+          ],
+        }),
+      );
+    }
+    valenceBindGroups = [vGroups[0], vGroups[1]];
+  } else {
+    for (let i = 0; i < 2; i++) {
+      simGroups.push(
+        device.createBindGroup({
+          layout: oceanSimPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniformBuffer } },
+            { binding: 1, resource: { buffer: simBuffer } },
+            { binding: 2, resource: { buffer: matrixBuffer } },
+            { binding: 3, resource: { buffer: particleBuffers[i] } },
+            { binding: 4, resource: { buffer: particleBuffers[1 - i] } },
+            { binding: 5, resource: { buffer: sortedBuffer } },
+            { binding: 6, resource: { buffer: indicesBuffer } },
+            { binding: 7, resource: fieldTexView },
+          ],
+        }),
+      );
+    }
   }
-  valenceBindGroups = [valenceGroups[0], valenceGroups[1]];
-  simBindGroups = [simGroups[0], simGroups[1]];
+
+  slots[slot] = {
+    cellBuffer,
+    countBuffer,
+    zeroBuffer,
+    sortedBuffer,
+    indicesBuffer,
+    cellBindGroups: [cellGroups[0], cellGroups[1]],
+    prefixBindGroup,
+    sortBindGroup,
+    valenceBindGroups,
+    simBindGroups: [simGroups[0], simGroups[1]],
+  };
 }
 
 export function tick(
@@ -239,69 +275,79 @@ export function tick(
   commandEncoder: GPUCommandEncoder,
   alternate: number,
   particleAmt: number,
+  slot: SimSlot = 'air',
+  profile: boolean = slot === 'air',
 ) {
+  const s = slots[slot];
   if (
+    !s ||
     !cellPipeline ||
-    !cellBindGroups ||
-    !zeroBuffer ||
-    !countBuffer ||
     !prefixPipeline ||
-    !prefixBindGroup ||
     !sortPipeline ||
-    !sortBindGroup ||
     !valencePipeline ||
-    !valenceBindGroups ||
     !simPipeline ||
-    !simBindGroups
-  )
+    !oceanSimPipeline
+  ) {
     return;
+  }
 
-  commandEncoder.copyBufferToBuffer(zeroBuffer, countBuffer);
+  commandEncoder.copyBufferToBuffer(s.zeroBuffer, s.countBuffer);
 
-  const cellPassEncoder = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'cell'),
+  const cellPass = commandEncoder.beginComputePass(
+    profile ? linkComputeTimestamp(device, 'cell') : {},
   );
-  cellPassEncoder.setPipeline(cellPipeline);
-  cellPassEncoder.setBindGroup(0, cellBindGroups[alternate]);
-  cellPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
-  cellPassEncoder.end();
-  resolveTimestamp(commandEncoder, 'cell');
+  cellPass.setPipeline(cellPipeline);
+  cellPass.setBindGroup(0, s.cellBindGroups[alternate]);
+  cellPass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+  cellPass.end();
+  if (profile) resolveTimestamp(commandEncoder, 'cell');
 
-  const prefixPassEncoder = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'prefix'),
+  const prefixPass = commandEncoder.beginComputePass(
+    profile ? linkComputeTimestamp(device, 'prefix') : {},
   );
-  prefixPassEncoder.setPipeline(prefixPipeline);
-  prefixPassEncoder.setBindGroup(0, prefixBindGroup);
-  prefixPassEncoder.dispatchWorkgroups(1);
-  prefixPassEncoder.end();
-  resolveTimestamp(commandEncoder, 'prefix');
+  prefixPass.setPipeline(prefixPipeline);
+  prefixPass.setBindGroup(0, s.prefixBindGroup);
+  prefixPass.dispatchWorkgroups(1);
+  prefixPass.end();
+  if (profile) resolveTimestamp(commandEncoder, 'prefix');
 
-  const sortPassEncoder = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'sort'),
+  const sortPass = commandEncoder.beginComputePass(
+    profile ? linkComputeTimestamp(device, 'sort') : {},
   );
-  sortPassEncoder.setPipeline(sortPipeline);
-  sortPassEncoder.setBindGroup(0, sortBindGroup);
-  sortPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
-  sortPassEncoder.end();
-  resolveTimestamp(commandEncoder, 'sort');
+  sortPass.setPipeline(sortPipeline);
+  sortPass.setBindGroup(0, s.sortBindGroup);
+  sortPass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+  sortPass.end();
+  if (profile) resolveTimestamp(commandEncoder, 'sort');
 
-  const valencePassEncoder = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'csValence'),
-  );
-  valencePassEncoder.setPipeline(valencePipeline);
-  valencePassEncoder.setBindGroup(0, valenceBindGroups[alternate]);
-  valencePassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
-  valencePassEncoder.end();
-  resolveTimestamp(commandEncoder, 'csValence');
+  if (slot === 'air' && s.valenceBindGroups) {
+    const valencePass = commandEncoder.beginComputePass(
+      profile ? linkComputeTimestamp(device, 'csValence') : {},
+    );
+    valencePass.setPipeline(valencePipeline);
+    valencePass.setBindGroup(0, s.valenceBindGroups[alternate]);
+    valencePass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+    valencePass.end();
+    if (profile) resolveTimestamp(commandEncoder, 'csValence');
 
-  const simPassEncoder = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'countSim'),
-  );
-  simPassEncoder.setPipeline(simPipeline);
-  simPassEncoder.setBindGroup(0, simBindGroups[alternate]);
-  simPassEncoder.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
-  simPassEncoder.end();
-  resolveTimestamp(commandEncoder, 'countSim');
+    const simPass = commandEncoder.beginComputePass(
+      profile ? linkComputeTimestamp(device, 'countSim') : {},
+    );
+    simPass.setPipeline(simPipeline);
+    simPass.setBindGroup(0, s.simBindGroups[alternate]);
+    simPass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+    simPass.end();
+    if (profile) resolveTimestamp(commandEncoder, 'countSim');
+  } else {
+    const oceanPass = commandEncoder.beginComputePass(
+      profile ? linkComputeTimestamp(device, 'countSim') : {},
+    );
+    oceanPass.setPipeline(oceanSimPipeline);
+    oceanPass.setBindGroup(0, s.simBindGroups[alternate]);
+    oceanPass.dispatchWorkgroups(Math.ceil(particleAmt / workgroupSize));
+    oceanPass.end();
+    if (profile) resolveTimestamp(commandEncoder, 'countSim');
+  }
 }
 
 export function updateDisplays(params: Record<string, number>) {

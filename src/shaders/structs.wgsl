@@ -13,6 +13,7 @@ struct Uniforms {
     rotCol0: vec4f,
     rotCol1: vec4f,
     rotCol2: vec4f,
+    earthFlags: vec4f,
 }
 
 struct Sim {
@@ -36,6 +37,23 @@ struct Sim {
     orbitalSharpness: f32,
     frame: f32,
     windStrength: f32,
+}
+
+// Original-fork (51bc381) Particle Life uniforms for the Ocean Currents layer.
+// Offsets 0..9 intentionally align with Sim so cell/construct spatial passes reuse identically.
+struct OceanSim {
+    colours: f32,
+    beta: f32,
+    rMax: f32,
+    force: f32,
+    friction: f32,
+    dt: f32,
+    cellSize: f32,
+    cellAmt: f32,
+    avoidance: f32,
+    worldSize: f32,
+    currentStrength: f32,
+    vortex: f32,
 }
 
 struct SpeciesInfo {

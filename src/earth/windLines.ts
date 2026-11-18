@@ -1,5 +1,44 @@
 import * as d3Geo from 'd3-geo';
 import { sampleWindLonLat, WIND_LEVELS, type WindGrid } from './windData';
+import { OCEAN_CURRENTS_SPEC, sampleOceanLonLat, type OceanGrid } from './oceanData';
+
+export interface StreamFieldSampler {
+  streamMax: number;
+  masked: boolean;
+  fadeAlpha: number;
+  tintRgb: [number, number, number];
+  lineWidth: number;
+  sample: (lonDeg: number, latDeg: number) => [number, number, number, number];
+}
+
+export function windGridToSampler(grid: WindGrid): StreamFieldSampler {
+  const spec = WIND_LEVELS[grid.level];
+  return {
+    streamMax: Math.max(spec.streamMax, 5),
+    masked: false,
+    fadeAlpha: 0.94,
+    tintRgb: [255, 255, 255],
+    lineWidth: 1.05,
+    sample: (lon, lat) => {
+      const [u, v, mag] = sampleWindLonLat(grid, lon, lat);
+      return [u, v, mag, 1];
+    },
+  };
+}
+
+export function oceanGridToSampler(
+  grid: OceanGrid,
+  rgbTint: [number, number, number] = [215, 248, 255],
+): StreamFieldSampler {
+  return {
+    streamMax: OCEAN_CURRENTS_SPEC.streamMax,
+    masked: true,
+    fadeAlpha: 0.95,
+    tintRgb: rgbTint,
+    lineWidth: 1.15,
+    sample: (lon, lat) => sampleOceanLonLat(grid, lon, lat),
+  };
+}
 
 interface StreamParticle {
   lon: number;
@@ -10,38 +49,50 @@ interface StreamParticle {
 const MAX_AGE = 85;
 const INTENSITY_BUCKETS = 12;
 
-function buildIntensityStyles(): string[] {
+function buildIntensityStyles(rgb: [number, number, number]): string[] {
   const out: string[] = [];
   for (let i = 0; i < INTENSITY_BUCKETS; i++) {
-    const lum = Math.round(105 + (150 * i) / (INTENSITY_BUCKETS - 1));
-    out.push(`rgba(${lum}, ${lum}, ${lum}, 0.88)`);
+    const scale = (105 + (150 * i) / (INTENSITY_BUCKETS - 1)) / 255;
+    const r = Math.round(rgb[0] * scale);
+    const g = Math.round(rgb[1] * scale);
+    const b = Math.round(rgb[2] * scale);
+    out.push(`rgba(${r}, ${g}, ${b}, 0.88)`);
   }
   return out;
 }
-
-const COLOR_STYLES = buildIntensityStyles();
 
 export class WindStreamRenderer {
   private particles: StreamParticle[] = [];
   private viewKey = '';
   private frameCounter = 0;
+  private cachedTintKey = '';
+  private cachedStyles: string[] = [];
+
+  private getStyles(tint: [number, number, number]): string[] {
+    const key = `${tint[0]},${tint[1]},${tint[2]}`;
+    if (key !== this.cachedTintKey) {
+      this.cachedTintKey = key;
+      this.cachedStyles = buildIntensityStyles(tint);
+    }
+    return this.cachedStyles;
+  }
 
   clear(ctx: CanvasRenderingContext2D, width: number, height: number): void {
     ctx.clearRect(0, 0, width, height);
     this.particles.length = 0;
   }
 
-  private ensureCount(width: number): void {
-    const target = Math.max(1200, Math.min(3400, Math.round(width * 2.2)));
-    while (this.particles.length < target) {
+  private ensureCount(width: number, masked: boolean): void {
+    const base = Math.max(1200, Math.min(3400, Math.round(width * (masked ? 2.5 : 2.2))));
+    while (this.particles.length < base) {
       this.particles.push({
         lon: (Math.random() - 0.5) * 360,
         lat: Math.asin(Math.random() * 2 - 1) * (180 / Math.PI),
         age: Math.floor(Math.random() * MAX_AGE),
       });
     }
-    if (this.particles.length > target) {
-      this.particles.length = target;
+    if (this.particles.length > base) {
+      this.particles.length = base;
     }
   }
 
@@ -50,10 +101,12 @@ export class WindStreamRenderer {
     proj: d3Geo.GeoProjection,
     width: number,
     height: number,
+    sampler: StreamFieldSampler,
   ): void {
     const inv = proj.invert;
     if (inv) {
-      for (let tries = 0; tries < 6; tries++) {
+      const maxTries = sampler.masked ? 14 : 6;
+      for (let tries = 0; tries < maxTries; tries++) {
         const sx = Math.random() * width;
         const sy = Math.random() * height;
         const ll = inv([sx, sy]);
@@ -69,11 +122,25 @@ export class WindStreamRenderer {
             chk[1] <= height &&
             Math.hypot(chk[0] - sx, chk[1] - sy) < 8
           ) {
-            p.lon = ll[0];
-            p.lat = ll[1];
-            p.age = Math.floor(Math.random() * 14);
-            return;
+            if (!sampler.masked || sampler.sample(ll[0], ll[1])[3] >= 0.45) {
+              p.lon = ll[0];
+              p.lat = ll[1];
+              p.age = Math.floor(Math.random() * 14);
+              return;
+            }
           }
+        }
+      }
+    }
+    if (sampler.masked) {
+      for (let t = 0; t < 10; t++) {
+        const lon = (Math.random() - 0.5) * 360;
+        const lat = Math.asin(Math.random() * 2 - 1) * (180 / Math.PI);
+        if (sampler.sample(lon, lat)[3] >= 0.45) {
+          p.lon = lon;
+          p.lat = lat;
+          p.age = Math.floor(Math.random() * 14);
+          return;
         }
       }
     }
@@ -87,7 +154,7 @@ export class WindStreamRenderer {
     width: number,
     height: number,
     proj: d3Geo.GeoProjection,
-    grid: WindGrid,
+    gridOrSampler: WindGrid | StreamFieldSampler,
     viewSignature: string,
     active: boolean,
   ): void {
@@ -98,57 +165,67 @@ export class WindStreamRenderer {
       return;
     }
 
+    const sampler =
+      'sample' in gridOrSampler ? gridOrSampler : windGridToSampler(gridOrSampler);
+    const styles = this.getStyles(sampler.tintRgb);
+
     if (viewSignature !== this.viewKey) {
       this.viewKey = viewSignature;
       ctx.clearRect(0, 0, width, height);
-      this.ensureCount(width);
+      this.ensureCount(width, sampler.masked);
       for (const p of this.particles) {
-        this.respawnInViewport(p, proj, width, height);
+        this.respawnInViewport(p, proj, width, height, sampler);
         p.age = Math.floor(Math.random() * MAX_AGE);
       }
     } else {
-      this.ensureCount(width);
+      this.ensureCount(width, sampler.masked);
     }
 
     // Fade existing trails using destination-in composite (exact cambecc/earth trail look)
     const prevOp = ctx.globalCompositeOperation;
     ctx.globalCompositeOperation = 'destination-in';
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.94)';
+    ctx.fillStyle = `rgba(0, 0, 0, ${sampler.fadeAlpha})`;
     ctx.fillRect(0, 0, width, height);
     ctx.globalCompositeOperation = prevOp;
 
-    const spec = WIND_LEVELS[grid.level];
     const scale = proj.scale();
-    // Target ~4.2 px/frame at streamMax across all zoom levels, keeping fast gales & jets crisp
-    const radScale = 4.2 / (Math.max(scale, 80) * Math.max(spec.streamMax, 5));
+    // Target ~4.2 px/frame at streamMax across all zoom levels, keeping fast gales, jets & currents crisp
+    const radScale = 4.2 / (Math.max(scale, 80) * Math.max(sampler.streamMax, 0.25));
 
     const buckets: [number, number, number, number][][] = Array.from(
       { length: INTENSITY_BUCKETS },
       () => [],
     );
 
-    // Reject only projection tear / antimeridian jumps, never legitimate fast wind steps
     const maxSegJump = 28;
     const DEG2RAD = Math.PI / 180;
     const RAD2DEG = 180 / Math.PI;
 
     for (const p of this.particles) {
       if (p.age >= MAX_AGE) {
-        this.respawnInViewport(p, proj, width, height);
+        this.respawnInViewport(p, proj, width, height, sampler);
       }
       p.age++;
 
       let curLon = p.lon;
       let curLat = p.lat;
       let scr0 = proj([curLon, curLat]);
-      const [u0, v0, mag0] = sampleWindLonLat(grid, curLon, curLat);
+      const [u0, v0, mag0, mask0] = sampler.sample(curLon, curLat);
+      if (sampler.masked && mask0 < 0.42) {
+        p.age = MAX_AGE;
+        continue;
+      }
 
-      // Sub-step high-speed regions (> streamMax) so curved gale/jet paths stay smooth and never clip
-      const nSub = Math.min(4, Math.max(1, Math.ceil(mag0 / Math.max(spec.streamMax, 5))));
+      const nSub = Math.min(4, Math.max(1, Math.ceil(mag0 / Math.max(sampler.streamMax, 0.25))));
       const subRadScale = radScale / nSub;
 
       for (let s = 0; s < nSub; s++) {
-        const [u, v, mag] = s === 0 ? [u0, v0, mag0] : sampleWindLonLat(grid, curLon, curLat);
+        const [u, v, mag, mask] =
+          s === 0 ? [u0, v0, mag0, mask0] : sampler.sample(curLon, curLat);
+        if (sampler.masked && mask < 0.40) {
+          p.age = MAX_AGE;
+          break;
+        }
         const cosLat = Math.max(0.18, Math.cos(curLat * DEG2RAD));
         const dLon = (u / cosLat) * subRadScale * RAD2DEG;
         const dLat = v * subRadScale * RAD2DEG;
@@ -175,7 +252,10 @@ export class WindStreamRenderer {
           if (dx * dx + dy * dy <= maxSegJump * maxSegJump) {
             const bIdx = Math.min(
               INTENSITY_BUCKETS - 1,
-              Math.floor((Math.min(mag, spec.streamMax) / spec.streamMax) * (INTENSITY_BUCKETS - 1)),
+              Math.floor(
+                (Math.min(mag, sampler.streamMax) / sampler.streamMax) *
+                  (INTENSITY_BUCKETS - 1),
+              ),
             );
             buckets[bIdx].push([scr0[0], scr0[1], scr1[0], scr1[1]]);
           }
@@ -206,13 +286,13 @@ export class WindStreamRenderer {
     d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
     ctx.clip();
 
-    ctx.lineWidth = 1.05;
+    ctx.lineWidth = sampler.lineWidth;
     ctx.lineCap = 'round';
     for (let i = 0; i < INTENSITY_BUCKETS; i++) {
       const segs = buckets[i];
       if (segs.length === 0) continue;
       ctx.beginPath();
-      ctx.strokeStyle = COLOR_STYLES[i];
+      ctx.strokeStyle = styles[i];
       for (let k = 0; k < segs.length; k++) {
         const s = segs[k];
         ctx.moveTo(s[0], s[1]);

@@ -29,13 +29,18 @@ canvas {
   pointer-events: none;
 }
 
-#windCanvas {
+#oceanCanvas {
   z-index: 2;
   pointer-events: none;
 }
 
-#canvas {
+#windCanvas {
   z-index: 3;
+  pointer-events: none;
+}
+
+#canvas {
+  z-index: 4;
 }
 
 #githubBtn {
@@ -69,11 +74,11 @@ canvas {
   color: #e6ecf5;
 }
 
-#earthMeta {
+.hudMetaRow {
   display: flex;
   gap: 10px;
   font-size: 12px;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
   align-items: center;
 }
 
@@ -82,23 +87,41 @@ canvas {
   font-weight: 700;
 }
 
-#windTimeBadge {
+#oceanLevelBadge {
+  color: #4be3ff;
+  font-weight: 700;
+}
+
+#windTimeBadge,
+#oceanTimeBadge {
   color: #9cb0c9;
   font-size: 11px;
 }
 
-#scaleWrap {
+.hudScaleWrap {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
+  margin-bottom: 5px;
 }
 
-#scaleBar {
+.scaleBar {
   width: 150px;
   height: 8px;
   border-radius: 3px;
   border: 1px solid hsla(0, 0%, 100%, 0.25);
+}
+
+#oceanScaleBar {
+  background: linear-gradient(
+    90deg,
+    rgb(10, 25, 68) 0%,
+    rgb(10, 25, 250) 10%,
+    rgb(24, 255, 93) 26.7%,
+    rgb(255, 233, 102) 43.3%,
+    rgb(255, 233, 15) 66.7%,
+    rgb(255, 15, 15) 100%
+  );
 }
 
 .scaleTick {

@@ -1,6 +1,7 @@
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var windTex: texture_2d<f32>;
 @group(0) @binding(2) var watermanInvTex: texture_2d<f32>;
+@group(0) @binding(3) var oceanTex: texture_2d<f32>;
 
 struct BgOut {
     @builtin(position) pos: vec4f,
@@ -51,11 +52,25 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
         }
     }
 
+    let showOceanCol = uniforms.earthFlags.x > 0.5;
+    if (showOceanCol) {
+        let oc = sampleOceanTexture(oceanTex, inv.xyz);
+        if (oc.w >= 0.42) {
+            let ocCol = oceanCurrentsColor(oc.z);
+            let ocAlpha = smoothstep(0.42, 0.72, oc.w) * 0.86;
+            baseCol = mix(baseCol, ocCol, ocAlpha);
+        } else {
+            // Subtle dark land relief so continents stand out cleanly against ocean basins
+            baseCol *= 0.82;
+        }
+    }
+
     if (uniforms.flags.y > 0.5) {
         let w = sampleWindTexture(windTex, inv.xyz);
         let t = clamp(w.z / max(uniforms.flags.z, 1.0), 0.0, 1.0);
         let speedCol = extendedSinebowColor(t);
-        baseCol = mix(baseCol, speedCol, 0.44);
+        let windAlpha = select(0.44, 0.34, showOceanCol);
+        baseCol = mix(baseCol, speedCol, windAlpha);
     }
 
     return vec4f(baseCol, 1.0);

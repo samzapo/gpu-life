@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Complex Life · Earth Wind Chemistry</title>
+    <title>Complex Life · Earth Wind &amp; Ocean Currents</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/style.css">
   </head>
@@ -23,22 +23,36 @@
       </g>
       <path id="sphereRimPath" fill="none" />
     </svg>
+    <canvas id="oceanCanvas"></canvas>
     <canvas id="windCanvas"></canvas>
     <canvas id="canvas"></canvas>
 
     <div id="controls">
-      <div id="earthMeta">
-        <span id="windLevelBadge">Wind @ Sfc (10m)</span>
-        <span id="windTimeBadge">GFS · loading…</span>
+      <div id="windHudGroup">
+        <div id="earthMeta" class="hudMetaRow">
+          <span id="windLevelBadge">Wind @ Sfc (10m)</span>
+          <span id="windTimeBadge">GFS · loading…</span>
+        </div>
+        <div id="scaleWrap" class="hudScaleWrap">
+          <span class="scaleTick">0</span>
+          <div id="scaleBar" class="scaleBar"></div>
+          <span id="scaleMaxLabel" class="scaleTick">100 m/s</span>
+        </div>
       </div>
-      <div id="scaleWrap">
-        <span class="scaleTick">0</span>
-        <div id="scaleBar"></div>
-        <span id="scaleMaxLabel" class="scaleTick">100 m/s</span>
+      <div id="oceanHudGroup">
+        <div id="oceanMeta" class="hudMetaRow">
+          <span id="oceanLevelBadge">Ocean @ Sfc Currents</span>
+          <span id="oceanTimeBadge">NOAA CoastWatch · loading…</span>
+        </div>
+        <div id="oceanScaleWrap" class="hudScaleWrap">
+          <span class="scaleTick">0</span>
+          <div id="oceanScaleBar" class="scaleBar"></div>
+          <span id="oceanScaleMaxLabel" class="scaleTick">1.5 m/s</span>
+        </div>
       </div>
       <p>
         Drag — rotate / pan Earth &nbsp;·&nbsp; Scroll — zoom<br>
-        Shift + Drag — attract atoms &nbsp;·&nbsp; Alt + Drag — repel atoms
+        Shift + Drag — attract &nbsp;·&nbsp; Alt + Drag — repel
       </p>
     </div>
 

@@ -286,6 +286,7 @@ export function buildWatermanLutData(
 }
 
 export interface ParsedNullschoolHash {
+  mode?: 'both' | 'air' | 'ocean';
   level?: string;
   projection?: ProjectionId;
   orientation?: [number, number, number];
@@ -297,7 +298,13 @@ export function parseNullschoolHash(hash: string): ParsedNullschoolHash {
   const result: ParsedNullschoolHash = {};
   const parts = clean.split('/');
   for (const part of parts) {
-    if (part === 'surface') {
+    if (part === 'ocean' || part === 'currents') {
+      result.mode = 'ocean';
+    } else if (part === 'air') {
+      result.mode = 'air';
+    } else if (part === 'both') {
+      result.mode = 'both';
+    } else if (part === 'surface') {
       result.level = 'surface';
     } else if (/^\d+hPa$/.test(part)) {
       result.level = part;

@@ -39,14 +39,7 @@ fn vertex(
         return output;
     }
 
-    var uHat = particle.orient - dot(particle.orient, n) * n;
-    let uLen = length(uHat);
-    if (uLen > 1e-5) {
-        uHat /= uLen;
-    } else {
-        let refA = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(n.z) > 0.9);
-        uHat = normalize(cross(refA, n));
-    }
+    let uHat = orthoBasis(n, particle.orient);
     let bHat = normalize(cross(n, uHat));
 
     let eps = 0.004;
@@ -56,11 +49,17 @@ fn vertex(
     var dU = vec2f(1.0, 0.0);
     var dB = vec2f(0.0, -1.0);
     if (pu.z > 0.5 && pb.z > 0.5) {
-        let cu = (pu.xy - p0.xy) / eps;
-        let cb = (pb.xy - p0.xy) / eps;
+        var cu = (pu.xy - p0.xy) / eps;
+        var cb = (pb.xy - p0.xy) / eps;
         let lu = length(cu);
         let lb = length(cb);
         if (lu > 0.04 && lu < 8.0 && lb > 0.04 && lb < 8.0) {
+            if (lu > 1.15) {
+                cu *= 1.15 / lu;
+            }
+            if (lb > 1.15) {
+                cb *= 1.15 / lb;
+            }
             dU = cu;
             dB = cb;
         }

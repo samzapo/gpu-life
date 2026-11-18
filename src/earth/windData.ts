@@ -352,14 +352,15 @@ export function extendedSinebowColor(t: number): [number, number, number] {
 }
 
 /**
- * Computes the divergence-free rotational component `(uDf, vDf)` via spherical Helmholtz
- * projection on a coarse synoptic grid (keeps cyclones, Rossby jets, and trade winds intact
- * while preventing 2D surface atoms from jamming into compressible convergence sinks).
+ * Shared spherical Helmholtz projection packing RGBA32Float `(u_divFree, v_divFree, rawMag, mask)`
+ * on `(outW x outH)`. When `masked` is true, land cells (`mask < 0.45`) enforce no-normal-flow
+ * Neumann coastline boundaries so ocean flows sweep smoothly parallel to continents.
  */
-export function buildDivergenceFreeWind(
-  grid: WindGrid,
+export function buildDivergenceFreeSphereTex(
+  sampleField: (lonDeg: number, latDeg: number) => [number, number, number, number],
   outW: number = 360,
   outH: number = 181,
+  masked: boolean = false,
 ): Float32Array<ArrayBuffer> {
   const cw = 90;
   const ch = 45;
@@ -368,17 +369,19 @@ export function buildDivergenceFreeWind(
 
   const uC = new Float32Array(cw * ch);
   const vC = new Float32Array(cw * ch);
+  const mC = new Uint8Array(cw * ch);
   for (let j = 0; j < ch; j++) {
     const lat = 90 - (j / (ch - 1)) * 180;
     for (let i = 0; i < cw; i++) {
       const lon = (i / cw) * 360;
-      const [uu, vv] = sampleWindLonLat(grid, lon, lat);
-      uC[j * cw + i] = uu;
-      vC[j * cw + i] = vv;
+      const [uu, vv, , maskVal] = sampleField(lon, lat);
+      const isSea = !masked || maskVal >= 0.45 ? 1 : 0;
+      mC[j * cw + i] = isSea;
+      uC[j * cw + i] = isSea ? uu : 0;
+      vC[j * cw + i] = isSea ? vv : 0;
     }
   }
 
-  // Compute metric spherical divergence div = (1/cosPhi) * (du/dLam + d(v*cosPhi)/dPhi)
   const div = new Float32Array(cw * ch);
   const cosPhi = new Float32Array(ch);
   for (let j = 0; j < ch; j++) {
@@ -387,58 +390,92 @@ export function buildDivergenceFreeWind(
   }
   for (let j = 1; j < ch - 1; j++) {
     const c = cosPhi[j];
-    const cp = cosPhi[j - 1]; // j-1 is further North (higher lat -> dPhi > 0 upward)
+    const cp = cosPhi[j - 1];
     const cm = cosPhi[j + 1];
     for (let i = 0; i < cw; i++) {
+      const k = j * cw + i;
+      if (!mC[k]) continue;
       const ip = (i + 1) % cw;
       const im = (i - 1 + cw) % cw;
-      const duDl = (uC[j * cw + ip] - uC[j * cw + im]) / (2 * dLam);
-      // Note j decreases northward!
-      const dvCdP = (vC[(j - 1) * cw + i] * cp - vC[(j + 1) * cw + i] * cm) / (2 * dPhi);
-      div[j * cw + i] = (duDl + dvCdP) / c;
+      const kE = j * cw + ip;
+      const kW = j * cw + im;
+      const kN = (j - 1) * cw + i;
+      const kS = (j + 1) * cw + i;
+
+      // Neumann coastal flux: treat land edge flux as 0 across coastline walls
+      const uE = mC[kE] ? uC[kE] : -uC[k];
+      const uW = mC[kW] ? uC[kW] : -uC[k];
+      const vN = mC[kN] ? vC[kN] * cp : -vC[k] * c;
+      const vS = mC[kS] ? vC[kS] * cm : -vC[k] * c;
+
+      const duDl = (uE - uW) / (2 * dLam);
+      const dvCdP = (vN - vS) / (2 * dPhi);
+      div[k] = (duDl + dvCdP) / c;
     }
   }
 
-  // SOR solver for spherical Laplacian(pot) = div
   const pot = new Float32Array(cw * ch);
   const invDP2 = 1 / (dPhi * dPhi);
-  const omega = 1.7;
+  const omega = 1.65;
   for (let iter = 0; iter < 140; iter++) {
     for (let j = 1; j < ch - 1; j++) {
       const c = cosPhi[j];
       const invDL2 = 1 / (c * c * dLam * dLam);
-      const cpMid = 0.5 * (c + cosPhi[j - 1]) / c;
-      const cmMid = 0.5 * (c + cosPhi[j + 1]) / c;
-      const denom = 2 * invDL2 + (cpMid + cmMid) * invDP2;
+      const cpMid = (0.5 * (c + cosPhi[j - 1])) / c;
+      const cmMid = (0.5 * (c + cosPhi[j + 1])) / c;
       for (let i = 0; i < cw; i++) {
+        const k = j * cw + i;
+        if (!mC[k]) continue;
         const ip = (i + 1) % cw;
         const im = (i - 1 + cw) % cw;
+        const kE = j * cw + ip;
+        const kW = j * cw + im;
+        const kN = (j - 1) * cw + i;
+        const kS = (j + 1) * cw + i;
+
+        const wE = mC[kE] ? invDL2 : 0;
+        const wW = mC[kW] ? invDL2 : 0;
+        const wN = mC[kN] ? cpMid * invDP2 : 0;
+        const wS = mC[kS] ? cmMid * invDP2 : 0;
+        const denom = wE + wW + wN + wS;
+        if (denom <= 1e-9) continue;
+
         const rhs =
-          (pot[j * cw + ip] + pot[j * cw + im]) * invDL2 +
-          (pot[(j - 1) * cw + i] * cpMid + pot[(j + 1) * cw + i] * cmMid) * invDP2 -
-          div[j * cw + i];
+          pot[kE] * wE + pot[kW] * wW + pot[kN] * wN + pot[kS] * wS - div[k];
         const target = rhs / denom;
-        pot[j * cw + i] += omega * (target - pot[j * cw + i]);
+        pot[k] += omega * (target - pot[k]);
       }
     }
   }
 
-  // Subtract irrotational gradient grad(pot) from coarse wind
   const uRotC = new Float32Array(cw * ch);
   const vRotC = new Float32Array(cw * ch);
   for (let j = 1; j < ch - 1; j++) {
     const c = cosPhi[j];
     for (let i = 0; i < cw; i++) {
+      const k = j * cw + i;
+      if (!mC[k]) continue;
       const ip = (i + 1) % cw;
       const im = (i - 1 + cw) % cw;
-      const dpDl = (pot[j * cw + ip] - pot[j * cw + im]) / (2 * dLam * c);
-      const dpDp = (pot[(j - 1) * cw + i] - pot[(j + 1) * cw + i]) / (2 * dPhi);
-      uRotC[j * cw + i] = uC[j * cw + i] - dpDl;
-      vRotC[j * cw + i] = vC[j * cw + i] - dpDp;
+      const kE = j * cw + ip;
+      const kW = j * cw + im;
+      const kN = (j - 1) * cw + i;
+      const kS = (j + 1) * cw + i;
+
+      const pE = mC[kE] ? pot[kE] : pot[k];
+      const pW = mC[kW] ? pot[kW] : pot[k];
+      const pN = mC[kN] ? pot[kN] : pot[k];
+      const pS = mC[kS] ? pot[kS] : pot[k];
+      const spanL = (mC[kE] ? 1 : 0) + (mC[kW] ? 1 : 0);
+      const spanP = (mC[kN] ? 1 : 0) + (mC[kS] ? 1 : 0);
+
+      const dpDl = spanL > 0 ? (pE - pW) / (spanL * dLam * c) : 0;
+      const dpDp = spanP > 0 ? (pN - pS) / (spanP * dPhi) : 0;
+      uRotC[k] = uC[k] - dpDl;
+      vRotC[k] = vC[k] - dpDp;
     }
   }
 
-  // Pack RGBA32Float: (u_divFree, v_divFree, rawSpeedMag, 1)
   const out = new Float32Array(outW * outH * 4);
   for (let row = 0; row < outH; row++) {
     const latDeg = 90 - (row / (outH - 1)) * 180;
@@ -454,29 +491,50 @@ export function buildDivergenceFreeWind(
       const i1 = (i0 + 1) % cw;
       const fx = gx - Math.floor(gx);
 
-      const w00 = (1 - fx) * (1 - fy);
-      const w10 = fx * (1 - fy);
-      const w01 = (1 - fx) * fy;
-      const w11 = fx * fy;
+      const ws = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy];
+      const ks = [j0 * cw + i0, j0 * cw + i1, j1 * cw + i0, j1 * cw + i1];
+      let wSum = 0;
+      let uSum = 0;
+      let vSum = 0;
+      for (let q = 0; q < 4; q++) {
+        if (!masked || mC[ks[q]]) {
+          wSum += ws[q];
+          uSum += uRotC[ks[q]] * ws[q];
+          vSum += vRotC[ks[q]] * ws[q];
+        }
+      }
+      const uDf = wSum > 1e-5 ? uSum / wSum : 0;
+      const vDf = wSum > 1e-5 ? vSum / wSum : 0;
 
-      const uDf =
-        uRotC[j0 * cw + i0] * w00 +
-        uRotC[j0 * cw + i1] * w10 +
-        uRotC[j1 * cw + i0] * w01 +
-        uRotC[j1 * cw + i1] * w11;
-      const vDf =
-        vRotC[j0 * cw + i0] * w00 +
-        vRotC[j0 * cw + i1] * w10 +
-        vRotC[j1 * cw + i0] * w01 +
-        vRotC[j1 * cw + i1] * w11;
-
-      const [, , rawMag] = sampleWindLonLat(grid, lonDeg, latDeg);
+      const [, , rawMag, rawMask] = sampleField(lonDeg, latDeg);
+      const keep = !masked || rawMask >= 0.45;
       const o = (row * outW + col) * 4;
-      out[o + 0] = uDf;
-      out[o + 1] = vDf;
-      out[o + 2] = rawMag;
-      out[o + 3] = 1;
+      out[o + 0] = keep ? uDf : 0;
+      out[o + 1] = keep ? vDf : 0;
+      out[o + 2] = keep ? rawMag : 0;
+      out[o + 3] = masked ? rawMask : 1;
     }
   }
   return out;
+}
+
+/**
+ * Computes the divergence-free rotational component `(uDf, vDf)` via spherical Helmholtz
+ * projection on a coarse synoptic grid (keeps cyclones, Rossby jets, and trade winds intact
+ * while preventing 2D surface atoms from jamming into compressible convergence sinks).
+ */
+export function buildDivergenceFreeWind(
+  grid: WindGrid,
+  outW: number = 360,
+  outH: number = 181,
+): Float32Array<ArrayBuffer> {
+  return buildDivergenceFreeSphereTex(
+    (lonDeg, latDeg) => {
+      const [u, v, mag] = sampleWindLonLat(grid, lonDeg, latDeg);
+      return [u, v, mag, 1];
+    },
+    outW,
+    outH,
+    false,
+  );
 }

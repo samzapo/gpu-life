@@ -322,9 +322,14 @@ export class InclusivePrefixSum {
     });
   }
 
-  run(commandEncoder: GPUCommandEncoder) {
+  destroy() {
+    this.reductionBuffer.destroy();
+    this.paramsBuffer.destroy();
+  }
+
+  run(commandEncoder: GPUCommandEncoder, profile: boolean = true) {
     const reducePass = commandEncoder.beginComputePass(
-      linkComputeTimestamp(this.device, 'reduce')
+      profile ? linkComputeTimestamp(this.device, 'reduce') : {},
     );
     reducePass.setPipeline(this.pipelines['reduce']);
     reducePass.setBindGroup(0, this.dataBindGroup);
@@ -334,34 +339,34 @@ export class InclusivePrefixSum {
 
     if (this.numWorkgroups <= this.minSubgroupSize) {
       const spineScanPass = commandEncoder.beginComputePass(
-        linkComputeTimestamp(this.device, 'spineScanShort')
+        profile ? linkComputeTimestamp(this.device, 'spineScanShort') : {},
       );
       spineScanPass.setBindGroup(0, this.dataBindGroup);
       spineScanPass.setPipeline(this.pipelines['spineScanShort']);
       spineScanPass.dispatchWorkgroups(1);
       spineScanPass.end();
-      resolveTimestamp(commandEncoder, 'spineScanShort');
+      if (profile) resolveTimestamp(commandEncoder, 'spineScanShort');
     } else {
       const spineScanPass = commandEncoder.beginComputePass(
-        linkComputeTimestamp(this.device, 'spineScanLong')
+        profile ? linkComputeTimestamp(this.device, 'spineScanLong') : {},
       );
       spineScanPass.setBindGroup(0, this.dataBindGroup);
       spineScanPass.setPipeline(this.pipelines['spineScanLong']);
       spineScanPass.setBindGroup(1, this.paramsBindGroup);
       spineScanPass.dispatchWorkgroups(1);
       spineScanPass.end();
-      resolveTimestamp(commandEncoder, 'spineScanLong');
+      if (profile) resolveTimestamp(commandEncoder, 'spineScanLong');
     }
 
     const downSweepPass = commandEncoder.beginComputePass(
-      linkComputeTimestamp(this.device, 'downSweep')
+      profile ? linkComputeTimestamp(this.device, 'downSweep') : {},
     );
     downSweepPass.setPipeline(this.pipelines['downSweep']);
     downSweepPass.setBindGroup(0, this.dataBindGroup);
     downSweepPass.setBindGroup(1, this.paramsBindGroup);
     downSweepPass.dispatchWorkgroups(this.numWorkgroups);
     downSweepPass.end();
-    resolveTimestamp(commandEncoder, 'downSweep')
+    if (profile) resolveTimestamp(commandEncoder, 'downSweep');
   }
 
 

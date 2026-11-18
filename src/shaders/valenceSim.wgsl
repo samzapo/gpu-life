@@ -75,16 +75,6 @@ fn radPresence(rNorm: f32) -> f32 {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
-fn orthoBasis(n: vec3f, uRaw: vec3f) -> vec3f {
-    var u = uRaw - dot(uRaw, n) * n;
-    let l = length(u);
-    if (l > 1e-6) {
-        return u / l;
-    }
-    let refV = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(n.z) > 0.9);
-    return normalize(cross(refV, n));
-}
-
 fn accumulateValenceNeighbor(
     p: Particle,
     sP: SpeciesInfo,
@@ -327,13 +317,7 @@ fn integrateParticle(
 
     // Live global atmospheric wind force field ("vortex" mixing across the sphere)
     if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
-        let horiz = length(p.pos.xy);
-        var eEast = vec3f(0.0, 1.0, 0.0);
-        if (horiz > 1e-4) {
-            eEast = vec3f(-p.pos.y / horiz, p.pos.x / horiz, 0.0);
-        } else {
-            eEast = normalize(cross(vec3f(1.0, 0.0, 0.0), p.pos));
-        }
+        let eEast = sphereEastBasis(p.pos);
         let eNorth = normalize(cross(p.pos, eEast));
         let wind3D = windUv.x * eEast + windUv.y * eNorth;
         let refSpeed = max(windStreamMax, 10.0);
@@ -345,52 +329,20 @@ fn integrateParticle(
         p.vel += (wTarget - p.vel) * clamp(14.0 * sim.dt, 0.0, 0.45);
     }
 
-    // Mouse attraction / repulsion projected onto local sphere tangent plane
-    if (mouseSphere.w != 0.0) {
-        let mPos = normalize(mouseSphere.xyz);
-        let mChord = length(mPos - p.pos);
-        let mDist = R * 2.0 * asin(clamp(0.5 * mChord, 0.0, 1.0));
-        if (mDist > 1e-5 && mDist < sim.rMax * 2.5) {
-            let mTan = mPos - dot(mPos, p.pos) * p.pos;
-            let mLen = length(mTan);
-            if (mLen > 1e-5) {
-                let sign = select(-1.0, 1.0, mouseSphere.w > 0.0);
-                p.vel += (mTan / mLen) * (mDist * 3.0 * sign);
-            }
-        }
-    }
+    p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 
-    p.vel -= dot(p.vel, p.pos) * p.pos;
-    let maxStepSpeed = min(sim.cellSize / max(sim.dt, 1e-4) * 0.45, R * 0.5 / max(sim.dt, 1e-4));
-    let speed = length(p.vel);
-    if (speed > maxStepSpeed && speed > 1e-6) {
-        p.vel *= maxStepSpeed / speed;
-    }
-
-    // Exact great-circle geodesic advance & parallel transport (zero pole gimbal lock)
-    let clampedSpeed = length(p.vel);
-    let phi = (clampedSpeed * sim.dt) / R;
-    var nNew = p.pos;
-    var vNew = p.vel;
-    var uNew = uBody;
-    if (phi > 1e-7) {
-        let kHat = p.vel / clampedSpeed;
-        let cPhi = cos(phi);
-        let sPhi = sin(phi);
-        nNew = normalize(cPhi * p.pos + sPhi * kHat);
-        vNew = clampedSpeed * (cPhi * kHat - sPhi * p.pos);
-        vNew -= dot(vNew, nNew) * nNew;
-        let uk = dot(uBody, kHat);
-        uNew = uBody - uk * ((1.0 - cPhi) * kHat + sPhi * p.pos);
-    }
-
-    let dTheta = p.omega * sim.dt;
-    let cT = cos(dTheta);
-    let sT = sin(dTheta);
-    uNew = cT * uNew + sT * cross(nNew, uNew);
-    p.pos = nNew;
-    p.vel = vNew;
-    p.orient = orthoBasis(nNew, uNew);
+    let stepRes = stepGeodesicOnSphere(
+        p.pos,
+        p.vel,
+        p.omega,
+        uBody,
+        sim.dt,
+        R,
+        sim.cellSize,
+    );
+    p.pos = stepRes.pos;
+    p.vel = stepRes.vel;
+    p.orient = stepRes.orient;
 
     return p;
 }

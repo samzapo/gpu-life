@@ -71,6 +71,22 @@ const initialLevel: WindLevelId =
       ? (parsedHash.level as WindLevelId)
       : 'surface';
 
+const urlLayer = validateURLParam('layer', '');
+export type ViewLayerMode = 'both' | 'ocean' | 'air';
+const initialViewLayer: ViewLayerMode =
+  urlLayer === 'ocean' || urlLayer === 'air' || urlLayer === 'both'
+    ? urlLayer
+    : parsedHash.mode ?? 'both';
+
+export const oceanParticleAmt = Math.max(
+  1,
+  Math.floor(validateURLParam('oceanParticles', 12000)),
+);
+export const oceanColourAmt = Math.max(
+  1,
+  Math.floor(validateURLParam('oceanColours', 12)),
+);
+
 export const initialOrientation = parsedHash.orientation;
 
 export const params = {
@@ -83,16 +99,60 @@ export const params = {
 };
 
 export const earthParams = {
+  viewLayer: initialViewLayer,
   projection: initialProjection,
   windLevel: initialLevel,
   vortex: true,
   windStrength: validateURLParam('windStrength', 1.0),
   windLines: urlParams.get('windLines') !== 'false',
   windColors: urlParams.get('windColors') !== 'false',
+  oceanMix: urlParams.get('oceanMix') !== 'false',
+  oceanStrength: validateURLParam('oceanStrength', 1.0),
+  oceanLines: urlParams.get('oceanLines') !== 'false',
+  oceanColors: urlParams.get('oceanColors') !== 'false',
   coastlines: urlParams.get('coastlines') !== 'false',
   mouseTool: 'globe' as 'globe' | 'attract' | 'repel',
   windStatus: 'Loading GFS…',
+  oceanStatus: 'Loading CoastWatch…',
 };
+
+// Classic Particle Life parameters preserved from the original fork (51bc381)
+export const oceanOptionParams = {
+  particles: oceanParticleAmt,
+  colours: oceanColourAmt,
+  r: validateURLParam('oceanR', 20),
+  force: 1.0,
+  beta: 0.3,
+  delta: 0.02,
+  friction: 0.04,
+  avoidance: 4.0,
+  cells: cellAmt,
+  worldSize: defaultWorldSize,
+};
+
+export function setOceanSim(
+  device: GPUDevice,
+  oceanSimData: Float32Array<ArrayBuffer>,
+  oceanSimBuffer: GPUBuffer,
+) {
+  const dt = Math.max(oceanOptionParams.delta, 1e-4);
+  const fric = Math.max(oceanOptionParams.friction, 1e-4);
+  const rMax = 1 / Math.max(oceanOptionParams.r, 0.5);
+
+  oceanSimData[0] = oceanOptionParams.colours;
+  oceanSimData[1] = oceanOptionParams.beta;
+  oceanSimData[2] = rMax;
+  oceanSimData[3] = oceanOptionParams.force / rMax;
+  oceanSimData[4] = Math.pow(0.5, dt / fric);
+  oceanSimData[5] = dt;
+  oceanSimData[6] = rMax * 2;
+  oceanSimData[7] = oceanOptionParams.cells;
+  oceanSimData[8] = oceanOptionParams.avoidance;
+  oceanSimData[9] = optionParams.worldSize;
+  oceanSimData[10] = earthParams.oceanStrength;
+  oceanSimData[11] = earthParams.oceanMix ? 1 : 0;
+  device.queue.writeBuffer(oceanSimBuffer, 0, oceanSimData);
+}
 
 export const optionParams = {
   colours: colourAmt,
@@ -163,10 +223,19 @@ export const seedInput = pane.addBinding(params, 'seed', { view: 'text' });
 export const newSimBtn = pane.addButton({ title: 'New Sim' });
 export const randomizeBtn = pane.addButton({ title: 'Randomize' });
 
-// Earth & Wind folder (emulating earth.nullschool.net projection & wind controls)
+// Earth & Wind / Ocean folder (emulating earth.nullschool.net layers, levels & projections)
 const earthFolder = pane.addFolder({
-  title: 'Earth & Wind',
+  title: 'Earth · Wind & Ocean',
   expanded: true,
+});
+
+export const viewLayerSelect = earthFolder.addBinding(earthParams, 'viewLayer', {
+  label: 'layer',
+  options: {
+    'Both (Air + Ocean)': 'both',
+    'Ocean (Currents)': 'ocean',
+    'Air (Wind)': 'air',
+  },
 });
 
 const projectionOptions: Record<string, ProjectionId> = {};
@@ -184,7 +253,7 @@ export const projectionSelect = earthFolder.addBinding(earthParams, 'projection'
   options: projectionOptions,
 });
 export const windLevelSelect = earthFolder.addBinding(earthParams, 'windLevel', {
-  label: 'level',
+  label: 'windLevel',
   options: windLevelOptions,
 });
 export const windMixBinding = earthFolder.addBinding(earthParams, 'vortex', {
@@ -200,6 +269,22 @@ export const windColorsBinding = earthFolder.addBinding(
   earthParams,
   'windColors',
 );
+export const oceanMixBinding = earthFolder.addBinding(earthParams, 'oceanMix', {
+  label: 'oceanMix',
+});
+export const oceanStrengthBinding = earthFolder.addBinding(
+  earthParams,
+  'oceanStrength',
+  { label: 'oceanForce', min: 0, max: 4, step: 0.05 },
+);
+export const oceanLinesBinding = earthFolder.addBinding(
+  earthParams,
+  'oceanLines',
+);
+export const oceanColorsBinding = earthFolder.addBinding(
+  earthParams,
+  'oceanColors',
+);
 export const coastlinesBinding = earthFolder.addBinding(
   earthParams,
   'coastlines',
@@ -208,8 +293,8 @@ const mouseToolBinding = earthFolder.addBinding(earthParams, 'mouseTool', {
   label: 'tool',
   options: {
     'Rotate / Pan': 'globe',
-    'Attract Atoms': 'attract',
-    'Repel Atoms': 'repel',
+    'Attract Particles': 'attract',
+    'Repel Particles': 'repel',
   },
 });
 mouseToolBinding.on('change', (ev) => {
@@ -219,9 +304,56 @@ mouseToolBinding.on('change', (ev) => {
 export const windStatusBinding = earthFolder.addBinding(
   earthParams,
   'windStatus',
-  { readonly: true, label: 'source' },
+  { readonly: true, label: 'windSrc' },
+);
+export const oceanStatusBinding = earthFolder.addBinding(
+  earthParams,
+  'oceanStatus',
+  { readonly: true, label: 'oceanSrc' },
 );
 export const resetViewBtn = earthFolder.addButton({ title: 'Reset Globe View' });
+
+// Classic Particle Life mechanics from the original fork (51bc381) running on Ocean Currents
+const oceanLifeFolder = pane.addFolder({
+  title: 'Ocean Life (Original Fork)',
+  expanded: false,
+});
+oceanLifeFolder.addBinding(oceanOptionParams, 'particles', {
+  label: 'oceanCount',
+  min: 500,
+  max: 40000,
+  step: 500,
+});
+export const oceanColoursBinding = oceanLifeFolder.addBinding(
+  oceanOptionParams,
+  'colours',
+  { label: 'species', min: 1, max: 200, step: 1 },
+);
+const oceanParamSpecs: Record<string, BindingParams> = {
+  r: { min: 2, max: 60, step: 0.5 },
+  beta: { min: 0.02, max: 0.95, step: 0.01 },
+  force: { min: 0, max: 5, step: 0.05 },
+  delta: { label: 'dt', min: 0.002, max: 0.06, step: 0.002 },
+  friction: { min: 0.005, max: 0.4, step: 0.005 },
+  avoidance: { min: 0, max: 20, step: 0.5 },
+  cells: { min: 1, step: 1 },
+};
+const oceanParamBindings: BindingApi[] = [];
+for (const key in oceanParamSpecs) {
+  oceanParamBindings.push(
+    oceanLifeFolder.addBinding(
+      oceanOptionParams,
+      key as keyof typeof oceanOptionParams,
+      oceanParamSpecs[key],
+    ),
+  );
+}
+export const newOceanSimBtn = oceanLifeFolder.addButton({
+  title: 'Respawn Ocean Life',
+});
+export const randomizeOceanRulesBtn = oceanLifeFolder.addButton({
+  title: 'Randomize Ocean Matrix',
+});
 
 const constantOptions = ['colours', 'cells'];
 const constants: Record<string, BindingParams> = {
@@ -277,14 +409,32 @@ export function bindOptions(
   device: GPUDevice,
   simData: Float32Array<ArrayBuffer>,
   simBuffer: GPUBuffer,
+  oceanSimData: Float32Array<ArrayBuffer>,
+  oceanSimBuffer: GPUBuffer,
 ) {
   for (const param in optionBindings) {
     optionBindings[param].on('change', () => {
       setSim(device, simData, simBuffer);
+      if (param === 'worldSize') {
+        setOceanSim(device, oceanSimData, oceanSimBuffer);
+      }
     });
   }
   windMixBinding.on('change', () => setSim(device, simData, simBuffer));
   windStrengthBinding.on('change', () => setSim(device, simData, simBuffer));
+
+  for (const b of oceanParamBindings) {
+    b.on('change', () => setOceanSim(device, oceanSimData, oceanSimBuffer));
+  }
+  oceanColoursBinding.on('change', () =>
+    setOceanSim(device, oceanSimData, oceanSimBuffer),
+  );
+  oceanMixBinding.on('change', () =>
+    setOceanSim(device, oceanSimData, oceanSimBuffer),
+  );
+  oceanStrengthBinding.on('change', () =>
+    setOceanSim(device, oceanSimData, oceanSimBuffer),
+  );
 }
 
 // 2D Periodic Table legend folder

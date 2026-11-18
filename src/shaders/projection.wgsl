@@ -59,6 +59,161 @@ fn sampleWindTexture(windTex: texture_2d<f32>, n: vec3f) -> vec3f {
     return mix(top, bot, fy);
 }
 
+// Samples ocean currents `(uEastDf, vNorthDf, rawSpeed, oceanMask)` in m/s at unit normal `n`.
+// Velocity and raw speed are normalized over ocean texels so coastal currents stay crisp right to shore.
+fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(oceanTex, 0);
+    let nx = f32(dims.x);
+    let ny = f32(dims.y);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(0.0);
+    }
+
+    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
+    if (lonDeg < 0.0) {
+        lonDeg += 360.0;
+    }
+    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+
+    let gx = (lonDeg / 360.0) * nx;
+    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
+
+    let i0 = u32(floor(gx)) % dims.x;
+    let i1 = (i0 + 1u) % dims.x;
+    let fx = gx - floor(gx);
+
+    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
+    let j1 = min(dims.y - 1u, j0 + 1u);
+    let fy = clamp(gy - f32(j0), 0.0, 1.0);
+
+    let c00 = textureLoad(oceanTex, vec2u(i0, j0), 0);
+    let c10 = textureLoad(oceanTex, vec2u(i1, j0), 0);
+    let c01 = textureLoad(oceanTex, vec2u(i0, j1), 0);
+    let c11 = textureLoad(oceanTex, vec2u(i1, j1), 0);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let k00 = w00 * select(0.0, 1.0, c00.w > 0.45);
+    let k10 = w10 * select(0.0, 1.0, c10.w > 0.45);
+    let k01 = w01 * select(0.0, 1.0, c01.w > 0.45);
+    let k11 = w11 * select(0.0, 1.0, c11.w > 0.45);
+
+    let maskSum = k00 + k10 + k01 + k11;
+    if (maskSum <= 1e-4) {
+        return vec4f(0.0);
+    }
+    let uvMag = (c00.xyz * k00 + c10.xyz * k10 + c01.xyz * k01 + c11.xyz * k11) / maskSum;
+    return vec4f(uvMag, maskSum);
+}
+
+// Exact `cambecc/earth` segmentedColorScale for ocean surface currents `[0 .. 1.5] m/s`.
+fn oceanCurrentsColor(speedMs: f32) -> vec3f {
+    let s = clamp(speedMs, 0.0, 1.5);
+    let c0 = vec3f(10.0, 25.0, 68.0) / 255.0;
+    let c1 = vec3f(10.0, 25.0, 250.0) / 255.0;
+    let c2 = vec3f(24.0, 255.0, 93.0) / 255.0;
+    let c3 = vec3f(255.0, 233.0, 102.0) / 255.0;
+    let c4 = vec3f(255.0, 233.0, 15.0) / 255.0;
+    let c5 = vec3f(255.0, 15.0, 15.0) / 255.0;
+
+    if (s <= 0.15) {
+        return mix(c0, c1, s / 0.15);
+    } else if (s <= 0.40) {
+        return mix(c1, c2, (s - 0.15) / 0.25);
+    } else if (s <= 0.65) {
+        return mix(c2, c3, (s - 0.40) / 0.25);
+    } else if (s <= 1.00) {
+        return mix(c3, c4, (s - 0.65) / 0.35);
+    }
+    return mix(c4, c5, (s - 1.00) / 0.50);
+}
+
+fn orthoBasis(n: vec3f, uRaw: vec3f) -> vec3f {
+    let u = uRaw - dot(uRaw, n) * n;
+    let l = length(u);
+    if (l > 1e-6) {
+        return u / l;
+    }
+    let refV = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(n.z) > 0.9);
+    return normalize(cross(refV, n));
+}
+
+fn sphereEastBasis(n: vec3f) -> vec3f {
+    let horiz = length(n.xy);
+    if (horiz > 1e-4) {
+        return vec3f(-n.y / horiz, n.x / horiz, 0.0);
+    }
+    return normalize(cross(vec3f(1.0, 0.0, 0.0), n));
+}
+
+fn mouseSphereImpulse(pos: vec3f, rMax: f32, worldR: f32, mouseSphere: vec4f) -> vec3f {
+    if (mouseSphere.w == 0.0) {
+        return vec3f(0.0);
+    }
+    let mPos = normalize(mouseSphere.xyz);
+    let mChord = length(mPos - pos);
+    let mDist = worldR * 2.0 * asin(clamp(0.5 * mChord, 0.0, 1.0));
+    if (mDist > 1e-5 && mDist < rMax * 2.5) {
+        let mTan = mPos - dot(mPos, pos) * pos;
+        let mLen = length(mTan);
+        if (mLen > 1e-5) {
+            let sgn = select(-1.0, 1.0, mouseSphere.w > 0.0);
+            return (mTan / mLen) * (mDist * 3.0 * sgn);
+        }
+    }
+    return vec3f(0.0);
+}
+
+struct GeodesicStep {
+    pos: vec3f,
+    vel: vec3f,
+    orient: vec3f,
+}
+
+fn stepGeodesicOnSphere(
+    posIn: vec3f,
+    velIn: vec3f,
+    omega: f32,
+    uBody: vec3f,
+    dt: f32,
+    worldR: f32,
+    cellSize: f32,
+) -> GeodesicStep {
+    var vel = velIn - dot(velIn, posIn) * posIn;
+    let maxStepSpeed = min(cellSize / max(dt, 1e-4) * 0.45, worldR * 0.5 / max(dt, 1e-4));
+    let speed = length(vel);
+    if (speed > maxStepSpeed && speed > 1e-6) {
+        vel *= maxStepSpeed / speed;
+    }
+
+    let clampedSpeed = length(vel);
+    let phi = (clampedSpeed * dt) / worldR;
+    var nNew = posIn;
+    var vNew = vel;
+    var uNew = uBody;
+    if (phi > 1e-7) {
+        let kHat = vel / clampedSpeed;
+        let cPhi = cos(phi);
+        let sPhi = sin(phi);
+        nNew = normalize(cPhi * posIn + sPhi * kHat);
+        vNew = clampedSpeed * (cPhi * kHat - sPhi * posIn);
+        vNew -= dot(vNew, nNew) * nNew;
+        let uk = dot(uBody, kHat);
+        uNew = uBody - uk * ((1.0 - cPhi) * kHat + sPhi * posIn);
+    }
+
+    let dTheta = omega * dt;
+    if (abs(dTheta) > 1e-7) {
+        let cT = cos(dTheta);
+        let sT = sin(dTheta);
+        uNew = cT * uNew + sT * cross(nNew, uNew);
+    }
+    return GeodesicStep(nNew, vNew, orthoBasis(nNew, uNew));
+}
+
 fn sinebowColor(hue: f32) -> vec3f {
     let rad = hue * TWO_PI * (5.0 / 6.0) * 0.75;
     let s = sin(rad);
