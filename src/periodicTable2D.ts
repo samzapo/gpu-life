@@ -140,8 +140,29 @@ const SYMBOLS_P1_TO_P3: Record<number, string> = {
   14: 'Ar',
 };
 
+const ELEMENT_NAMES_P1_TO_P3: Record<number, string> = {
+  1: 'Hydrogen',
+  2: 'Helium',
+  3: 'Lithium',
+  4: 'Beryllium',
+  5: 'Carbon',
+  6: 'Oxygen',
+  7: 'Fluorine',
+  8: 'Neon',
+  9: 'Sodium',
+  10: 'Magnesium',
+  11: 'Silicon',
+  12: 'Sulfur',
+  13: 'Chlorine',
+  14: 'Argon',
+};
+
 export function getElementSymbol(atomicNumber: number): string {
   return SYMBOLS_P1_TO_P3[atomicNumber] ?? `Z${atomicNumber}`;
+}
+
+export function getElementName(atomicNumber: number): string {
+  return ELEMENT_NAMES_P1_TO_P3[atomicNumber] ?? `Element Z=${atomicNumber}`;
 }
 
 export function getElement2D(speciesIndex: number): Element2D {

@@ -1,6 +1,6 @@
 import type * as d3Geo from 'd3-geo';
 import { lonLatToUnitVec } from './earth/projections';
-import { getElementSymbol, type Element2D } from './periodicTable2D';
+import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D';
 import type { ViewLayerMode } from './options';
 
 export interface HoverSimSnapshot {
@@ -68,12 +68,25 @@ const LENS_THEME_COLORS: Record<TooltipTheme, [number, number, number, number]> 
   ocean: [0.22, 0.74, 0.97, 1.0],
 };
 
+export interface TooltipSelectedElement {
+  symbol: string;
+  name: string;
+  atomicNumber: number;
+  subshellLabel: string;
+  roleLabel: string;
+  outerElectrons: number;
+  outerCapacity: number;
+  valence: number;
+  color: [number, number, number];
+}
+
 export interface TooltipContent {
   theme: TooltipTheme;
   badge: string;
   title: string;
   body: string;
   meta?: string;
+  element?: TooltipSelectedElement;
   targetType?: 'air' | 'ocean';
   targetIdx?: number;
   targetX?: number;
@@ -127,6 +140,28 @@ function formatFormula(counts: Map<string, number>): string {
     return a.localeCompare(b);
   });
   return keys.map((k) => `${k}${toSubscript(counts.get(k) ?? 1)}`).join('');
+}
+
+function buildSelectedElement(el: Element2D): TooltipSelectedElement {
+  const roleLabel =
+    el.valence === 0
+      ? 'Noble gas'
+      : el.role === 0
+        ? `Covalent (${el.valence} ${el.valence === 1 ? 'bond' : 'bonds'})`
+        : el.role > 0
+          ? `Donor (+${el.valence})`
+          : `Acceptor (-${el.valence})`;
+  return {
+    symbol: getElementSymbol(el.atomicNumber),
+    name: getElementName(el.atomicNumber),
+    atomicNumber: el.atomicNumber,
+    subshellLabel: el.subshellLabel,
+    roleLabel,
+    outerElectrons: el.outerElectrons,
+    outerCapacity: el.outerCapacity,
+    valence: el.valence,
+    color: el.color,
+  };
 }
 
 const OCEAN_ROLE_NAMES = [
@@ -281,7 +316,8 @@ export function analyzeReactionAt(
     const els = snap.elements;
     const c0 = Math.max(0, Math.min(els.length - 1, Math.floor(p0[6])));
     const el0 = els[c0];
-    const sym0 = getElementSymbol(el0.atomicNumber);
+    const selectedElement = buildSelectedElement(el0);
+    const sym0 = selectedElement.symbol;
     const valVec = snap.valence[bestAir] ?? [0, 0, 0, 0];
     const atomLoad = (valVec[0] ?? 0) + (valVec[1] ?? 0) + (valVec[2] ?? 0);
 
@@ -444,6 +480,7 @@ export function analyzeReactionAt(
         title: `${badge === 'HALOGEN TOXIN' ? 'Toxic' : 'Catalyzed'} ${radicalSuffix}`,
         body,
         meta,
+        element: selectedElement,
         targetType: 'air',
         targetIdx: bestAir,
         targetX,
@@ -505,7 +542,8 @@ export function analyzeReactionAt(
         badge,
         title,
         body,
-        meta: `Anchor: Z=${el0.atomicNumber} ${sym0} [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby pairs: ${directInteract.length}`,
+        meta: `Shell [${el0.outerElectrons}/${el0.outerCapacity}] · Valence load ${atomLoad.toFixed(2)}/${el0.valence} · Nearby pairs: ${directInteract.length}`,
+        element: selectedElement,
         targetType: 'air',
         targetIdx: bestAir,
         targetX,
@@ -518,11 +556,12 @@ export function analyzeReactionAt(
       return {
         theme: 'chem',
         badge: inert ? 'NOBLE GAS' : 'FREE ATOM',
-        title: `${sym0} Atom (Z=${el0.atomicNumber})`,
+        title: `${selectedElement.name} (${sym0}) Atom`,
         body: inert
           ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents with filled outer shell.`
           : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'}, drifting until meeting a reaction partner.`,
         meta: `Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localAirIdx.length - 1)}`,
+        element: selectedElement,
         targetType: 'air',
         targetIdx: bestAir,
         targetX,
@@ -1120,9 +1159,19 @@ export class TooltipManager {
     if (!el) return;
 
     if (!repositionOnly) {
+      const elHtml = info.element
+        ? `<div class="tip-element">` +
+          `<span class="tip-el-swatch" style="background:rgb(${Math.round(Math.max(0, Math.min(1, info.element.color[0])) * 255)},${Math.round(Math.max(0, Math.min(1, info.element.color[1])) * 255)},${Math.round(Math.max(0, Math.min(1, info.element.color[2])) * 255)})"></span>` +
+          `<span class="tip-el-label">Element:</span> ` +
+          `<strong class="tip-el-name">${escapeHtml(info.element.name)} (${escapeHtml(info.element.symbol)})</strong>` +
+          `<span class="tip-el-detail">Z=${info.element.atomicNumber} · ${escapeHtml(info.element.subshellLabel)} · ${escapeHtml(info.element.roleLabel)}</span>` +
+          `</div>`
+        : '';
+
       const html =
         `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span></div>` +
         `<div class="tip-title">${escapeHtml(info.title)}</div>` +
+        elHtml +
         `<div class="tip-body">${escapeHtml(info.body)}</div>` +
         (info.meta ? `<div class="tip-meta">${escapeHtml(info.meta)}</div>` : '');
 

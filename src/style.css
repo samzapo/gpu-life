@@ -301,6 +301,42 @@ canvas {
   margin-bottom: 3px;
 }
 
+#hoverTooltip .tip-element {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 0 0 5px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+#hoverTooltip .tip-el-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+#hoverTooltip .tip-el-label {
+  color: #8ea7c4;
+}
+
+#hoverTooltip .tip-el-name {
+  color: #f4f8ff;
+  font-weight: 700;
+}
+
+#hoverTooltip .tip-el-detail {
+  color: #a8bfd8;
+  font-size: 10px;
+}
+
 #hoverTooltip .tip-body {
   color: #cdd9e8;
 }
