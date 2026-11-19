@@ -24,6 +24,7 @@ export interface HoverInspectConfig {
   getBeta: () => number;
   getTemperature: () => number;
   getScale: () => number;
+  getOceanMask?: (unitVec: [number, number, number]) => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
 
@@ -829,18 +830,24 @@ export function analyzeReactionAt(
         ? 'Late-Complex'
         : 'Balanced';
   const strategyGeneStr = `${strategyLabel} (gene ${Math.round(blob.avgEncapGene)}/15)`;
+  const ocMask = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
+  const overLand = ocMask < 0.42;
+  const habitatTag = overLand ? 'Terrestrial (calm · +chem · -desicc)' : 'Marine (currents)';
 
   if (bestPhase === 2) {
     const theme: TooltipTheme = poi > 0.25 ? 'toxic' : 'lipid';
     const badge = 'LIPID BILAYER · PROTOCELL MEMBRANE';
     const title = `Biogenic Lipid Shell (${blob.lipidCount} lipids · ${blob.cytoplasmCount} internals, ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'color' : 'colors'})`;
-    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.`;
+    const landNote = overLand
+      ? ' Sheltering internals over calm land by cutting evaporative desiccation cost while harvesting abundant air chemistry.'
+      : '';
+    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${landNote}`;
     return {
       theme,
       badge,
       title,
       body,
-      meta: `Lipid #${bestIdx} (${sym0}) · Host #${bestBioSp} · Encap ${strategyGeneStr} · Shell E=${(ls[0] ?? 0).toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
+      meta: `Lipid #${bestIdx} (${sym0}) · Host #${bestBioSp} · ${habitatTag} · Encap ${strategyGeneStr} · Shell E=${(ls[0] ?? 0).toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 2,
       targetIdx: bestIdx,
@@ -894,15 +901,18 @@ export function analyzeReactionAt(
       theme = 'anabolic';
       badge = blob.encapsulated ? 'ENCAPSULATED PRODUCER PROTOCELL' : 'PRODUCER BLOB · AUTOTROPH';
       title = `Producer ${blob.encapsulated ? 'Protocell' : 'Blob'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
-      statusDesc = `Calm cohesive ${blob.formula} colony (${encapTag}, ${strategyGeneStr}; coh=${blob.avgCoh.toFixed(2)}, solar=${Math.round(blob.avgSolarFrac * 100)}%) fixing C/H/O/S atoms across sunlight & upwelling.`;
+      statusDesc = `Calm cohesive ${blob.formula} colony (${encapTag}, ${strategyGeneStr}; coh=${blob.avgCoh.toFixed(2)}, solar=${Math.round(blob.avgSolarFrac * 100)}%) fixing C/H/O/S atoms across sunlight, currents & atmospheric chemistry.`;
     }
 
+    const landDetail = overLand
+      ? ' Roaming calm current-free terrain to forage atmospheric chemicals at a modest desiccation cost.'
+      : '';
     return {
       theme,
       badge,
       title,
-      body: statusDesc,
-      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
+      body: `${statusDesc}${landDetail}`,
+      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,
       targetIdx: bestIdx,

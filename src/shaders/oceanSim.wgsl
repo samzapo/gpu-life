@@ -224,31 +224,13 @@ fn integrateOceanParticle(
         clamp(0.75 + 0.35 * oceanState.x, 0.45, 1.15),
         myPhase == 2u,
     );
+    let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
+    // Zero ocean-current sweep over land (cTarget == 0), with gentle substrate surface grip
+    let substrateDrag = mix(1.0, 0.94, landFrac);
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
     let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
     let vRel = vTang - cTarget;
-    p.vel = cTarget + vRel * (sim.friction * toxicDrag) + (netForce * vitality + linBioSteer) * sim.dt;
-
-    // Continental coastline containment using smoothed ocean mask gradient
-    if (oc.w < 0.48) {
-        let dAng = 0.025;
-        let mE = sampleOceanTexture(oceanTex, normalize(p.pos + dAng * eEast)).w;
-        let mW = sampleOceanTexture(oceanTex, normalize(p.pos - dAng * eEast)).w;
-        let mN = sampleOceanTexture(oceanTex, normalize(p.pos + dAng * eNorth)).w;
-        let mS = sampleOceanTexture(oceanTex, normalize(p.pos - dAng * eNorth)).w;
-        let gradM = (mE - mW) * eEast + (mN - mS) * eNorth;
-        let gLen = length(gradM);
-        if (gLen > 1e-4) {
-            let inward = gradM / gLen;
-            let vn = dot(p.vel, inward);
-            if (vn < 0.0) {
-                p.vel -= 1.55 * vn * inward;
-            }
-            p.vel += inward * ((0.52 - oc.w) * 4.5 + 0.14);
-        } else {
-            p.vel *= 0.85;
-        }
-    }
+    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + (netForce * vitality + linBioSteer) * sim.dt;
 
     p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 

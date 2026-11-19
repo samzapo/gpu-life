@@ -544,7 +544,7 @@ export const lifeOpacityBinding = withTooltip(
     ...opacitySliderParams,
   }),
   'Ocean Life Opacity',
-  'Opacity (0%–100%) of Ocean Life organisms rendered over marine basins.',
+  'Opacity (0%–100%) of emergent Life organisms & protocell lipid bilayers across oceans and continents.',
 );
 export const coastlinesBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'coastlines'),
@@ -556,7 +556,7 @@ export const bioLinkBinding = withTooltip(
     label: 'bioChem',
   }),
   'Bio-Chemistry Exchange',
-  'Enable conserved metabolic cycling across Chemistry (0), heterogeneous Particle Life blobs (1), and deferred C/H/O amphiphilic lipid bilayers (2) with evolvable encapsulation timing.',
+  'Enable conserved metabolic cycling across Chemistry (0), heterogeneous blobs migrating over oceans and land (1), and lipid bilayers (2).',
 );
 export const bioRateBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'bioRate', {

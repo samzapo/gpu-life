@@ -142,8 +142,8 @@ async function resolveLatestGfsCycle(nowMs: number): Promise<{
   cycleLabel: string;
   validLabel: string;
 }> {
-  // GFS 1.0 deg runs at 00/06/12/18 UTC and usually lands on S3 ~3.5-4h after cycle init.
-  const latestReadyMs = nowMs - 3.5 * 3600 * 1000;
+  // GFS 1.0 deg runs at 00/06/12/18 UTC and usually lands on S3 ~3.5-4.2h after cycle init.
+  const latestReadyMs = nowMs - 4.25 * 3600 * 1000;
   const candidateDate = new Date(latestReadyMs);
   const startCycHour = Math.floor(candidateDate.getUTCHours() / 6) * 6;
   const baseUtcMs = Date.UTC(

@@ -945,6 +945,7 @@ declare global {
         avgBioEnergy: number;
         oceanBioCount: number;
         landBioCount: number;
+        terrestrialBlobs: number;
         blobCount: number;
         multiSpeciesBlobs: number;
         complexBlobs: number;
@@ -1170,6 +1171,7 @@ async function computeWorldStats() {
       avgBioEnergy: 0,
       oceanBioCount: 0,
       landBioCount: 0,
+      terrestrialBlobs: 0,
       blobCount: 0,
       multiSpeciesBlobs: 0,
       complexBlobs: 0,
@@ -1289,6 +1291,7 @@ async function computeWorldStats() {
   const emergentRoles = { ...emptyRoles };
   const encapStrategies = { ...emptyStrategies };
   let blobCount = 0;
+  let terrestrialBlobs = 0;
   let multiSpeciesBlobs = 0;
   let complexBlobs = 0;
   let encapsulatedBlobs = 0;
@@ -1390,6 +1393,22 @@ async function computeWorldStats() {
     else if (summary.encapStrategy === 'balanced') encapStrategies.balancedBlobs++;
     else encapStrategies.lateComplexBlobs++;
 
+    if (currentOceanGrid) {
+      let landMembers = 0;
+      for (const id of comp) {
+        const p = data.particles[id];
+        const z = Math.max(-1, Math.min(1, p[2] ?? 0));
+        const latDeg = Math.asin(z) * RAD2DEG;
+        const lonDeg = Math.atan2(p[1] ?? 0, p[0] ?? 1) * RAD2DEG;
+        if (sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3] < 0.42) {
+          landMembers++;
+        }
+      }
+      if (landMembers > 0 && landMembers >= comp.length * 0.5) {
+        terrestrialBlobs++;
+      }
+    }
+
     if (summary.role === 'producer') {
       emergentRoles.producerBlobs++;
       emergentRoles.producerParticles += comp.length;
@@ -1427,6 +1446,7 @@ async function computeWorldStats() {
     avgBioEnergy: bioCount > 0 ? bioEnergySum / bioCount : 0,
     oceanBioCount,
     landBioCount,
+    terrestrialBlobs,
     blobCount,
     multiSpeciesBlobs,
     complexBlobs,
@@ -1544,6 +1564,13 @@ const tooltipManager = new TooltipManager({
   getBeta: () => optionParams.beta,
   getTemperature: () => optionParams.temperature,
   getScale: () => viewState.scale,
+  getOceanMask: (u) => {
+    if (!currentOceanGrid) return 1;
+    const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+    const latDeg = Math.asin(z) * (180 / Math.PI);
+    const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+    return sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
+  },
   requestSnapshot: captureHoverSnapshot,
 });
 
@@ -2404,7 +2431,7 @@ function startWorld() {
       for (let t = 0; t < 60; t++) {
         const candLon = (rng() - 0.5) * 360;
         const candLat = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
-        if (sampleOceanLonLat(currentOceanGrid, candLon, candLat)[3] >= 0.58) {
+        if (sampleOceanLonLat(currentOceanGrid, candLon, candLat)[3] >= 0.50) {
           lonDeg = candLon;
           latDeg = candLat;
           break;

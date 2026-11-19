@@ -788,14 +788,14 @@ fn finalizeBioUnified(
     let dtBio = bio.dt * rate;
     let solar = evalSolarInsolation(pos);
     let upwell = evalCoastalUpwelling(oc);
-    let inOcean = oc.w >= 0.42;
+    let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let frameU = u32(max(bio.frame, 0.0)) + u32(max(bio.seedHash, 0.0));
     let nChem = max(u32(bio.chemColours), 1u);
     let nBio = max(u32(bio.bioColours), 1u);
 
     if (myPhase == 0u) {
         let chemForce = finalizeChemBioForce(acc, bio);
-        if (!isBiogenicElement(atomicNum, valence) || !inOcean) {
+        if (!isBiogenicElement(atomicNum, valence)) {
             return BioStepResult(vec4f(0.0), chemForce);
         }
 
@@ -819,8 +819,9 @@ fn finalizeBioUnified(
             }
         }
         let bondEase = 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0));
+        let envMedia = mix(0.55 + 0.85 * upwell, 0.44 + 0.22 * clamp(acc.nearLipidCount * 0.25, 0.0, 1.0), landFrac);
 
-        // 0A. Deferred biogenic lipid bilayer synthesis (`0 -> 2`, strictly C/H/O only)
+        // 0A. Deferred biogenic lipid bilayer synthesis (`0 -> 2`, strictly C/H/O only; works across ocean and land)
         let kinCoherence = length(vec2f(acc.adjKinCos, acc.adjKinSin)) / max(acc.adjKinW, 1e-4);
         if (isLipidElement(atomicNum, valence) && adjCount >= 3.0 && kinCoherence > 0.80) {
             let matureDeNovo = (adjColors >= encapReqColors(adjGene)) && (adjCount >= encapReqSize(adjGene)) && (adjAvgE > 0.54);
@@ -830,7 +831,7 @@ fn finalizeBioUnified(
             if ((matureDeNovo || expandExisting) && lipidHeadroom > 0.05) {
                 let zipBoost = select(1.0, 1.65, expandExisting && acc.nearLipidCount < 5.0);
                 let pLipid = clamp(
-                    0.85 * zipBoost * solar * (0.55 + 0.85 * upwell) * clamp(max(adjAvgE, avgLipidE), 0.5, 1.4) * lipidHeadroom * bondEase * dtBio,
+                    0.85 * zipBoost * solar * envMedia * clamp(max(adjAvgE, avgLipidE), 0.5, 1.4) * lipidHeadroom * bondEase * dtBio,
                     0.0,
                     0.16,
                 );
@@ -866,7 +867,7 @@ fn finalizeBioUnified(
             if (encapHeadroom > 0.02 && max(adjAvgE, avgLipidE) > 0.52) {
                 let fixPow = clamp(max(acc.nearFixer, acc.nearLipidCount * 0.6), 0.4, 3.0);
                 let pImport = clamp(
-                    0.32 * solar * (0.55 + 0.85 * upwell) * fixPow * encapHeadroom * bondEase * dtBio,
+                    0.32 * solar * envMedia * fixPow * encapHeadroom * bondEase * dtBio,
                     0.0,
                     0.075,
                 );
@@ -889,7 +890,7 @@ fn finalizeBioUnified(
             if (crowdHeadroom > 0.01) {
                 let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
                 let pFix = clamp(
-                    0.36 * solar * (0.55 + 0.85 * upwell) * min(acc.nearFixer, 3.0) * elemAffinity * crowdHeadroom * bondEase * dtBio,
+                    0.36 * solar * envMedia * min(acc.nearFixer, 3.0) * elemAffinity * crowdHeadroom * bondEase * dtBio,
                     0.0,
                     0.085,
                 );
@@ -960,13 +961,13 @@ fn finalizeBioUnified(
 
         let upkeep = select(0.55, 0.055, acc.blobCount >= 1.0 || acc.blobLipidCount >= 2.0);
         let poisonPenalty = 0.24 * poi;
-        let landPenalty = select(0.45, 0.0, oc.w >= 0.38);
+        let landPenalty = 0.045 * landFrac;
         let nextEnergy = clamp(eDiffused - (upkeep + poisonPenalty + landPenalty) * dtVit, 0.02, 1.45);
 
         let hostColors = countOneBits(acc.blobSpeciesMask);
         let simpleHostStress = (acc.blobCount >= 1.0 && hostColors <= 2u && acc.blobLipidCount >= 2.0);
         let orphanStress = (acc.blobCount < 0.5 && nextEnergy < 0.52);
-        if (nextEnergy <= 0.14 || poi >= 0.85 || oc.w < 0.30 || orphanStress || simpleHostStress) {
+        if (nextEnergy <= 0.14 || poi >= 0.85 || orphanStress || simpleHostStress) {
             let pDissolve = select(clamp(0.65 * dtBio, 0.0, 0.18), clamp(2.4 * dtBio, 0.0, 0.35), simpleHostStress);
             if (hashFloat(pi, frameU, 31u) < pDissolve) {
                 return BioStepResult(
@@ -1060,17 +1061,18 @@ fn finalizeBioUnified(
         nextKin = wrapAngle(myKin + jitter);
     }
 
-    let oceanFactor = select(0.0, 1.0, inOcean);
-    let solarGain = 0.56 * solar * (0.55 + 0.85 * upwell) * autoCap * oceanFactor;
+    let moistureFactor = mix(1.0, 0.74 + 0.16 * membraneShield, landFrac);
+    let solarGain = 0.56 * solar * mix(0.55 + 0.85 * upwell, 0.55, landFrac) * autoCap * moistureFactor;
     let haloGain = select(0.0, 0.24 * min(acc.nearHalogen, 2.5) * haloTol, haloTol > 0.52);
     let detritusGain = 0.26 * min(acc.nearStressedBio, 2.5) * decompCap;
     let grazeEnvGain = 0.34 * min(acc.nearForeignPrey, 2.5) * predCap;
-    let chemBonus = 0.08 * acc.dE * normChem;
+    let chemBonus = 0.24 * acc.dE * normChem * (1.0 + 0.35 * landFrac);
     let basalBurn = (0.13 + 0.11 * motility * motility + 0.04 * avgAsym) * (1.0 - 0.14 * membraneShield);
     let foreignBio = max(0.0, acc.nearTotalBio - acc.blobCount);
     let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) + 0.020 * max(0.0, acc.blobCount - 56.0);
     let poisonPenalty = 0.28 * poi * (1.0 - 0.65 * clamp(haloTol - 0.35, 0.0, 1.0));
-    let landPenalty = select(0.38, 0.0, oc.w >= 0.38);
+    let desiccationShield = 0.55 * membraneShield;
+    let landPenalty = 0.075 * landFrac * (1.0 - desiccationShield);
 
     let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty;
@@ -1112,7 +1114,7 @@ fn finalizeBioUnified(
         smoothstep(0.45, 0.14, nextEnergy) * 0.95 +
         smoothstep(0.24, 0.78, poi) * 0.80 +
         smoothstep(14.0, 28.0, foreignBio) * 0.55 +
-        smoothstep(0.44, 0.28, oc.w) * 1.0,
+        landFrac * 0.12,
         0.0,
         1.5,
     );
@@ -1120,7 +1122,7 @@ fn finalizeBioUnified(
         let pDecomp = clamp(0.55 * stress * min(acc.nearDecompPower, 3.0) * dtBio, 0.0, 0.105);
         if (hashFloat(pi, frameU, 22u) < pDecomp) {
             let decRoll = hashFloat(pi, frameU, 23u);
-            if (decRoll < 0.80 || !inOcean) {
+            if (decRoll < 0.80) {
                 return BioStepResult(
                     vec4f(0.0),
                     vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.85, -0.85)),
@@ -1135,8 +1137,8 @@ fn finalizeBioUnified(
         }
     }
 
-    // Natural senescence / stranding turnover back to Chemistry (phase 1 -> 0)
-    if (nextEnergy <= 0.08 || poi >= 0.90 || oc.w < 0.30) {
+    // Natural senescence / turnover back to Chemistry (phase 1 -> 0)
+    if (nextEnergy <= 0.08 || poi >= 0.90) {
         let pDecay = clamp(0.45 * dtBio, 0.0, 0.14);
         if (hashFloat(pi, frameU, 24u) < pDecay) {
             return BioStepResult(
