@@ -4,7 +4,6 @@ import {
   type BindingParams,
   type FolderApi,
 } from '@tweakpane/core';
-import { generateRandomSeed } from './matrix';
 import {
   computeAbundanceDistribution,
   getElement2D,
@@ -106,8 +105,8 @@ const defaultExchangeDrive = resolveNumber('exchangeDrive', effectiveCachedConfi
 const defaultShearBreak = resolveNumber('shearBreak', effectiveCachedConfig?.air?.shearBreak, FACTORY_DEFAULTS.air.shearBreak, 0);
 const defaultShearFloor = resolveNumber('shearFloor', effectiveCachedConfig?.air?.shearFloor, FACTORY_DEFAULTS.air.shearFloor, 0);
 const defaultSeed = urlParams.has('seed')
-  ? validateURLParam('seed', generateRandomSeed())
-  : (effectiveCachedConfig?.seed ?? generateRandomSeed());
+  ? validateURLParam('seed', FACTORY_DEFAULTS.seed)
+  : (effectiveCachedConfig?.seed ?? FACTORY_DEFAULTS.seed);
 
 const urlProj = validateURLParam('projection', '');
 const initialProjection: ProjectionId =
@@ -947,7 +946,7 @@ export function buildFactoryConfig(seed: string, oceanSeed: string): SimConfigV1
     view: {
       rotate: [...PROJECTIONS.orthographic.defaultRotate],
       pan: [0, 0],
-      scale: 586,
+      scale: 423,
     },
   };
 }

@@ -9,9 +9,11 @@ export const CONFIG_STORAGE_KEY = 'complexLife:config:v1';
 
 export const FACTORY_DEFAULTS = {
   engine: 'prefixSum',
-  particles: 28000,
+  particles: 20000,
   colours: 14,
   cells: 4096,
+  seed: '19825834',
+  oceanSeed: '211716319',
   air: {
     r: 12,
     beta: 0.4,
@@ -47,13 +49,13 @@ export const FACTORY_DEFAULTS = {
     windLevel: 'surface' as WindLevelId,
     vortex: true,
     windStrength: 1.0,
-    windLines: 0.2,
-    windColors: 0.2,
-    chemOpacity: 1.0,
+    windLines: 0.15,
+    windColors: 0.05,
+    chemOpacity: 0.6,
     oceanMix: true,
-    oceanStrength: 1.0,
-    oceanLines: 0.2,
-    oceanColors: 0.2,
+    oceanStrength: 0.85,
+    oceanLines: 0.5,
+    oceanColors: 0.05,
     tempColors: 0.2,
     localTemp: true,
     tempStrength: 1.0,
@@ -539,7 +541,7 @@ export function buildUrlPartsFromConfig(
   const r = cfg.view?.rotate ?? PROJECTIONS[proj].defaultRotate;
   const lon = (-r[0]).toFixed(2);
   const lat = (-r[1]).toFixed(2);
-  const sc = Math.round(cfg.view?.scale ?? 586);
+  const sc = Math.round(cfg.view?.scale ?? 423);
 
   const hash =
     viewLayer === 'ocean'

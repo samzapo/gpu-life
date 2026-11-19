@@ -33,7 +33,7 @@ export const PROJECTIONS: Record<ProjectionId, ProjectionSpec> = {
     shortCode: 'O',
     label: 'Orthographic (O)',
     shaderType: 0,
-    defaultRotate: [36.25, -34.05, 0],
+    defaultRotate: [-124.71, -8.3, 0],
     sphericalDrag: true,
   },
   atlantis: {
@@ -316,7 +316,7 @@ export function parseNullschoolHash(hash: string): ParsedNullschoolHash {
         result.projection = candidate;
         const nums = m[2].split(',').map(Number);
         if (nums.length >= 2 && nums.every(Number.isFinite)) {
-          result.orientation = [nums[0], nums[1], nums[2] ?? 586];
+          result.orientation = [nums[0], nums[1], nums[2] ?? 423];
         }
       }
     } else if (part in PROJECTIONS) {

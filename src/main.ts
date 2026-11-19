@@ -141,6 +141,7 @@ import { setMouseToolMode } from './input';
 import {
   buildUrlPartsFromConfig,
   clearCachedConfig,
+  FACTORY_DEFAULTS,
   parseConfigInput,
   saveCachedConfig,
   type SimConfigV1,
@@ -213,8 +214,8 @@ const cachedBootCfg = getCachedConfig();
 const urlOceanSeed = new URLSearchParams(window.location.search).get('oceanSeed');
 let oceanSeed =
   urlOceanSeed ??
-  (hasExplicitUrlConfig ? generateRandomSeed() : cachedBootCfg?.oceanSeed) ??
-  generateRandomSeed();
+  (hasExplicitUrlConfig ? FACTORY_DEFAULTS.oceanSeed : cachedBootCfg?.oceanSeed) ??
+  FACTORY_DEFAULTS.oceanSeed;
 let oceanMatrixData: Float32Array<ArrayBuffer> = new Float32Array(0);
 
 function computeBioSeedHash(seed: string, oSeed: string): number {
@@ -366,7 +367,7 @@ const initScale =
     : useCachedView && typeof cachedBootCfg?.view?.scale === 'number'
       ? cachedBootCfg.view.scale
       : earthParams.projection === 'orthographic'
-        ? Math.round(586 * Math.min(window.innerWidth / 1280, window.innerHeight / 800) || 586)
+        ? Math.round(423 * Math.min(window.innerWidth / 1280, window.innerHeight / 800) || 423)
         : fitScaleForProjection(
             earthParams.projection,
             initSpec.defaultRotate,
@@ -730,7 +731,7 @@ async function resetToFactoryDefaults(): Promise<SimConfigV1> {
   }
   clearCachedConfig();
   try {
-    const factory = buildFactoryConfig(generateRandomSeed(), generateRandomSeed());
+    const factory = buildFactoryConfig(FACTORY_DEFAULTS.seed, FACTORY_DEFAULTS.oceanSeed);
     const res = await importConfiguration(factory);
     if (configSaveTimer !== undefined) {
       window.clearTimeout(configSaveTimer);
@@ -3987,7 +3988,7 @@ resetViewBtn.on('click', () => {
   viewState.pan = [0, 0];
   viewState.scale = Math.max(
     140,
-    Math.round(586 * Math.min(viewState.width / 1280, viewState.height / 800) || 586),
+    Math.round(423 * Math.min(viewState.width / 1280, viewState.height / 800) || 423),
   );
   updateProjectionState();
 });
