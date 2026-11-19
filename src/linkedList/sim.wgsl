@@ -21,6 +21,7 @@ struct LinkedList {
 @group(0) @binding(11) var<storage, read> heads: HeadsRead;
 @group(0) @binding(12) var<storage, read> linkedList: LinkedList;
 @group(0) @binding(13) var tempTex: texture_2d<f32>;
+@group(0) @binding(14) var uvTex: texture_2d<f32>;
 
 fn getChemCellForce(
     pi: u32,
@@ -187,11 +188,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bReact = bioForce[pi];
     let actGlow = unpackActGlow(bReact.w);
     let airTherm = evalAirTempChemFactors(tSample.x, localTempScale);
-    let actScale = actGlow.x * airTherm.x;
+    let uvS = sampleUvTexture(uvTex, p.pos);
+    let uvChem = evalUvChemFactors(uvS.x, uniforms.uvParams.y);
+    let actScale = actGlow.x * airTherm.x * uvChem.x;
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
     let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
     let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
-    let res = getChemForce(pi, p, actScale, bioCleave, shearStress, airTherm.y);
+    let res = getChemForce(pi, p, actScale, bioCleave, shearStress, airTherm.y * uvChem.y);
     output[pi] = integrateParticle(
         pi,
         p,

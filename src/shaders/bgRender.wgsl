@@ -3,6 +3,7 @@
 @group(0) @binding(2) var watermanInvTex: texture_2d<f32>;
 @group(0) @binding(3) var oceanTex: texture_2d<f32>;
 @group(0) @binding(4) var tempTex: texture_2d<f32>;
+@group(0) @binding(5) var uvTex: texture_2d<f32>;
 
 struct BgOut {
     @builtin(position) pos: vec4f,
@@ -94,6 +95,12 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
             let tCol = mix(airTempColor(tS.x), sstTempColor(tS.y), seaW);
             baseCol = mix(baseCol, tCol, tempColOpacity);
         }
+    }
+
+    let uvColOpacity = clamp(uniforms.uvParams.x, 0.0, 1.0);
+    if (uvColOpacity > 0.001) {
+        let uvS = sampleUvTexture(uvTex, inv.xyz);
+        baseCol = mix(baseCol, uvIndexColor(uvS.x), uvColOpacity);
     }
 
     return vec4f(baseCol, 1.0);

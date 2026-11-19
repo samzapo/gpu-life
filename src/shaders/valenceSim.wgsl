@@ -401,6 +401,19 @@ fn evalAirTempChemFactors(tAirK: f32, localTempScale: f32) -> vec2f {
     return vec2f(mix(1.0, arrhAct, blend), mix(1.0, wellTherm, blend));
 }
 
+// Solar UV photolysis activation barrier lowering (x) and radical bond cleavage (y) from live CPC+GFS UVI.
+fn evalUvChemFactors(uviNow: f32, localUvScale: f32) -> vec2f {
+    let sc = clamp(localUvScale, 0.0, 2.0);
+    if (sc <= 0.001) {
+        return vec2f(1.0, 1.0);
+    }
+    let u = clamp(uviNow, 0.0, 22.0);
+    let actDrop = 1.0 - 0.18 * smoothstep(2.0, 14.0, u);
+    let wellLoosen = 1.0 - 0.10 * smoothstep(5.5, 16.5, u);
+    let blend = min(sc, 1.5);
+    return vec2f(mix(1.0, actDrop, blend), mix(1.0, wellLoosen, blend));
+}
+
 fn finalizeForces(acc: ForceAccum) -> ForceResult {
     let denom = 1.0 + acc.div;
     let netForce = (acc.bondForce + acc.repelForce) * (sim.rMax * sim.force / denom) + acc.avoidForce;

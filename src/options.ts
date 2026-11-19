@@ -193,6 +193,9 @@ export const earthParams = {
   tempColors: parseOpacityParam('tempColors', effectiveCachedConfig?.earth?.tempColors, FACTORY_DEFAULTS.earth.tempColors),
   localTemp: resolveBool('localTemp', effectiveCachedConfig?.earth?.localTemp, FACTORY_DEFAULTS.earth.localTemp),
   tempStrength: resolveNumber('tempStrength', effectiveCachedConfig?.earth?.tempStrength, FACTORY_DEFAULTS.earth.tempStrength),
+  uvColors: parseOpacityParam('uvColors', effectiveCachedConfig?.earth?.uvColors, FACTORY_DEFAULTS.earth.uvColors),
+  localUv: resolveBool('localUv', effectiveCachedConfig?.earth?.localUv, FACTORY_DEFAULTS.earth.localUv),
+  uvStrength: resolveNumber('uvStrength', effectiveCachedConfig?.earth?.uvStrength, FACTORY_DEFAULTS.earth.uvStrength),
   chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
   lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
   mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
@@ -206,6 +209,7 @@ export const earthParams = {
   windStatus: 'Loading GFS…',
   oceanStatus: 'Loading CoastWatch…',
   tempStatus: 'Loading Temp+SST…',
+  uvStatus: 'Loading CPC+GFS UV…',
 };
 setMouseToolMode(earthParams.mouseTool);
 
@@ -282,7 +286,7 @@ export function setBioLink(
   bioData[14] = earthParams.mineralLink && earthParams.mineralRate > 0 ? 1 : 0;
   bioData[15] = earthParams.mineralRate;
   bioData[16] = earthParams.localTemp ? earthParams.tempStrength : 0;
-  bioData[17] = 0;
+  bioData[17] = earthParams.localUv ? earthParams.uvStrength : 0;
   bioData[18] = 0;
   bioData[19] = 0;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
@@ -578,6 +582,31 @@ export const tempStrengthBinding = withTooltip(
   'Local Temperature Strength',
   'Multiplier scaling how strongly regional Earth temperature gradients modulate Chemistry, Life, and Minerals.',
 );
+export const uvColorsBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'uvColors', {
+    label: 'uvColors',
+    ...opacitySliderParams,
+  }),
+  'UV Index Map Opacity',
+  'Opacity (0%–100%) of live earth.nullschool.net NOAA CPC Ultraviolet Index (UVI 0–18) solar shading across Earth.',
+);
+export const localUvBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'localUv', {
+    label: 'localUv',
+  }),
+  'Local Solar UV Radiation Effects',
+  'Replace latitude bands with live NOAA CPC + GFS Ozone/Cloud UV radiation driving photosynthesis, lipid UV shielding, photolysis, and evaporites.',
+);
+export const uvStrengthBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'uvStrength', {
+    label: 'uvForce',
+    min: 0,
+    max: 2,
+    step: 0.05,
+  }),
+  'Local UV Strength',
+  'Multiplier scaling how strongly live Earth UV radiation drives fixation, photodamage, mutagenesis, and photochemistry.',
+);
 export const lifeOpacityBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'lifeOpacity', {
     label: 'lifeAlpha',
@@ -679,6 +708,14 @@ export const tempStatusBinding = withTooltip(
   }),
   'Temperature Data Source',
   'Live NOAA GFS Air Temperature (at wind altitude & 2m surface) and NOAA Geo-Polar Blended Sea Surface Temperature.',
+);
+export const uvStatusBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'uvStatus', {
+    readonly: true,
+    label: 'uvSrc',
+  }),
+  'UV Index Data Source',
+  'NOAA Climate Prediction Center Solar-Noon UVI v2 modulated by live NOAA GFS Total Ozone (TOZNE), Cloud Cover (TCDC), Elevation, and UTC Sun Angle.',
 );
 export const resetViewBtn = withTooltip(
   earthFolder.addButton({ title: 'Reset Globe View' }),
@@ -935,6 +972,9 @@ export function bindConfigPersistence(onChange: () => void) {
     tempColorsBinding,
     localTempBinding,
     tempStrengthBinding,
+    uvColorsBinding,
+    localUvBinding,
+    uvStrengthBinding,
     lifeOpacityBinding,
     mineralOpacityBinding,
     coastlinesBinding,

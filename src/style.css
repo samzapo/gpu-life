@@ -154,9 +154,15 @@ canvas {
   font-weight: 700;
 }
 
+#uvLevelBadge {
+  color: #e28eff;
+  font-weight: 700;
+}
+
 #windTimeBadge,
 #oceanTimeBadge,
-#tempTimeBadge {
+#tempTimeBadge,
+#uvTimeBadge {
   color: #9cb0c9;
   font-size: 11px;
 }
@@ -198,6 +204,22 @@ canvas {
     rgb(235, 167, 21) 82%,
     rgb(230, 71, 39) 93%,
     rgb(88, 27, 67) 100%
+  );
+}
+
+#uvScaleBar {
+  background: linear-gradient(
+    90deg,
+    rgb(0, 0, 15) 0%,
+    rgb(32, 32, 32) 1.5%,
+    rgb(62, 167, 45) 3.5%,
+    rgb(174, 224, 17) 14%,
+    rgb(255, 238, 0) 19.5%,
+    rgb(241, 139, 0) 34.7%,
+    rgb(229, 50, 16) 47.2%,
+    rgb(181, 103, 164) 61.1%,
+    rgb(209, 148, 234) 80.5%,
+    rgb(231, 225, 255) 100%
   );
 }
 
@@ -589,7 +611,7 @@ canvas {
 
   .tp-dfwv {
     z-index: 30 !important;
-    max-height: calc(100vh - 210px);
+    max-height: calc(100vh - 245px);
     width: min(260px, calc(100vw - 72px)) !important;
   }
 }

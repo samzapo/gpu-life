@@ -11,6 +11,7 @@ export interface UnifiedEngineRefs {
   windTexView: GPUTextureView;
   oceanTexView: GPUTextureView;
   tempTexView: GPUTextureView;
+  uvTexView: GPUTextureView;
   particleAmt: number;
   cellAmt: number;
 }

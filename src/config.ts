@@ -57,6 +57,9 @@ export const FACTORY_DEFAULTS = {
     tempColors: 0.2,
     localTemp: true,
     tempStrength: 1.0,
+    uvColors: 0.2,
+    localUv: true,
+    uvStrength: 1.0,
     lifeOpacity: 1.0,
     mineralOpacity: 1.0,
     coastlines: true,
@@ -119,6 +122,9 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'tempColors',
   'localTemp',
   'tempStrength',
+  'uvColors',
+  'localUv',
+  'uvStrength',
   'lifeOpacity',
   'mineralOpacity',
   'coastlines',
@@ -207,6 +213,9 @@ export interface SimConfigV1 {
     tempColors?: number;
     localTemp?: boolean;
     tempStrength?: number;
+    uvColors?: number;
+    localUv?: boolean;
+    uvStrength?: number;
     lifeOpacity?: number;
     mineralOpacity?: number;
     coastlines?: boolean;
@@ -366,6 +375,9 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.tempColors = opParam('tempColors') ?? FACTORY_DEFAULTS.earth.tempColors;
     if (sp.has('localTemp')) cfg.earth!.localTemp = sp.get('localTemp') !== 'false';
     cfg.earth!.tempStrength = numParam('tempStrength') ?? FACTORY_DEFAULTS.earth.tempStrength;
+    cfg.earth!.uvColors = opParam('uvColors') ?? FACTORY_DEFAULTS.earth.uvColors;
+    if (sp.has('localUv')) cfg.earth!.localUv = sp.get('localUv') !== 'false';
+    cfg.earth!.uvStrength = numParam('uvStrength') ?? FACTORY_DEFAULTS.earth.uvStrength;
     cfg.earth!.chemOpacity = opParam('chemOpacity') ?? FACTORY_DEFAULTS.earth.chemOpacity;
     cfg.earth!.lifeOpacity = opParam('lifeOpacity') ?? FACTORY_DEFAULTS.earth.lifeOpacity;
     cfg.earth!.mineralOpacity = opParam('mineralOpacity') ?? FACTORY_DEFAULTS.earth.mineralOpacity;
@@ -499,6 +511,9 @@ export function buildUrlPartsFromConfig(
     setNum('tempColors', e.tempColors, FACTORY_DEFAULTS.earth.tempColors);
     setBool('localTemp', e.localTemp, FACTORY_DEFAULTS.earth.localTemp);
     setNum('tempStrength', e.tempStrength, FACTORY_DEFAULTS.earth.tempStrength);
+    setNum('uvColors', e.uvColors, FACTORY_DEFAULTS.earth.uvColors);
+    setBool('localUv', e.localUv, FACTORY_DEFAULTS.earth.localUv);
+    setNum('uvStrength', e.uvStrength, FACTORY_DEFAULTS.earth.uvStrength);
     setNum('lifeOpacity', e.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity);
     setNum('mineralOpacity', e.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity);
     setBool('coastlines', e.coastlines, FACTORY_DEFAULTS.earth.coastlines);
@@ -614,6 +629,9 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     tempColors: unitOpacity(earthRaw.tempColors),
     localTemp: boolVal(earthRaw.localTemp),
     tempStrength: finiteNum(earthRaw.tempStrength),
+    uvColors: unitOpacity(earthRaw.uvColors),
+    localUv: boolVal(earthRaw.localUv),
+    uvStrength: finiteNum(earthRaw.uvStrength),
     lifeOpacity: unitOpacity(earthRaw.lifeOpacity),
     mineralOpacity: unitOpacity(earthRaw.mineralOpacity),
     coastlines: boolVal(earthRaw.coastlines),

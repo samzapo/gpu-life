@@ -54,6 +54,18 @@ import {
   sstColorRgb,
   type OceanGrid,
 } from './earth/oceanData';
+import {
+  buildGlobalUvTexture,
+  fetchLiveGfsUvFields,
+  loadCpcUvBaseline,
+  sampleUvLonLat,
+  solarAstronomyAtUtc,
+  clearSkyUviGfs,
+  cloudTransmission,
+  uvCategoryLabel,
+  type LocalUvSample,
+  type UvGrid,
+} from './earth/uvData';
 import { oceanGridToSampler, WindStreamRenderer } from './earth/windLines';
 import {
   hslToRgb,
@@ -83,6 +95,7 @@ import {
   initialUrlPan,
   lifeOpacityBinding,
   localTempBinding,
+  localUvBinding,
   mineralLinkBinding,
   mineralOpacityBinding,
   mineralRateBinding,
@@ -112,6 +125,9 @@ import {
   tempColorsBinding,
   tempStatusBinding,
   tempStrengthBinding,
+  uvColorsBinding,
+  uvStatusBinding,
+  uvStrengthBinding,
   tooltipsBinding,
   updatePeriodicLegend,
   viewLayerSelect,
@@ -161,6 +177,9 @@ const tempTimeBadge = document.getElementById('tempTimeBadge') as HTMLElement;
 const tempScaleMinLabel = document.getElementById('tempScaleMinLabel') as HTMLElement;
 const tempScaleBar = document.getElementById('tempScaleBar') as HTMLElement;
 const tempScaleMaxLabel = document.getElementById('tempScaleMaxLabel') as HTMLElement;
+const uvHudGroup = document.getElementById('uvHudGroup') as HTMLElement;
+const uvLevelBadge = document.getElementById('uvLevelBadge') as HTMLElement;
+const uvTimeBadge = document.getElementById('uvTimeBadge') as HTMLElement;
 const scaleMaxLabel = document.getElementById('scaleMaxLabel') as HTMLElement;
 
 const oceanCtx = oceanCanvas.getContext('2d', { willReadFrequently: true });
@@ -168,7 +187,7 @@ const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
 
-const uniformsFloats = 44; // 176 bytes
+const uniformsFloats = 48; // 192 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
 const simData = new Float32Array(simSize);
@@ -296,6 +315,7 @@ let bioWasActive = false;
 let windTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
 let tempTexture: GPUTexture | undefined;
+let uvTexture: GPUTexture | undefined;
 let watermanFwdTexture: GPUTexture | undefined;
 let watermanInvTexture: GPUTexture | undefined;
 
@@ -377,6 +397,8 @@ let d3Proj = buildConfiguredD3Projection(viewState);
 let earthFeatures: EarthTopoFeatures | null = null;
 let currentWindGrid: WindGrid = createEmptyWindGrid();
 let currentOceanGrid: OceanGrid | null = null;
+let currentUvGrid: UvGrid | null = null;
+let uvUtcOverrideMs: number | null = null;
 let watermanDirty = true;
 let mapDirty = true;
 let viewSignature = '';
@@ -425,7 +447,49 @@ function drawScaleBar(maxSpeed: number) {
 }
 
 let defaultTempBadgeText = 'GFS + NOAA SST · loading…';
+let defaultUvBadgeText = 'CPC + GFS O₃ · loading…';
 let pointerHoverTempActive = false;
+
+function sampleLocalUvAtUnit(u: [number, number, number]): LocalUvSample {
+  const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+  const latDeg = Math.asin(z) * (180 / Math.PI);
+  const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+  return sampleLocalUvAtLonLat(lonDeg, latDeg);
+}
+
+function sampleLocalUvAtLonLat(
+  lonDeg: number,
+  latDeg: number,
+  utcMs: number = uvUtcOverrideMs ?? Date.now(),
+): LocalUvSample {
+  if (currentUvGrid) {
+    return sampleUvLonLat(currentUvGrid, lonDeg, latDeg, utcMs);
+  }
+  const astro = solarAstronomyAtUtc(utcMs);
+  const d2r = Math.PI / 180;
+  const latRad = latDeg * d2r;
+  const cosZNoon = Math.sin(latRad) * astro.sinDecl + Math.cos(latRad) * astro.cosDecl;
+  const tstMin =
+    (((astro.utcHours * 60 + astro.eqTimeMin + 4 * lonDeg) % 1440) + 1440) % 1440;
+  const haRad = ((tstMin / 4 - 180) * d2r);
+  const cosZNow =
+    Math.sin(latRad) * astro.sinDecl + Math.cos(latRad) * astro.cosDecl * Math.cos(haRad);
+  const noonUvi = clearSkyUviGfs(cosZNoon, 300, 0) * cloudTransmission(0.25);
+  let uviNow = 0;
+  if (cosZNow > 0) {
+    uviNow = noonUvi * Math.pow(cosZNow / Math.max(cosZNoon, 0.04), 2.15);
+  } else if (cosZNow > -0.055) {
+    const twi = (cosZNow + 0.055) / 0.055;
+    uviNow = Math.min(0.24, noonUvi * 0.025) * twi * twi;
+  }
+  return {
+    uviNow,
+    uviNoon: noonUvi,
+    category: uvCategoryLabel(uviNow),
+    ozoneDU: 300,
+    cloudPct: 25,
+  };
+}
 
 function sampleLocalTempsAtUnit(u: [number, number, number]) {
   const z = Math.max(-1, Math.min(1, u[2] ?? 0));
@@ -497,13 +561,31 @@ function refreshTempHudBadges() {
   tempStatusBinding.refresh();
 }
 
+function refreshUvHudBadges() {
+  const utcDate = new Date(uvUtcOverrideMs ?? Date.now());
+  const hh = String(utcDate.getUTCHours()).padStart(2, '0');
+  const mm = String(utcDate.getUTCMinutes()).padStart(2, '0');
+  const srcTag = currentUvGrid?.isLive ? 'CPC + Live GFS O₃/Cloud' : 'CPC + GFS O₃';
+  defaultUvBadgeText = `${hh}:${mm}Z · ${srcTag}`;
+  if (!pointerHoverTempActive) {
+    uvTimeBadge.textContent = defaultUvBadgeText;
+  }
+  uvLevelBadge.textContent = 'UVI @ Surface';
+  earthParams.uvStatus = currentUvGrid
+    ? `${srcTag} (${currentUvGrid.isLive ? currentUvGrid.gfsRefTime : currentUvGrid.cpcRefTime.slice(0, 10)})`
+    : 'Solar Zenith Model';
+  uvStatusBinding.refresh();
+}
+
 function refreshHudVisibility() {
   const showAir = earthParams.viewLayer !== 'ocean';
   const showOcean = earthParams.viewLayer !== 'air';
   windHudGroup.style.display = showAir ? '' : 'none';
   oceanHudGroup.style.display = showOcean ? '' : 'none';
   tempHudGroup.style.display = '';
+  uvHudGroup.style.display = '';
   refreshTempHudBadges();
+  refreshUvHudBadges();
 }
 
 function refreshHudBadges(grid: WindGrid) {
@@ -617,6 +699,9 @@ function exportCurrentConfig(): SimConfigV1 {
       tempColors: earthParams.tempColors,
       localTemp: earthParams.localTemp,
       tempStrength: earthParams.tempStrength,
+      uvColors: earthParams.uvColors,
+      localUv: earthParams.localUv,
+      uvStrength: earthParams.uvStrength,
       lifeOpacity: earthParams.lifeOpacity,
       mineralOpacity: earthParams.mineralOpacity,
       coastlines: earthParams.coastlines,
@@ -788,6 +873,9 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.tempColors !== undefined) earthParams.tempColors = e.tempColors;
     if (e.localTemp !== undefined) earthParams.localTemp = e.localTemp;
     if (e.tempStrength !== undefined) earthParams.tempStrength = e.tempStrength;
+    if (e.uvColors !== undefined) earthParams.uvColors = e.uvColors;
+    if (e.localUv !== undefined) earthParams.localUv = e.localUv;
+    if (e.uvStrength !== undefined) earthParams.uvStrength = e.uvStrength;
     if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
     if (e.mineralOpacity !== undefined) earthParams.mineralOpacity = e.mineralOpacity;
     if (e.coastlines !== undefined) {
@@ -895,6 +983,23 @@ function uploadTempToGpu() {
   refreshTempHudBadges();
 }
 
+function uploadUvToGpu() {
+  if (!device || !uvTexture) return;
+  const texData = buildGlobalUvTexture(
+    currentUvGrid,
+    uvUtcOverrideMs ?? Date.now(),
+    GRID_TEX_W,
+    GRID_TEX_H,
+  );
+  device.queue.writeTexture(
+    { texture: uvTexture },
+    texData,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+  refreshUvHudBadges();
+}
+
 function uploadWindToGpu(grid: WindGrid) {
   if (!device || !windTexture) return;
   const texData = buildDivergenceFreeWind(grid, GRID_TEX_W, GRID_TEX_H);
@@ -946,6 +1051,16 @@ async function loadWindLevel(levelId: WindLevelId) {
       currentWindGrid = live;
       uploadWindToGpu(live);
       refreshHudBadges(live);
+      if (currentUvGrid) {
+        void fetchLiveGfsUvFields(currentUvGrid)
+          .then((liveUv) => {
+            currentUvGrid = liveUv;
+            uploadUvToGpu();
+          })
+          .catch(() => {
+            // Keep CPC + cached GFS ozone baseline
+          });
+      }
     }
   } catch {
     if (reqId === activeWindLoadId && !currentWindGrid.isLive && levelId === 'surface') {
@@ -1028,6 +1143,7 @@ declare global {
         oceanLines: number;
         oceanColors: number;
         tempColors: number;
+        uvColors: number;
         lifeOpacity: number;
         mineralOpacity: number;
       };
@@ -1039,10 +1155,15 @@ declare global {
       setWindColors: (val: boolean | number) => void;
       setWindLines: (val: boolean | number) => void;
       setTempColors: (val: boolean | number) => void;
+      setUvColors: (val: boolean | number) => void;
       getLocalTemp: () => boolean;
       setLocalTemp: (on: boolean) => void;
       getTempStrength: () => number;
       setTempStrength: (val: number) => void;
+      getLocalUv: () => boolean;
+      setLocalUv: (on: boolean) => void;
+      getUvStrength: () => number;
+      setUvStrength: (val: number) => void;
       getTempAtLonLat: (lonDeg: number, latDeg: number) => {
         airC: number;
         sfcAirC: number;
@@ -1057,6 +1178,15 @@ declare global {
         airRefTime: string;
         sstRefTime: string;
         sstSource: string;
+        isLive: boolean;
+      };
+      getUvAtLonLat: (lonDeg: number, latDeg: number, utcMs?: number) => LocalUvSample;
+      setUvUtcTime: (isoOrMs: string | number | null) => void;
+      getUvInfo: () => {
+        cpcRefTime: string;
+        gfsRefTime: string;
+        gfsValidTime: string;
+        source: string;
         isLive: boolean;
       };
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
@@ -1832,6 +1962,7 @@ const tooltipManager = new TooltipManager({
     return sampleWindLonLat(currentWindGrid, lonDeg, latDeg)[2] * earthParams.windStrength;
   },
   getLocalTemps: (u) => sampleLocalTempsAtUnit(u),
+  getLocalUv: (u) => sampleLocalUvAtUnit(u),
   getMineralOpacity: () => earthParams.mineralOpacity,
   requestSnapshot: captureHoverSnapshot,
 });
@@ -1843,6 +1974,7 @@ canvas.addEventListener('pointermove', (ev) => {
     if (pointerHoverTempActive) {
       pointerHoverTempActive = false;
       tempTimeBadge.textContent = defaultTempBadgeText;
+      uvTimeBadge.textContent = defaultUvBadgeText;
     }
     return;
   }
@@ -1851,6 +1983,7 @@ canvas.addEventListener('pointermove', (ev) => {
     if (pointerHoverTempActive) {
       pointerHoverTempActive = false;
       tempTimeBadge.textContent = defaultTempBadgeText;
+      uvTimeBadge.textContent = defaultUvBadgeText;
     }
     return;
   }
@@ -1860,12 +1993,15 @@ canvas.addEventListener('pointermove', (ev) => {
   const sstPart =
     t.sstC !== null ? ` · SST ${t.sstC >= 0 ? '+' : ''}${t.sstC.toFixed(1)}°C` : '';
   tempTimeBadge.textContent = `${t.airLabel} ${aSign}${t.airC.toFixed(1)}°C${sstPart}`;
+  const uv = sampleLocalUvAtLonLat(ll[0], ll[1]);
+  uvTimeBadge.textContent = `UVI ${uv.uviNow.toFixed(1)} (${uv.category}) · Noon ${uv.uviNoon.toFixed(1)} · O₃ ${Math.round(uv.ozoneDU)} DU`;
 });
 
 canvas.addEventListener('pointerleave', () => {
   if (pointerHoverTempActive) {
     pointerHoverTempActive = false;
     tempTimeBadge.textContent = defaultTempBadgeText;
+    uvTimeBadge.textContent = defaultUvBadgeText;
   }
 });
 
@@ -1927,6 +2063,7 @@ window.complexLife = {
     oceanLines: earthParams.oceanLines,
     oceanColors: earthParams.oceanColors,
     tempColors: earthParams.tempColors,
+    uvColors: earthParams.uvColors,
     lifeOpacity: earthParams.lifeOpacity,
     mineralOpacity: earthParams.mineralOpacity,
   }),
@@ -1970,6 +2107,10 @@ window.complexLife = {
     earthParams.tempColors = clampOpacity(val);
     tempColorsBinding.refresh();
   },
+  setUvColors: (val: boolean | number) => {
+    earthParams.uvColors = clampOpacity(val);
+    uvColorsBinding.refresh();
+  },
   getLocalTemp: () => earthParams.localTemp,
   setLocalTemp: (on: boolean) => {
     earthParams.localTemp = on;
@@ -1982,6 +2123,18 @@ window.complexLife = {
     tempStrengthBinding.refresh();
     syncBioUniformState();
   },
+  getLocalUv: () => earthParams.localUv,
+  setLocalUv: (on: boolean) => {
+    earthParams.localUv = on;
+    localUvBinding.refresh();
+    syncBioUniformState();
+  },
+  getUvStrength: () => earthParams.uvStrength,
+  setUvStrength: (val: number) => {
+    earthParams.uvStrength = Math.max(0, Math.min(2, val));
+    uvStrengthBinding.refresh();
+    syncBioUniformState();
+  },
   getTempAtLonLat: (lonDeg: number, latDeg: number) =>
     sampleLocalTempsAtLonLat(lonDeg, latDeg),
   getTempInfo: () => ({
@@ -1991,6 +2144,26 @@ window.complexLife = {
     sstRefTime: currentOceanGrid?.sstRefTime ?? '',
     sstSource: currentOceanGrid?.sstSource ?? 'Climatology SST',
     isLive: currentWindGrid.isLive,
+  }),
+  getUvAtLonLat: (lonDeg: number, latDeg: number, utcMs?: number) =>
+    sampleLocalUvAtLonLat(lonDeg, latDeg, utcMs),
+  setUvUtcTime: (isoOrMs: string | number | null) => {
+    if (isoOrMs === null) {
+      uvUtcOverrideMs = null;
+    } else if (typeof isoOrMs === 'number' && Number.isFinite(isoOrMs)) {
+      uvUtcOverrideMs = isoOrMs;
+    } else if (typeof isoOrMs === 'string') {
+      const parsed = Date.parse(isoOrMs);
+      uvUtcOverrideMs = Number.isFinite(parsed) ? parsed : null;
+    }
+    uploadUvToGpu();
+  },
+  getUvInfo: () => ({
+    cpcRefTime: currentUvGrid?.cpcRefTime ?? '',
+    gfsRefTime: currentUvGrid?.gfsRefTime ?? '',
+    gfsValidTime: currentUvGrid?.gfsValidTime ?? '',
+    source: currentUvGrid?.source ?? 'Solar Zenith Model',
+    isLive: Boolean(currentUvGrid?.isLive),
   }),
   refreshTooltipSnapshot: async () => {
     const snap = await captureHoverSnapshot();
@@ -2089,6 +2262,7 @@ function syncCanvasDimensions() {
 }
 
 const oceanBootPromise = loadOceanCurrents().catch(() => null);
+const uvBootPromise = loadCpcUvBaseline().catch(() => null);
 
 (async () => {
   loadEarthFeatures()
@@ -2175,6 +2349,13 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     label: 'tempTexture',
   });
   uploadTempToGpu();
+  uvTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'uvTexture',
+  });
+  uploadUvToGpu();
   watermanFwdTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -2218,6 +2399,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
       { binding: 2, resource: watermanInvTexture.createView() },
       { binding: 3, resource: oceanTexture.createView() },
       { binding: 4, resource: tempTexture.createView() },
+      { binding: 5, resource: uvTexture.createView() },
     ],
   });
 
@@ -2386,7 +2568,10 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
   drawScaleBar(WIND_LEVELS[earthParams.windLevel].scaleMax);
   refreshHudVisibility();
 
-  const loadedOcean = await oceanBootPromise;
+  const [loadedOcean, loadedUv] = await Promise.all([
+    oceanBootPromise,
+    uvBootPromise,
+  ]);
   if (loadedOcean) {
     currentOceanGrid = loadedOcean;
     uploadOceanToGpu(loadedOcean);
@@ -2395,8 +2580,17 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     earthParams.oceanStatus = 'Ocean data unavailable';
     oceanStatusBinding.refresh();
   }
+  if (loadedUv) {
+    currentUvGrid = loadedUv;
+    uploadUvToGpu();
+  }
 
   startWorld();
+  window.setInterval(() => {
+    if (uvUtcOverrideMs === null) {
+      uploadUvToGpu();
+    }
+  }, 45_000);
   bindOptions(
     device,
     simData,
@@ -2617,6 +2811,7 @@ function startWorld() {
     !windTexture ||
     !oceanTexture ||
     !tempTexture ||
+    !uvTexture ||
     !watermanFwdTexture
   ) {
     return;
@@ -3113,6 +3308,7 @@ function startWorld() {
     windTexView: windTexture.createView(),
     oceanTexView: oceanTexture.createView(),
     tempTexView: tempTexture.createView(),
+    uvTexView: uvTexture.createView(),
     particleAmt,
     cellAmt: params.cells,
   };
@@ -3198,6 +3394,10 @@ function writeUniforms() {
   uniformData[42] = earthParams.localTemp ? earthParams.tempStrength : 0;
   uniformData[43] =
     earthParams.viewLayer === 'ocean' ? 1 : earthParams.viewLayer === 'air' ? 2 : 0;
+  uniformData[44] = earthParams.uvColors;
+  uniformData[45] = earthParams.localUv ? earthParams.uvStrength : 0;
+  uniformData[46] = 0;
+  uniformData[47] = 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
@@ -3625,6 +3825,20 @@ localTempBinding.on('change', () => {
 });
 
 tempStrengthBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+uvColorsBinding.on('change', () => {
+  // Picked up immediately by bgRender uniform
+});
+
+localUvBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+uvStrengthBinding.on('change', () => {
   if (suppressPaneEvents) return;
   syncBioUniformState();
 });

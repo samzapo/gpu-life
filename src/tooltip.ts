@@ -1,5 +1,6 @@
 import type * as d3Geo from 'd3-geo';
 import { lonLatToUnitVec } from './earth/projections';
+import type { LocalUvSample } from './earth/uvData';
 import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D';
 import type { ViewLayerMode } from './options';
 
@@ -36,6 +37,7 @@ export interface HoverInspectConfig {
   getOceanSpeedMs?: (unitVec: [number, number, number]) => number;
   getWindSpeedMs?: (unitVec: [number, number, number]) => number;
   getLocalTemps?: (unitVec: [number, number, number]) => LocalTempsSample | null;
+  getLocalUv?: (unitVec: [number, number, number]) => LocalUvSample | null;
   getMineralOpacity?: () => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
@@ -640,9 +642,15 @@ export function analyzeReactionAt(
     const [actScale, glow] = unpackActGlow(bio[3] ?? 0);
     const kickMag = Math.hypot(bio[0] ?? 0, bio[1] ?? 0, bio[2] ?? 0);
     const localTChem = cfg.getLocalTemps ? cfg.getLocalTemps([p0[0], p0[1], p0[2]]) : null;
-    const airTempChip = localTChem
+    const localUvChem = cfg.getLocalUv ? cfg.getLocalUv([p0[0], p0[1], p0[2]]) : null;
+    const airTempPart = localTChem
       ? `${localTChem.airLabel.replace(' Air', '')} ${localTChem.airC >= 0 ? '+' : ''}${localTChem.airC.toFixed(1)}°C`
-      : undefined;
+      : '';
+    const uvPartChem = localUvChem ? `UV ${localUvChem.uviNow.toFixed(1)}` : '';
+    const airTempChip =
+      airTempPart && uvPartChem
+        ? `${airTempPart} · ${uvPartChem}`
+        : airTempPart || uvPartChem || undefined;
 
     const bioActive =
       cfg.isBioLinked() &&
@@ -835,11 +843,17 @@ export function analyzeReactionAt(
   const ocMask = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
   const overLand = ocMask < 0.42;
   const localTSurf = cfg.getLocalTemps ? cfg.getLocalTemps([p0[0], p0[1], p0[2]]) : null;
-  const surfTempTag = localTSurf
+  const localUvSurf = cfg.getLocalUv ? cfg.getLocalUv([p0[0], p0[1], p0[2]]) : null;
+  const surfTempPart = localTSurf
     ? overLand || localTSurf.sstC === null
       ? `Sfc ${localTSurf.sfcAirC >= 0 ? '+' : ''}${localTSurf.sfcAirC.toFixed(1)}°C`
       : `SST ${localTSurf.sstC >= 0 ? '+' : ''}${localTSurf.sstC.toFixed(1)}°C`
-    : undefined;
+    : '';
+  const uvPartSurf = localUvSurf ? `UV ${localUvSurf.uviNow.toFixed(1)}` : '';
+  const surfTempTag =
+    surfTempPart && uvPartSurf
+      ? `${surfTempPart} · ${uvPartSurf}`
+      : surfTempPart || uvPartSurf || undefined;
 
   // Inorganic Crust-Pinned Mineral (`bestPhase === 3`): cluster matching crystal vein & inspect risk/reward
   if (bestPhase === 3) {
@@ -937,7 +951,7 @@ export function analyzeReactionAt(
         : 'Stable in ocean water · Fuels upwelling chemosynthetic vents';
       encounterStr = overLand || isTrap
         ? 'Corroding in windy air: triggers acidic sulfur flash-burns on exposed cells (partially scavenged by Decomposers).'
-        : 'Major chemosynthetic windfall: pumps reducing S/Mg ATP energy even in dim high latitudes without sunlight!';
+        : 'Major chemosynthetic windfall: pumps reducing S/Mg ATP energy even under polar night, deep clouds, or low UV!';
     } else if (minType === 4) {
       theme = 'mineralWindfall';
       badge = 'HYDRATED CLAY · CATALYTIC MATRIX';
@@ -1054,7 +1068,7 @@ export function analyzeReactionAt(
     const gradNote = blob.graduated
       ? ' Graduated post-engulfment bilayer suppressing core crowding Oxygen dissolution.'
       : '';
-    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${gradNote}${landNote}${mineralNote}`;
+    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens, harsh UV & grazers.${gradNote}${landNote}${mineralNote}`;
     return {
       theme,
       badge,

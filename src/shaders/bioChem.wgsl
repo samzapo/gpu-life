@@ -27,7 +27,7 @@ struct BioLink {
     mineralEnabled: f32,
     mineralRate: f32,
     localTempScale: f32,
-    pad0: f32,
+    localUvScale: f32,
     pad1: f32,
     pad2: f32,
 }
@@ -180,9 +180,23 @@ fn elemRedoxWeight(atomicNum: u32) -> f32 {
     return 0.0;
 }
 
-fn evalSolarInsolation(pos: vec3f) -> f32 {
-    let cosLat = sqrt(max(0.0, 1.0 - pos.z * pos.z));
-    return 0.12 + 0.88 * pow(cosLat, 1.25);
+// Computes photosynthetic/evaporative UV irradiance (.x) and live UV-B/A mutagenesis & photodamage stress (.y)
+// from NOAA CPC noontime UVI + live GFS Ozone (TOZNE) + Cloud Cover (TCDC) + UTC Solar Zenith `(uviNow, uviNoon, ozoneDU, cloudFrac)`.
+fn evalUvSolarAndStress(uvSample: vec4f, localUvScale: f32) -> vec2f {
+    let sc = clamp(localUvScale, 0.0, 2.0);
+    if (sc <= 0.001) {
+        return vec2f(0.68, 0.0);
+    }
+    let uviNow = clamp(uvSample.x, 0.0, 24.0);
+    let uviNoon = clamp(uvSample.y, 0.0, 24.0);
+    let effUvi = 0.42 * uviNoon + 0.58 * uviNow;
+    let normU = effUvi / 10.0;
+    // Michaelis-Menten P-I saturation: polar winter (~0 UVI) stays dormant; cloudy high-lats stay modest; sunlit tropics saturate ~1.14
+    let solarRaw = clamp(0.05 + 1.56 * (normU / (normU + 0.48)), 0.05, 1.14);
+    let blend = min(sc, 1.5);
+    let solar = mix(0.68, solarRaw, clamp(blend, 0.0, 1.0));
+    let uvStress = smoothstep(5.5, 15.5, uviNow) * blend;
+    return vec2f(solar, uvStress);
 }
 
 fn evalCoastalUpwelling(oc: vec4f) -> f32 {
@@ -1130,6 +1144,7 @@ fn finalizeBioUnified(
     windRaw: vec3f,
     oc: vec4f,
     tSample: vec4f,
+    uvSample: vec4f,
     acc: BioUnifiedAccum,
     bio: BioLink,
 ) -> BioStepResult {
@@ -1137,6 +1152,9 @@ fn finalizeBioUnified(
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let tBlend = clamp(bio.localTempScale, 0.0, 1.5);
     let tHabK = effectiveSurfaceTempK(tSample, oc.w);
+    let uvRes = evalUvSolarAndStress(uvSample, bio.localUvScale);
+    let solar = uvRes.x;
+    let uvStress = uvRes.y;
     let windSim = evalWindVel3D(pos, windRaw, bio);
     let windNorm = length(windSim);
     let curSim = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
@@ -1181,16 +1199,16 @@ fn finalizeBioUnified(
         } else if (mType == MINERAL_SULFIDE) {
             waterErode = inWater * (0.04 + 0.22 * curNorm);
             let airExposed = smoothstep(0.24, 0.68, landFrac);
-            let hotOx = mix(1.0, clamp(0.70 + 0.65 * smoothstep(275.0, 310.0, tHabK), 0.65, 1.40), tBlend);
+            let hotOx = mix(1.0, clamp(0.70 + 0.65 * smoothstep(275.0, 310.0, tHabK), 0.65, 1.40), tBlend) * (1.0 + 0.35 * uvStress);
             airErode = airExposed * (0.58 + 2.6 * windNorm) * hotOx;
             if (airExposed > 0.40) {
                 mTrap = 1u;
                 haz = clamp(haz + 0.48 * hotOx * dtMin, 0.0, 1.0);
             }
         } else {
-            // Hydrated Clay: stable underwater/moist coasts, desiccates faster under hot continental heat or frost
+            // Hydrated Clay: stable underwater/moist coasts, desiccates faster under hot continental heat, UV or frost
             waterErode = inWater * (0.04 + 0.20 * curNorm);
-            let clayHeat = mix(1.0, clamp(0.75 + 0.75 * smoothstep(294.0, 316.0, tHabK), 0.75, 1.55), tBlend);
+            let clayHeat = mix(1.0, clamp(0.75 + 0.75 * smoothstep(294.0, 316.0, tHabK), 0.75, 1.55), tBlend) * (1.0 + 0.30 * uvStress);
             airErode = smoothstep(0.26, 0.72, landFrac) * (0.40 + 2.0 * windNorm) * clayHeat + freezeThaw * 0.6;
         }
 
@@ -1227,11 +1245,10 @@ fn finalizeBioUnified(
         if (myPhase != 0u) {
             return BioStepResult(vec4f(max(curLifeState.x, 0.55), curLifeState.y, curLifeState.z, curLifeState.w), vec4f(0.0));
         }
-        let chemSolar = evalSolarInsolation(pos);
         let chemUpwell = evalCoastalUpwelling(oc);
         let crystRes = attemptMineralCrystallize(
             pi, pos, atomicNum, valence, 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0)),
-            chemSolar, chemUpwell, oc, tHabK, landFrac, windNorm, curNorm, frameU, acc, bio,
+            solar, chemUpwell, oc, tHabK, landFrac, windNorm, curNorm, frameU, acc, bio,
         );
         return crystRes;
     }
@@ -1239,7 +1256,6 @@ fn finalizeBioUnified(
     let rate = max(bio.rate, 0.0);
     let dtBio = bio.dt * rate;
     let q10Bio = mix(1.0, clamp(pow(1.38, clamp((tHabK - 288.15) / 10.0, -2.5, 2.2)), 0.42, 1.55), tBlend);
-    let solar = evalSolarInsolation(pos);
     let upwell = evalCoastalUpwelling(oc);
     let nChem = max(u32(bio.chemColours), 1u);
     let nBio = max(u32(bio.bioColours), 1u);
@@ -1566,10 +1582,11 @@ fn finalizeBioUnified(
     let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend;
     let frostShock = smoothstep(271.0, 249.0, tHabK) * tBlend;
     let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield);
+    let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield);
     let landPenalty = 0.075 * landFrac * (1.0 - desiccationShield);
 
     let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
-        - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty;
+        - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;
     let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, 1.55);
 
     // Inter-blob Grazing: foreign hunter eats vulnerable prey (~65% assimilated with endosymbiosis, ~35% respired)
@@ -1675,8 +1692,9 @@ fn finalizeBioUnified(
     var outGene = nextGene;
     let maxNovelColors = select(8u, 12u, outGrad == 1u);
     let clayInnovBoost = 1.0 + 1.25 * clamp(acc.nearClayCat, 0.0, 1.5);
+    let uvMutBoost = 1.0 + 0.85 * uvStress * (1.0 - 0.55 * membraneShield);
     if ((acc.blobLipidCount >= 2.0 || acc.nearClayCat >= 0.65) && nextEnergy > 0.80 && myDistinctColors < maxNovelColors && acc.blobCount >= 7.0) {
-        let pInnov = clamp(0.018 * clayInnovBoost * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.012);
+        let pInnov = clamp(0.018 * clayInnovBoost * uvMutBoost * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.015);
         if (hashFloat(pi, frameU, 26u) < pInnov) {
             outSp = pickCompatibleNovelSpecies(nChem, nBio, myBioSp, mySpeciesMask, pi, frameU, 50u);
         }

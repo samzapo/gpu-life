@@ -190,6 +190,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 9, resource: { buffer: prefixSumBuffer } },
           { binding: 10, resource: refs.windTexView },
           { binding: 11, resource: refs.tempTexView },
+          { binding: 12, resource: refs.uvTexView },
         ],
       }),
     );
@@ -212,6 +213,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 11, resource: { buffer: sortedBuffer } },
           { binding: 12, resource: { buffer: prefixSumBuffer } },
           { binding: 13, resource: refs.tempTexView },
+          { binding: 14, resource: refs.uvTexView },
         ],
       }),
     );

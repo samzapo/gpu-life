@@ -112,11 +112,18 @@ export interface WindGrid {
   isLive: boolean;
 }
 
-interface IdxEntry {
+export interface IdxEntry {
   offset: number;
   end: number | null;
   varName: string;
   level: string;
+}
+
+export interface GfsCycleInfo {
+  gribUrl: string;
+  idxEntries: IdxEntry[];
+  cycleLabel: string;
+  validLabel: string;
 }
 
 const GFS_S3_BASE = 'https://noaa-gfs-bdp-pds.s3.amazonaws.com';
@@ -200,10 +207,10 @@ async function resolveLatestGfsCycle(nowMs: number): Promise<{
   throw new Error('Unable to resolve live NOAA GFS index from S3');
 }
 
-let cachedCyclePromise: ReturnType<typeof resolveLatestGfsCycle> | null = null;
+let cachedCyclePromise: Promise<GfsCycleInfo> | null = null;
 let cachedCycleFetchedAt = 0;
 
-function getLatestCycleInfo() {
+export function getLatestGfsCycleInfo(): Promise<GfsCycleInfo> {
   const now = Date.now();
   if (!cachedCyclePromise || now - cachedCycleFetchedAt > 15 * 60 * 1000) {
     cachedCycleFetchedAt = now;
@@ -213,6 +220,16 @@ function getLatestCycleInfo() {
     });
   }
   return cachedCyclePromise;
+}
+
+export async function fetchGfsFieldSlice(cycle: GfsCycleInfo, entry: IdxEntry) {
+  const range =
+    entry.end !== null ? `bytes=${entry.offset}-${entry.end}` : `bytes=${entry.offset}-`;
+  const res = await fetch(cycle.gribUrl, { headers: { Range: range } });
+  if (!res.ok) {
+    throw new Error(`GFS byte-range HTTP ${res.status}`);
+  }
+  return decodeGrib2Field(await res.arrayBuffer());
 }
 
 function fillTempClimatologyK(nx: number, ny: number): Float32Array {
@@ -287,7 +304,7 @@ export async function loadFallbackWind(): Promise<WindGrid> {
 
 export async function fetchLiveGfsWind(levelId: WindLevelId): Promise<WindGrid> {
   const spec = WIND_LEVELS[levelId];
-  const cycle = await getLatestCycleInfo();
+  const cycle = await getLatestGfsCycleInfo();
   const cacheKey = `${cycle.cycleLabel}:${levelId}`;
   const cached = levelCache.get(cacheKey);
   if (cached) return cached;
@@ -310,21 +327,11 @@ export async function fetchLiveGfsWind(levelId: WindLevelId): Promise<WindGrid> 
       ? cycle.idxEntries.find((e) => e.varName === 'TMP' && e.level === '2 m above ground')
       : undefined;
 
-  const fetchSlice = async (entry: IdxEntry) => {
-    const range =
-      entry.end !== null ? `bytes=${entry.offset}-${entry.end}` : `bytes=${entry.offset}-`;
-    const res = await fetch(cycle.gribUrl, { headers: { Range: range } });
-    if (!res.ok) {
-      throw new Error(`GFS byte-range HTTP ${res.status}`);
-    }
-    return decodeGrib2Field(await res.arrayBuffer());
-  };
-
   const [uGrid, vGrid, tGrid, tSfcGrid] = await Promise.all([
-    fetchSlice(uEntry),
-    fetchSlice(vEntry),
-    tEntry ? fetchSlice(tEntry).catch(() => null) : Promise.resolve(null),
-    tSfcEntry ? fetchSlice(tSfcEntry).catch(() => null) : Promise.resolve(null),
+    fetchGfsFieldSlice(cycle, uEntry),
+    fetchGfsFieldSlice(cycle, vEntry),
+    tEntry ? fetchGfsFieldSlice(cycle, tEntry).catch(() => null) : Promise.resolve(null),
+    tSfcEntry ? fetchGfsFieldSlice(cycle, tSfcEntry).catch(() => null) : Promise.resolve(null),
   ]);
 
   const tempK =

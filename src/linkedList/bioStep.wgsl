@@ -19,6 +19,7 @@ struct LinkedList {
 @group(0) @binding(9) var<storage, read> linkedList: LinkedList;
 @group(0) @binding(10) var windTex: texture_2d<f32>;
 @group(0) @binding(11) var tempTex: texture_2d<f32>;
+@group(0) @binding(12) var uvTex: texture_2d<f32>;
 
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -40,10 +41,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let windRaw = sampleWindTexture(windTex, p.pos);
     let oc = sampleOceanTexture(oceanTex, p.pos);
     let tSample = sampleTempTexture(tempTex, p.pos);
+    let uvSample = sampleUvTexture(uvTex, p.pos);
 
     if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, tSample, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, tSample, uvSample, initBioUnifiedAccum(), bio,
         );
         lifeStateOut[pi] = resOff.nextLifeState;
         bioForceOut[pi] = resOff.bioForce;
@@ -111,6 +113,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         windRaw,
         oc,
         tSample,
+        uvSample,
         acc,
         bio,
     );

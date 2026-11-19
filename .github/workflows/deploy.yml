@@ -29,8 +29,10 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
-      - name: Refresh Ocean Currents
+      - name: Refresh Ocean Currents & SST
         run: node scripts/fetch-ocean-currents.mjs || true
+      - name: Refresh UV Index & Ozone
+        run: node --experimental-strip-types scripts/fetch-uv-index.mjs || true
       - name: Build
         run: npm run build
       - name: Setup Pages

@@ -168,6 +168,73 @@ fn effectiveSurfaceTempK(tSample: vec4f, oceanMask: f32) -> f32 {
     return mix(tSample.w, tSample.y, seaBlend);
 }
 
+// Samples live global UV index fields: `(uviNow, uviNoon, ozoneDU, cloudFrac)` at unit sphere normal `n`.
+fn sampleUvTexture(uvTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(uvTex, 0);
+    let nx = f32(dims.x);
+    let ny = f32(dims.y);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(4.0, 7.0, 300.0, 0.25);
+    }
+
+    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
+    if (lonDeg < 0.0) {
+        lonDeg += 360.0;
+    }
+    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+
+    let gx = (lonDeg / 360.0) * nx;
+    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
+
+    let i0 = u32(floor(gx)) % dims.x;
+    let i1 = (i0 + 1u) % dims.x;
+    let fx = gx - floor(gx);
+
+    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
+    let j1 = min(dims.y - 1u, j0 + 1u);
+    let fy = clamp(gy - f32(j0), 0.0, 1.0);
+
+    let c00 = textureLoad(uvTex, vec2u(i0, j0), 0);
+    let c10 = textureLoad(uvTex, vec2u(i1, j0), 0);
+    let c01 = textureLoad(uvTex, vec2u(i0, j1), 0);
+    let c11 = textureLoad(uvTex, vec2u(i1, j1), 0);
+
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+// Exact `earth.nullschool.net` CPC Ultraviolet Index color gradient `[0 .. 18]` (0 .. 0.45 W/m²).
+fn uvIndexColor(uvi: f32) -> vec3f {
+    let u = clamp(uvi, 0.0, 18.0);
+    let c0  = vec3f(0.0, 0.0, 15.0) / 255.0;     // 0.0
+    let c1  = vec3f(32.0, 32.0, 32.0) / 255.0;   // 0.2
+    let c2  = vec3f(62.0, 167.0, 45.0) / 255.0;  // 0.5
+    let c3  = vec3f(105.0, 194.0, 32.0) / 255.0; // 1.5
+    let c4  = vec3f(174.0, 224.0, 17.0) / 255.0; // 2.5
+    let c5  = vec3f(255.0, 238.0, 0.0) / 255.0;  // 3.5
+    let c6  = vec3f(248.0, 186.0, 0.0) / 255.0;  // 4.9
+    let c7  = vec3f(241.0, 139.0, 0.0) / 255.0;  // 6.25
+    let c8  = vec3f(235.0, 91.0, 8.0) / 255.0;   // 7.4
+    let c9  = vec3f(229.0, 50.0, 16.0) / 255.0;  // 8.5
+    let c10 = vec3f(207.0, 58.0, 104.0) / 255.0; // 9.75
+    let c11 = vec3f(181.0, 103.0, 164.0) / 255.0;// 11.0
+    let c12 = vec3f(209.0, 148.0, 234.0) / 255.0;// 14.5
+    let c13 = vec3f(231.0, 225.0, 255.0) / 255.0;// 18.0
+
+    if (u <= 0.2) { return mix(c0, c1, u / 0.2); }
+    if (u <= 0.5) { return mix(c1, c2, (u - 0.2) / 0.3); }
+    if (u <= 1.5) { return mix(c2, c3, u - 0.5); }
+    if (u <= 2.5) { return mix(c3, c4, u - 1.5); }
+    if (u <= 3.5) { return mix(c4, c5, u - 2.5); }
+    if (u <= 4.9) { return mix(c5, c6, (u - 3.5) / 1.4); }
+    if (u <= 6.25) { return mix(c6, c7, (u - 4.9) / 1.35); }
+    if (u <= 7.4) { return mix(c7, c8, (u - 6.25) / 1.15); }
+    if (u <= 8.5) { return mix(c8, c9, (u - 7.4) / 1.1); }
+    if (u <= 9.75) { return mix(c9, c10, (u - 8.5) / 1.25); }
+    if (u <= 11.0) { return mix(c10, c11, (u - 9.75) / 1.25); }
+    if (u <= 14.5) { return mix(c11, c12, (u - 11.0) / 3.5); }
+    return mix(c12, c13, (u - 14.5) / 3.5);
+}
+
 // Exact `earth.nullschool.net` GFS Air Temperature color gradient `[193.15 .. 328.15] K`.
 fn airTempColor(tempK: f32) -> vec3f {
     let t = clamp(tempK, 193.15, 328.15);
