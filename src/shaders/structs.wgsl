@@ -132,13 +132,31 @@ fn unpackEncapGene(packed: f32) -> u32 {
     return (u32(round(packed)) >> 19u) & 15u;
 }
 
-fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32, encapGene: u32) -> f32 {
+fn unpackGraduated(packed: f32) -> u32 {
+    if (packed < 0.5) {
+        return 0u;
+    }
+    return (u32(round(packed)) >> 23u) & 1u;
+}
+
+fn packLifeMetaGrad(
+    phase: u32,
+    bioSp: u32,
+    kinAngle: f32,
+    encapGene: u32,
+    graduated: u32,
+) -> f32 {
     if (phase == 0u) {
         return 0.0;
     }
     let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 512.0)) & 511u;
     let g = min(encapGene, 15u);
-    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u) | (g << 19u));
+    let gr = min(graduated, 1u);
+    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u) | (g << 19u) | (gr << 23u));
+}
+
+fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32, encapGene: u32) -> f32 {
+    return packLifeMetaGrad(phase, bioSp, kinAngle, encapGene, 0u);
 }
 
 struct ForceAccum {

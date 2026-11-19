@@ -63,6 +63,7 @@ fn vertex(
 
     let phase = unpackPhase(particle.lifeState.w);
     let bioSp = unpackBioSpecies(particle.lifeState.w);
+    let graduated = unpackGraduated(particle.lifeState.w);
     let phaseF = f32(phase);
     let bioSpeciesF = f32(bioSp);
     let layerOpacity = select(uniforms.earthFlags.w, uniforms.renderParams.y, phase != 0u);
@@ -140,7 +141,7 @@ fn vertex(
     let orbScale = select(1.0, 1.68, uniforms.flags.x > 0.5);
     let chemAngR = max(uniforms.size * orbScale, 1.55 / scalePx);
     let bioAngR = max(uniforms.renderParams.x, 1.75 / scalePx);
-    let lipidAngR = bioAngR * 1.28;
+    let lipidAngR = bioAngR * select(1.28, 1.40, graduated == 1u);
     let angR = select(chemAngR, select(bioAngR, lipidAngR, phase == 2u), phase != 0u);
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
@@ -240,8 +241,13 @@ fn fragment(
         let energy = clamp(lifeState.x, 0.0, 1.55);
         let vit = clamp(lifeState.y, 0.0, 1.0);
         let poi = clamp(lifeState.z, 0.0, 1.0);
-        let vitalityBright = clamp(0.675 + 0.48 * energy + 0.14 * vit, 0.45, 1.35);
+        let graduated = unpackGraduated(lifeState.w);
+        let vitalityBright = clamp(0.675 + 0.48 * energy + 0.14 * vit + select(0.0, 0.10, graduated == 1u), 0.45, 1.42);
         var lifeCol = min(bioCol * vitalityBright, vec3f(1.0));
+        if (graduated == 1u) {
+            let nucBand = smoothstep(0.38, 0.50, d) * (1.0 - smoothstep(0.50, 0.62, d));
+            lifeCol = mix(lifeCol, vec3f(0.98, 0.88, 0.48), nucBand * 0.42);
+        }
         // Subtle inner tracer dot revealing the conserved chemical element carried inside this organism
         if (d < 0.28 + delta) {
             let coreMix = (1.0 - smoothstep(0.18, 0.28 + delta, d)) * 0.42;
@@ -251,9 +257,11 @@ fn fragment(
             let rim = smoothstep(0.62, 0.92, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
             lifeCol = mix(lifeCol, vec3f(0.88, 0.25, 0.96), rim);
         }
-        if (vit > 0.25) {
-            let glowRim = smoothstep(0.70, 0.95, d) * clamp((vit - 0.25) * 0.6, 0.0, 0.45);
-            lifeCol = mix(lifeCol, vec3f(0.32, 0.98, 0.78), glowRim);
+        if (vit > 0.25 || graduated == 1u) {
+            let glowStrength = max(clamp((vit - 0.25) * 0.6, 0.0, 0.45), select(0.0, 0.34, graduated == 1u));
+            let glowRim = smoothstep(0.68, 0.95, d) * glowStrength;
+            let glowCol = mix(vec3f(0.32, 0.98, 0.78), vec3f(1.0, 0.86, 0.42), select(0.0, 0.65, graduated == 1u));
+            lifeCol = mix(lifeCol, glowCol, glowRim);
         }
         let lifeA = alpha * layerOpacity;
         return vec4f(lifeCol * lifeA, lifeA);

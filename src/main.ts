@@ -951,6 +951,10 @@ declare global {
         complexBlobs: number;
         encapsulatedBlobs: number;
         encapsulatedSimpleViolations: number;
+        graduatedBlobs: number;
+        graduatedParticles: number;
+        prematureGraduatedViolations: number;
+        maxGraduatedBlobSize: number;
         nakedBlobs: number;
         avgBlobSize: number;
         maxBlobSize: number;
@@ -1177,6 +1181,10 @@ async function computeWorldStats() {
       complexBlobs: 0,
       encapsulatedBlobs: 0,
       encapsulatedSimpleViolations: 0,
+      graduatedBlobs: 0,
+      graduatedParticles: 0,
+      prematureGraduatedViolations: 0,
+      maxGraduatedBlobSize: 0,
       nakedBlobs: 0,
       avgBlobSize: 0,
       maxBlobSize: 0,
@@ -1207,6 +1215,7 @@ async function computeWorldStats() {
     bioSpecies: number;
     kinPhase: number;
     encapGene: number;
+    graduated: boolean;
   }>(total);
   const halogenIndices: number[] = [];
 
@@ -1296,6 +1305,10 @@ async function computeWorldStats() {
   let complexBlobs = 0;
   let encapsulatedBlobs = 0;
   let encapsulatedSimpleViolations = 0;
+  let graduatedBlobs = 0;
+  let graduatedParticles = 0;
+  let prematureGraduatedViolations = 0;
+  let maxGraduatedBlobSize = 0;
   let nakedBlobs = 0;
   let blobSizeSum = 0;
   let maxBlobSize = 0;
@@ -1389,6 +1402,16 @@ async function computeWorldStats() {
       nakedBlobs++;
       nakedSpeciesSum += summary.distinctSpecies;
     }
+    if (summary.graduated) {
+      graduatedBlobs++;
+      graduatedParticles += summary.graduatedCount;
+      if (comp.length > maxGraduatedBlobSize) maxGraduatedBlobSize = comp.length;
+      if (comp.length < 48 || summary.lipidCount < 4 || summary.distinctSpecies < 6) {
+        prematureGraduatedViolations++;
+      }
+    } else if (summary.graduatedCount > 0) {
+      graduatedParticles += summary.graduatedCount;
+    }
     if (summary.encapStrategy === 'early-armor') encapStrategies.earlyArmorBlobs++;
     else if (summary.encapStrategy === 'balanced') encapStrategies.balancedBlobs++;
     else encapStrategies.lateComplexBlobs++;
@@ -1452,6 +1475,10 @@ async function computeWorldStats() {
     complexBlobs,
     encapsulatedBlobs,
     encapsulatedSimpleViolations,
+    graduatedBlobs,
+    graduatedParticles,
+    prematureGraduatedViolations,
+    maxGraduatedBlobSize,
     nakedBlobs,
     avgBlobSize: blobCount > 0 ? blobSizeSum / blobCount : 0,
     maxBlobSize,
@@ -2217,6 +2244,7 @@ function packLifeMetaJs(
   bioSp: number,
   kinAngle: number,
   encapGene: number = 7,
+  graduated: number = 0,
 ): number {
   if (phase === 0) return 0;
   const twoPi = Math.PI * 2;
@@ -2224,11 +2252,13 @@ function packLifeMetaJs(
   if (a < 0) a += twoPi;
   const k = Math.floor((a / twoPi) * 512) & 511;
   const g = Math.max(0, Math.min(15, Math.floor(encapGene)));
+  const gr = graduated ? 1 : 0;
   return (
     (phase & 3) |
     ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) |
     (k << 10) |
-    (g << 19)
+    (g << 19) |
+    (gr << 23)
   ) >>> 0;
 }
 

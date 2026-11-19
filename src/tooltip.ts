@@ -36,7 +36,8 @@ export type TooltipTheme =
   | 'cofactor'
   | 'chem'
   | 'ocean'
-  | 'lipid';
+  | 'lipid'
+  | 'complex';
 
 export interface TooltipTarget {
   idx: number;
@@ -68,6 +69,7 @@ const LENS_THEME_COLORS: Record<TooltipTheme, [number, number, number, number]> 
   cofactor: [0.35, 0.88, 1.0, 1.0],
   ocean: [0.22, 0.74, 0.97, 1.0],
   lipid: [0.52, 0.92, 0.96, 1.0],
+  complex: [0.98, 0.84, 0.36, 1.0],
 };
 
 export interface TooltipSelectedElement {
@@ -177,6 +179,8 @@ export interface EmergentBlobSummary {
   size: number;
   cytoplasmCount: number;
   lipidCount: number;
+  graduatedCount: number;
+  graduated: boolean;
   encapsulated: boolean;
   distinctSpecies: number;
   formula: string;
@@ -230,6 +234,7 @@ export function summarizeAndClassifyBlob(
   const spSet = new Set<number>();
   let cytoplasmCount = 0;
   let lipidCount = 0;
+  let graduatedCount = 0;
   let eSum = 0;
   let vitSum = 0;
   let poiSum = 0;
@@ -244,6 +249,7 @@ export function summarizeAndClassifyBlob(
     const p = particles[id];
     const ls = lifeState[id] ?? [0.65, 0, 0, 1];
     const meta = unpackLifeMeta(ls);
+    if (meta.graduated) graduatedCount++;
     const el = elements[Math.max(0, Math.min(elements.length - 1, Math.floor(p?.[6] ?? 0)))];
     if (el) {
       const s = getElementSymbol(el.atomicNumber);
@@ -324,6 +330,8 @@ export function summarizeAndClassifyBlob(
     size: memberIndices.length,
     cytoplasmCount,
     lipidCount,
+    graduatedCount,
+    graduated: graduatedCount >= 4 && cytoplasmCount >= 40,
     encapsulated: lipidCount >= 4,
     distinctSpecies: spSet.size,
     formula: formatFormula(formulaCounts),
@@ -373,15 +381,19 @@ export function unpackLifeMeta(ls: number[] | undefined): {
   bioSpecies: number;
   kinPhase: number;
   encapGene: number;
+  graduated: boolean;
 } {
   const packed = ls?.[3] ?? 0;
-  if (packed < 0.5) return { phase: 0, bioSpecies: 0, kinPhase: 0, encapGene: 7 };
+  if (packed < 0.5) {
+    return { phase: 0, bioSpecies: 0, kinPhase: 0, encapGene: 7, graduated: false };
+  }
   const u = Math.round(packed);
   return {
     phase: u & 3,
     bioSpecies: (u >>> 2) & 255,
     kinPhase: (((u >>> 10) & 511) / 512) * Math.PI * 2,
     encapGene: (u >>> 19) & 15,
+    graduated: ((u >>> 23) & 1) === 1,
   };
 }
 
@@ -787,7 +799,7 @@ export function analyzeReactionAt(
   const blobIds = [bestIdx];
   const blobVisited = new Set<number>([bestIdx]);
   let head = 0;
-  while (head < blobIds.length && blobIds.length < 160) {
+  while (head < blobIds.length && blobIds.length < 480) {
     const u = blobIds[head++];
     const pu = snap.particles[u];
     const metaU = unpackLifeMeta(snap.lifeState[u]);
@@ -835,13 +847,20 @@ export function analyzeReactionAt(
   const habitatTag = overLand ? 'Terrestrial (calm · +chem · -desicc)' : 'Marine (currents)';
 
   if (bestPhase === 2) {
-    const theme: TooltipTheme = poi > 0.25 ? 'toxic' : 'lipid';
-    const badge = 'LIPID BILAYER · PROTOCELL MEMBRANE';
-    const title = `Biogenic Lipid Shell (${blob.lipidCount} lipids · ${blob.cytoplasmCount} internals, ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'color' : 'colors'})`;
+    const theme: TooltipTheme = poi > 0.25 ? 'toxic' : blob.graduated ? 'complex' : 'lipid';
+    const badge = blob.graduated
+      ? 'COMPLEX BILAYER · MULTICELLULAR ENVELOPE'
+      : 'LIPID BILAYER · PROTOCELL MEMBRANE';
+    const title = blob.graduated
+      ? `Complex Organism Envelope (${blob.lipidCount} lipids · ${blob.cytoplasmCount} somatic cells, ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'color' : 'colors'})`
+      : `Biogenic Lipid Shell (${blob.lipidCount} lipids · ${blob.cytoplasmCount} internals, ${blob.distinctSpecies} ${blob.distinctSpecies === 1 ? 'color' : 'colors'})`;
     const landNote = overLand
       ? ' Sheltering internals over calm land by cutting evaporative desiccation cost while harvesting abundant air chemistry.'
       : '';
-    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${landNote}`;
+    const gradNote = blob.graduated
+      ? ' Graduated post-engulfment bilayer suppressing core crowding Oxygen dissolution.'
+      : '';
+    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${gradNote}${landNote}`;
     return {
       theme,
       badge,
@@ -870,7 +889,11 @@ export function analyzeReactionAt(
     let badge = 'PRODUCER BLOB · AUTOTROPH';
     let title = `Producer Blob (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
     let statusDesc = '';
-    const encapTag = blob.encapsulated ? `Encapsulated (${blob.lipidCount} lipids)` : 'Naked Colony';
+    const encapTag = blob.graduated
+      ? `Graduated (${blob.lipidCount} lipids)`
+      : blob.encapsulated
+        ? `Encapsulated (${blob.lipidCount} lipids)`
+        : 'Naked Colony';
 
     if (blob.cytoplasmCount <= 1 && blob.lipidCount === 0) {
       theme = poi > 0.15 ? 'toxic' : 'ocean';
@@ -878,32 +901,55 @@ export function analyzeReactionAt(
       title = `Solitary #${bestBioSp} · Living ${selectedElement.name} (${sym0})`;
       statusDesc = `Free single cell carrying conserved ${sym0} (${strategyGeneStr}), drifting until joining a colony or nucleating a heterogeneous blob.`;
     } else if (blob.role === 'halophile') {
-      theme = poi > 0.15 ? 'cofactor' : 'ocean';
-      badge = blob.encapsulated ? 'ENCAPSULATED HALOPHILE PROTOCELL' : 'HALOPHILE BIOFILM';
-      title = `Halophile ${blob.encapsulated ? 'Protocell' : 'Biofilm'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
-      statusDesc = `Halotolerant ${blob.formula} colony (${encapTag}, ${strategyGeneStr}) clearing dissolved Cl/F halides while shielding embodied ${sym0}.`;
+      theme = poi > 0.15 ? 'cofactor' : blob.graduated ? 'complex' : 'ocean';
+      badge = blob.graduated
+        ? 'COMPLEX MULTICELLULAR · HALOPHILE'
+        : blob.encapsulated
+          ? 'ENCAPSULATED HALOPHILE PROTOCELL'
+          : 'HALOPHILE BIOFILM';
+      title = `${blob.graduated ? 'Complex Halophile Organism' : `Halophile ${blob.encapsulated ? 'Protocell' : 'Biofilm'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
+      statusDesc = `Halotolerant ${blob.formula} ${blob.graduated ? 'complex organism' : 'colony'} (${encapTag}, ${strategyGeneStr}) clearing dissolved Cl/F halides while shielding embodied ${sym0}.`;
     } else if (blob.role === 'decomposer') {
-      theme = 'cofactor';
-      badge = blob.encapsulated ? 'ENCAPSULATED DECOMPOSER PROTOCELL' : 'DECOMPOSER BLOB · SAPROTROPH';
-      title = `Decomposer ${blob.encapsulated ? 'Protocell' : 'Colony'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
+      theme = blob.graduated ? 'complex' : 'cofactor';
+      badge = blob.graduated
+        ? 'COMPLEX MULTICELLULAR · SAPROTROPH'
+        : blob.encapsulated
+          ? 'ENCAPSULATED DECOMPOSER PROTOCELL'
+          : 'DECOMPOSER BLOB · SAPROTROPH';
+      title = `${blob.graduated ? 'Complex Saprotroph Organism' : `Decomposer ${blob.encapsulated ? 'Protocell' : 'Colony'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
       statusDesc = `Redox-rich (${Math.round(blob.avgRedoxFrac * 100)}% S/H) ${blob.formula} saprotroph (${encapTag}, ${strategyGeneStr}) remineralizing stressed biomass back into free chemistry.`;
     } else if (blob.role === 'mixotroph') {
-      theme = 'anabolic';
-      badge = blob.encapsulated ? 'ENCAPSULATED MIXOTROPH PROTOCELL' : 'MIXOTROPH BLOB';
-      title = `Mixotroph ${blob.encapsulated ? 'Protocell' : 'Swimmer'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
+      theme = blob.graduated ? 'complex' : 'anabolic';
+      badge = blob.graduated
+        ? 'COMPLEX MULTICELLULAR · MIXOTROPH'
+        : blob.encapsulated
+          ? 'ENCAPSULATED MIXOTROPH PROTOCELL'
+          : 'MIXOTROPH BLOB';
+      title = `${blob.graduated ? 'Complex Mixotroph Organism' : `Mixotroph ${blob.encapsulated ? 'Protocell' : 'Swimmer'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
       statusDesc = `Hybrid ${blob.formula} anatomy (${encapTag}, ${strategyGeneStr}) pairing a cohesive C/O photosynthetic core (coh=${blob.avgCoh.toFixed(2)}) with a motile tail (asym=${blob.avgAsym.toFixed(2)}).`;
     } else if (blob.role === 'consumer') {
-      theme = 'catabolic';
-      badge = blob.encapsulated ? 'ENCAPSULATED CONSUMER PROTOCELL' : 'CONSUMER BLOB · HETEROTROPH';
-      title = `Consumer ${blob.encapsulated ? 'Protocell' : 'Glider'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
+      theme = blob.graduated ? 'complex' : 'catabolic';
+      badge = blob.graduated
+        ? 'COMPLEX MULTICELLULAR · CONSUMER'
+        : blob.encapsulated
+          ? 'ENCAPSULATED CONSUMER PROTOCELL'
+          : 'CONSUMER BLOB · HETEROTROPH';
+      title = `${blob.graduated ? 'Complex Consumer Organism' : `Consumer ${blob.encapsulated ? 'Protocell' : 'Glider'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
       statusDesc = `Asymmetric ${blob.formula} swimmer (${encapTag}, ${strategyGeneStr}; asym=${blob.avgAsym.toFixed(2)}, motility=${blob.avgMotility.toFixed(2)}) grazing foreign blobs with ~22% organelle endosymbiosis.`;
     } else {
-      theme = 'anabolic';
-      badge = blob.encapsulated ? 'ENCAPSULATED PRODUCER PROTOCELL' : 'PRODUCER BLOB · AUTOTROPH';
-      title = `Producer ${blob.encapsulated ? 'Protocell' : 'Blob'} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
-      statusDesc = `Calm cohesive ${blob.formula} colony (${encapTag}, ${strategyGeneStr}; coh=${blob.avgCoh.toFixed(2)}, solar=${Math.round(blob.avgSolarFrac * 100)}%) fixing C/H/O/S atoms across sunlight, currents & atmospheric chemistry.`;
+      theme = blob.graduated ? 'complex' : 'anabolic';
+      badge = blob.graduated
+        ? 'COMPLEX MULTICELLULAR · PRODUCER'
+        : blob.encapsulated
+          ? 'ENCAPSULATED PRODUCER PROTOCELL'
+          : 'PRODUCER BLOB · AUTOTROPH';
+      title = `${blob.graduated ? 'Complex Producer Organism' : `Producer ${blob.encapsulated ? 'Protocell' : 'Blob'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
+      statusDesc = `Calm cohesive ${blob.formula} ${blob.graduated ? 'organism' : 'colony'} (${encapTag}, ${strategyGeneStr}; coh=${blob.avgCoh.toFixed(2)}, solar=${Math.round(blob.avgSolarFrac * 100)}%) fixing C/H/O/S atoms across sunlight, currents & atmospheric chemistry.`;
     }
 
+    const gradDetail = blob.graduated
+      ? ' Graduated via lipid bilayer + post-consumption endosymbiosis to resist core crowding Oxygen dissolution.'
+      : '';
     const landDetail = overLand
       ? ' Roaming calm current-free terrain to forage atmospheric chemicals at a modest desiccation cost.'
       : '';
@@ -911,7 +957,7 @@ export function analyzeReactionAt(
       theme,
       badge,
       title,
-      body: `${statusDesc}${landDetail}`,
+      body: `${statusDesc}${gradDetail}${landDetail}`,
       meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,
