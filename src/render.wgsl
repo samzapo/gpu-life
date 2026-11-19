@@ -51,10 +51,46 @@ fn safeOrthoStepDiff(
     return vec3f(0.0, 0.0, 0.0);
 }
 
-@vertex
-fn vertex(
+fn sdHex(p: vec2f, r: f32) -> f32 {
+    let q = abs(p);
+    return max(q.x * 0.8660254 + q.y * 0.5, q.y) - r;
+}
+
+fn sdBox(p: vec2f, b: vec2f) -> f32 {
+    let d = abs(p) - b;
+    return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+}
+
+fn sdRhomb(p: vec2f, ax: f32, ay: f32, r: f32) -> f32 {
+    let q = abs(p);
+    return (q.x * ax + q.y * ay) - r;
+}
+
+fn rot2D(p: vec2f, c: f32, s: f32) -> vec2f {
+    return vec2f(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+fn foldD6(pIn: vec2f) -> vec2f {
+    var q = abs(pIn);
+    let n60 = vec2f(-0.8660254, 0.5);
+    q -= 2.0 * max(0.0, dot(q, n60)) * n60;
+    q.y = abs(q.y);
+    let n30 = vec2f(-0.5, 0.8660254);
+    q -= 2.0 * max(0.0, dot(q, n30)) * n30;
+    q.y = abs(q.y);
+    return q;
+}
+
+fn foldD4(pIn: vec2f) -> vec2f {
+    let a = abs(pIn);
+    return select(a, vec2f(a.y, a.x), a.y > a.x);
+}
+
+fn vertexCommon(
     particle: ParticleVert,
-    @builtin(vertex_index) vertexIndex: u32,
+    vertexIndex: u32,
+    filterMinerals: bool,
+    matchMinerals: bool,
 ) -> VertexOutput {
     var positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
@@ -63,6 +99,7 @@ fn vertex(
 
     let phase = unpackPhase(particle.lifeState.w);
     let bioSp = unpackBioSpecies(particle.lifeState.w);
+    let encapGene = unpackEncapGene(particle.lifeState.w);
     let graduated = unpackGraduated(particle.lifeState.w);
     let phaseF = f32(phase);
     let bioSpeciesF = f32(bioSp);
@@ -73,11 +110,25 @@ fn vertex(
         layerOpacity = uniforms.mineralParams.x;
     }
 
+    var output: VertexOutput;
+    let passMismatch = filterMinerals && ((phase == 3u) != matchMinerals);
+    if (passMismatch || layerOpacity <= 0.001) {
+        output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
+        output.uv = vec2f(0.0);
+        output.chemSpecies = particle.colour;
+        output.slots = particle.slots;
+        output.chemGlow = particle.chemGlow;
+        output.limbFade = 0.0;
+        output.phaseF = phaseF;
+        output.bioSpeciesF = bioSpeciesF;
+        output.lifeState = particle.lifeState;
+        return output;
+    }
+
     let n = normalize(particle.pos);
     let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
 
-    var output: VertexOutput;
-    if (p0.z < 0.5 || layerOpacity <= 0.001) {
+    if (p0.z < 0.5) {
         output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
         output.uv = vec2f(0.0);
         output.chemSpecies = particle.colour;
@@ -153,8 +204,9 @@ fn vertex(
     } else if (phase == 2u) {
         angR = lipidAngR;
     } else if (phase == 3u) {
+        let volFrac = f32(encapGene) / 15.0;
         let integ = clamp(particle.lifeState.x, 0.08, 1.15);
-        angR = max(bioAngR * 1.18, chemAngR * 1.32) * mix(0.68, 1.14, clamp(integ, 0.0, 1.0));
+        angR = max(bioAngR * 0.96, chemAngR * 1.12) * mix(0.76, 1.28, clamp(volFrac * 0.65 + integ * 0.35, 0.0, 1.0));
     }
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
@@ -187,6 +239,30 @@ fn vertex(
     return output;
 }
 
+@vertex
+fn vertexMinerals(
+    particle: ParticleVert,
+    @builtin(vertex_index) vertexIndex: u32,
+) -> VertexOutput {
+    return vertexCommon(particle, vertexIndex, true, true);
+}
+
+@vertex
+fn vertexForeground(
+    particle: ParticleVert,
+    @builtin(vertex_index) vertexIndex: u32,
+) -> VertexOutput {
+    return vertexCommon(particle, vertexIndex, true, false);
+}
+
+@vertex
+fn vertex(
+    particle: ParticleVert,
+    @builtin(vertex_index) vertexIndex: u32,
+) -> VertexOutput {
+    return vertexCommon(particle, vertexIndex, false, false);
+}
+
 @fragment
 fn fragment(
     @location(0) uv: vec2f,
@@ -199,6 +275,7 @@ fn fragment(
     @location(7) lifeState: vec4f,
 ) -> @location(0) vec4f {
     let uvStep = length(fwidth(uv));
+    let px = clamp(uvStep * 0.70710678, 0.0005, 0.22);
     let delta = clamp(uvStep, 0.025, 0.32);
     let deltaDot = clamp(uvStep, 0.045, 0.42);
     let nChem = max(u32(uniforms.renderParams.z + 0.5), 1u);
@@ -225,88 +302,143 @@ fn fragment(
         let integ = clamp(lifeState.x, 0.05, 1.25);
         let nutr = clamp(lifeState.y, 0.0, 1.0);
         let haz = clamp(lifeState.z, 0.0, 1.0);
+        let volFrac = f32(unpackEncapGene(lifeState.w)) / 15.0;
         let isTrap = unpackGraduated(lifeState.w) == 1u;
+        let grow = clamp((0.28 + 0.72 * volFrac) * (0.52 + 0.48 * min(integ, 1.0)), 0.16, 1.0);
+
+        let edgeW = max(px * 0.90, 1e-4);
+        let lineW = max(px * 1.45, 1e-4);
 
         var sdf = 1.0;
         var baseCol = vec3f(0.65);
         var facetShade = 1.0;
-        var coreCol = vec3f(0.8);
-        var coreMask = 0.0;
+        var accentCol = vec3f(0.95);
+        var accentMask = 0.0;
+        var innerLine = 99.0;
         var rimCol = vec3f(0.95);
 
         if (minType == 0u) {
-            // 0: Silicate Bedrock (elongated hexagonal quartz/olivine prism)
-            let p = abs(vec2f(uv.x * 1.12, uv.y * 0.94));
-            sdf = max(p.x * 0.8660254 + p.y * 0.5, p.y) - 0.84;
-            let divDiag = select(-0.18, 0.18, uv.x * 0.7 + uv.y * 0.4 > 0.0);
-            let divSide = select(-0.10, 0.12, uv.y > 0.0);
-            facetShade = clamp(0.88 + divDiag + divSide, 0.62, 1.22);
-            baseCol = mix(vec3f(0.46, 0.55, 0.64), chemCol, 0.28);
-            let ridge = 1.0 - smoothstep(0.0, 0.12, min(abs(uv.x), abs(abs(uv.y) * 0.5 - abs(uv.x) * 0.866)));
-            coreMask = ridge * 0.45;
-            coreCol = vec3f(0.86, 0.94, 1.0);
-            rimCol = vec3f(0.85, 0.93, 0.98);
+            // 0: Silicate Quartz — Self-similar D6 Koch / hexagonal star-dendrite fractal
+            let q0 = foldD6(uv);
+            var df = sdHex(q0, 0.42);
+            if (grow > 0.20) {
+                let c1 = vec2f(0.42 * grow, 0.0);
+                let q1 = foldD6(q0 - c1);
+                df = min(df, sdHex(q1, 0.21 * grow));
+                if (grow > 0.46) {
+                    let c2 = vec2f(0.22 * grow, 0.0);
+                    let q2 = foldD6(q1 - c2);
+                    df = min(df, sdHex(q2, 0.105 * grow));
+                    if (grow > 0.74) {
+                        df = min(df, sdHex(q2 - vec2f(0.115 * grow, 0.0), 0.055 * grow));
+                    }
+                }
+            }
+            sdf = df;
+            let sectorSign = select(-0.16, 0.18, uv.x * 0.65 + uv.y * 0.75 > 0.0);
+            let facetPlane = select(-0.10, 0.12, q0.y > q0.x * 0.28);
+            facetShade = clamp(0.90 + sectorSign + facetPlane, 0.64, 1.24);
+            baseCol = mix(vec3f(0.46, 0.56, 0.66), chemCol, 0.26);
+            innerLine = min(q0.y, abs(df + 0.14));
+            accentCol = vec3f(0.86, 0.95, 1.0);
+            rimCol = vec3f(0.90, 0.97, 1.0);
         } else if (minType == 1u) {
-            // 1: Evaporite Salt (stepped cubic Halite / Fluorite hopper crystal)
-            let dBox = max(abs(uv.x), abs(uv.y));
-            sdf = dBox - 0.84;
-            let terrace = max(
-                1.0 - smoothstep(0.0, 0.055, abs(dBox - 0.56)),
-                1.0 - smoothstep(0.0, 0.050, abs(dBox - 0.30)),
-            );
-            facetShade = clamp(0.86 + 0.16 * select(-1.0, 1.0, uv.x > -uv.y) + 0.18 * terrace, 0.68, 1.26);
-            baseCol = mix(vec3f(0.85, 0.94, 0.99), chemCol, 0.18);
-            coreCol = mix(vec3f(0.68, 0.92, 1.0), vec3f(0.42, 1.0, 0.46), select(haz * 0.4, 0.95, isTrap));
-            coreMask = (1.0 - smoothstep(0.22, 0.52, dBox)) * select(0.35, 0.85, isTrap || haz > 0.45);
-            rimCol = select(vec3f(0.95, 0.98, 1.0), vec3f(0.55, 1.0, 0.58), isTrap);
+            // 1: Evaporite Halite / Fluorite — Self-similar D4 corner-cube & stepped hopper fractal
+            let q0 = foldD4(uv);
+            let boxCore = sdBox(q0, vec2f(0.42, 0.42));
+            var df = boxCore;
+            if (grow > 0.22) {
+                df = min(df, sdBox(q0 - vec2f(0.36 * grow, 0.36 * grow), vec2f(0.19 * grow, 0.19 * grow)));
+                df = min(df, sdBox(q0 - vec2f(0.44 * grow, 0.0), vec2f(0.16 * grow, 0.10 * grow)));
+                if (grow > 0.50) {
+                    df = min(df, sdBox(q0 - vec2f(0.55 * grow, 0.55 * grow), vec2f(0.10 * grow, 0.10 * grow)));
+                    if (grow > 0.76) {
+                        df = min(df, sdBox(q0 - vec2f(0.65 * grow, 0.65 * grow), vec2f(0.055 * grow, 0.055 * grow)));
+                    }
+                }
+            }
+            sdf = df;
+            facetShade = clamp(0.86 + select(-0.14, 0.18, q0.x > q0.y * 1.35) + select(-0.08, 0.10, uv.x > -uv.y), 0.66, 1.22);
+            baseCol = mix(vec3f(0.84, 0.93, 0.99), chemCol, 0.16);
+            innerLine = min(abs(boxCore + 0.16), abs(boxCore + 0.30));
+            let trapCore = abs(uv.x) + abs(uv.y) - 0.24;
+            accentMask = select(0.0, 1.0 - smoothstep(-edgeW, edgeW, trapCore), isTrap || haz > 0.55);
+            accentCol = vec3f(0.40, 1.0, 0.50);
+            rimCol = select(vec3f(0.95, 0.99, 1.0), vec3f(0.58, 1.0, 0.62), isTrap);
         } else if (minType == 2u) {
-            // 2: Carbonate Vein (Dolomite rhomb — vivid emerald Beryl core if Be-trapped)
-            let dRhomb = abs(uv.x) * 0.90 + abs(uv.y) * 1.14;
-            sdf = dRhomb - 0.86;
-            let cleave = select(-0.16, 0.18, (uv.y - 0.35 * uv.x) > 0.0);
-            facetShade = clamp(0.88 + cleave, 0.66, 1.20);
-            baseCol = mix(vec3f(0.92, 0.80, 0.54), chemCol, 0.25);
-            let berylZone = 1.0 - smoothstep(0.18, 0.46, dRhomb);
-            coreCol = select(vec3f(1.0, 0.92, 0.68), vec3f(0.14, 0.96, 0.52), isTrap);
-            coreMask = select(berylZone * 0.38, berylZone * 0.92, isTrap);
-            rimCol = select(vec3f(1.0, 0.92, 0.72), vec3f(0.95, 0.32, 0.78), isTrap && haz > 0.55);
+            // 2: Carbonate Dolomite / Beryl Trap — Self-similar dogtooth rhombic twin fractal
+            let q0 = abs(uv);
+            let r0 = sdRhomb(q0, 1.15, 0.85, 0.50);
+            var df = r0;
+            if (grow > 0.22) {
+                let b1 = sdRhomb(q0 - vec2f(0.28 * grow, 0.0), 1.20, 0.92, 0.24 * grow);
+                let b2 = sdRhomb(q0 - vec2f(0.0, 0.34 * grow), 1.20, 0.92, 0.20 * grow);
+                df = min(df, min(b1, b2));
+                if (grow > 0.52) {
+                    df = min(df, sdRhomb(q0 - vec2f(0.44 * grow, 0.0), 1.25, 0.95, 0.12 * grow));
+                }
+            }
+            sdf = df;
+            facetShade = clamp(0.90 + select(-0.16, 0.18, (uv.y - 0.38 * uv.x) > 0.0), 0.66, 1.20);
+            baseCol = mix(vec3f(0.92, 0.80, 0.52), chemCol, 0.22);
+            innerLine = min(abs(r0 + 0.18), abs(uv.y - 0.38 * uv.x) * 0.75);
+            let berylHex = sdHex(uv, 0.22);
+            accentMask = select(0.0, 1.0 - smoothstep(-edgeW, edgeW, berylHex), isTrap);
+            accentCol = vec3f(0.14, 0.96, 0.54);
+            rimCol = select(vec3f(1.0, 0.94, 0.74), vec3f(0.95, 0.36, 0.78), isTrap && haz > 0.55);
         } else if (minType == 3u) {
-            // 3: Sulfide Chimney (intergrown 8-point pyrite octahedra & glowing vent core)
-            let sA = max(abs(uv.x), abs(uv.y));
-            let sB = max(abs(uv.x + uv.y), abs(uv.x - uv.y)) * 0.70710678;
-            sdf = min(sA, sB) - 0.82;
-            let pyFacet = select(-0.14, 0.24, (uv.x * uv.y) > 0.0);
-            facetShade = clamp(0.86 + pyFacet, 0.65, 1.28);
-            baseCol = mix(vec3f(0.28, 0.25, 0.30), vec3f(0.92, 0.76, 0.28), 0.58);
-            let ventGlow = 1.0 - smoothstep(0.12, 0.46, d);
-            coreCol = select(vec3f(1.0, 0.48, 0.14), vec3f(0.86, 0.30, 0.98), isTrap);
-            coreMask = ventGlow * clamp(0.45 + 0.5 * max(nutr, haz), 0.45, 0.95);
-            rimCol = select(vec3f(1.0, 0.84, 0.38), vec3f(0.94, 0.44, 1.0), isTrap);
+            // 3: Sulfide Chimney / Pyrite — Self-similar twin-cube octahedron & pyrite needle fractal
+            let qRot = rot2D(uv, 0.70710678, 0.70710678);
+            var df = min(sdBox(uv, vec2f(0.40, 0.40)), sdBox(qRot, vec2f(0.40, 0.40)));
+            let q4 = foldD4(uv);
+            if (grow > 0.24) {
+                let twigA = q4 - vec2f(0.42 * grow, 0.0);
+                let twigB = rot2D(q4 - vec2f(0.36 * grow, 0.36 * grow), 0.70710678, 0.70710678);
+                df = min(df, min(sdBox(twigA, vec2f(0.16 * grow, 0.16 * grow)), sdBox(twigB, vec2f(0.15 * grow, 0.15 * grow))));
+                if (grow > 0.56) {
+                    df = min(df, sdBox(q4 - vec2f(0.58 * grow, 0.0), vec2f(0.09 * grow, 0.09 * grow)));
+                }
+            }
+            sdf = df;
+            let octLight = select(-0.18, 0.24, (uv.x * uv.y) > 0.0);
+            facetShade = clamp(0.88 + octLight, 0.62, 1.28);
+            baseCol = select(vec3f(0.24, 0.22, 0.27), vec3f(0.94, 0.78, 0.28), (q4.x - q4.y) > 0.12);
+            innerLine = abs(sdBox(uv, vec2f(0.40, 0.40)) - sdBox(qRot, vec2f(0.40, 0.40))) * 0.65;
+            let ventHole = (abs(uv.x) + abs(uv.y)) - 0.18;
+            accentMask = (1.0 - smoothstep(-edgeW, edgeW, ventHole)) * clamp(0.55 + 0.45 * max(nutr, haz), 0.55, 1.0);
+            accentCol = select(vec3f(1.0, 0.48, 0.12), vec3f(0.86, 0.32, 0.98), isTrap);
+            rimCol = select(vec3f(1.0, 0.86, 0.42), vec3f(0.95, 0.46, 1.0), isTrap);
         } else {
-            // 4: Hydrated Clay (terraced phyllosilicate plates with turquoise catalytic bands)
-            let octD = max(max(abs(uv.x) * 0.94, abs(uv.y) * 1.12), (abs(uv.x) + abs(uv.y)) * 0.76);
-            sdf = octD - 0.84;
-            let layerBand = 0.5 + 0.5 * cos(uv.y * 18.0);
-            facetShade = clamp(0.82 + 0.20 * layerBand + 0.10 * sign(uv.x), 0.66, 1.18);
-            baseCol = mix(vec3f(0.76, 0.50, 0.36), chemCol, 0.20);
-            coreCol = vec3f(0.22, 0.96, 0.88);
-            coreMask = clamp(layerBand * 0.48 + (1.0 - smoothstep(0.20, 0.55, octD)) * 0.35, 0.0, 0.85);
-            rimCol = vec3f(0.40, 0.96, 0.90);
+            // 4: Hydrated Clay / Zeolite — Self-similar D6 stepped rosette & catalytic turquoise cleavage
+            let r1 = rot2D(uv, 0.9396926, 0.3420201);
+            let r2 = rot2D(uv, 0.9396926, -0.3420201);
+            var df = sdHex(uv, 0.42);
+            if (grow > 0.20) {
+                df = min(df, min(sdHex(r1 * 1.15 - vec2f(0.18 * grow, 0.0), 0.36 * grow), sdHex(r2 * 1.15 - vec2f(0.0, 0.18 * grow), 0.34 * grow)));
+                if (grow > 0.48) {
+                    let q1 = foldD6(uv) - vec2f(0.46 * grow, 0.0);
+                    df = min(df, sdHex(q1, 0.18 * grow));
+                }
+            }
+            sdf = df;
+            let bandVal = 0.5 + 0.5 * cos(uv.y * 22.0);
+            facetShade = clamp(0.84 + 0.18 * bandVal + 0.10 * sign(uv.x), 0.66, 1.18);
+            baseCol = mix(vec3f(0.76, 0.50, 0.36), chemCol, 0.18);
+            innerLine = abs(fract(uv.y * 3.5 + 0.5) - 0.5) * 0.28;
+            accentCol = vec3f(0.22, 0.96, 0.88);
+            accentMask = (1.0 - smoothstep(lineW * 0.4, lineW * 1.5, innerLine)) * 0.72;
+            rimCol = vec3f(0.38, 0.98, 0.90);
         }
 
-        // Erosion chipping & rim sparkle as integrity degrades
-        let erodeWear = clamp((0.86 - integ) / 0.76, 0.0, 1.0);
-        let cellId = floor((uv + 1.0) * 4.0);
-        let chipHash = fract(sin(dot(cellId, vec2f(12.9898, 78.233)) + f32(cIdx) * 3.7) * 43758.5453);
-        let chipD = sdf + erodeWear * 0.30 * chipHash;
-        let crystAlpha = 1.0 - smoothstep(-delta, delta, chipD);
+        let crystAlpha = 1.0 - smoothstep(-edgeW, edgeW, sdf);
         if (crystAlpha <= 0.002) {
             discard;
         }
         var col = min(baseCol * facetShade, vec3f(1.0));
-        col = mix(col, coreCol, coreMask);
-        let edgeHighlight = smoothstep(-0.14 - delta * 1.5, -0.02, chipD) * 0.52;
-        col = min(mix(col, rimCol, edgeHighlight), vec3f(1.0));
+        col = mix(col, accentCol, accentMask);
+        let seamMask = (1.0 - smoothstep(lineW * 0.35, lineW * 1.35, innerLine)) * 0.65;
+        let rimMask = (1.0 - smoothstep(lineW * 0.35, lineW * 1.45, abs(sdf))) * 0.70;
+        col = min(mix(col, rimCol, max(seamMask, rimMask)), vec3f(1.0));
         let outA = crystAlpha * layerOpacity;
         return vec4f(col * outA, outA);
     }

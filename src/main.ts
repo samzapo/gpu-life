@@ -267,6 +267,7 @@ let simBuffer: GPUBuffer | undefined;
 let oceanSimBuffer: GPUBuffer | undefined;
 let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
+let mineralRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
 
 let worldRulesBuffer: GPUBuffer | undefined;
@@ -283,6 +284,7 @@ let watermanFwdTexture: GPUTexture | undefined;
 let watermanInvTexture: GPUTexture | undefined;
 
 let bgBindGroup: GPUBindGroup | undefined;
+let mineralRenderBindGroup: GPUBindGroup | undefined;
 let renderBindGroup: GPUBindGroup | undefined;
 
 let lensTrackPipeline: GPUComputePipeline | undefined;
@@ -2003,58 +2005,77 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     code: `${structsShader}\n${projectionShader}\n${renderShader}`,
   });
 
-  renderPipeline = device.createRenderPipeline({
+  const particleVertexBuffers: GPUVertexBufferLayout[] = [
+    {
+      arrayStride: particleStride,
+      stepMode: 'instance',
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+        { shaderLocation: 1, offset: 12, format: 'float32' },
+        { shaderLocation: 2, offset: 32, format: 'float32x3' },
+        { shaderLocation: 4, offset: 44, format: 'float32' },
+      ],
+    },
+    {
+      arrayStride: valenceStride,
+      stepMode: 'instance',
+      attributes: [
+        { shaderLocation: 3, offset: 0, format: 'float32x4' },
+      ],
+    },
+    {
+      arrayStride: valenceStride,
+      stepMode: 'instance',
+      attributes: [
+        { shaderLocation: 5, offset: 0, format: 'float32x4' },
+      ],
+    },
+  ];
+
+  const renderTargets: GPUColorTargetState[] = [
+    {
+      format: presentationFormat,
+      blend: {
+        color: {
+          srcFactor: 'one',
+          dstFactor: 'one-minus-src-alpha',
+          operation: 'add',
+        },
+        alpha: {
+          srcFactor: 'one',
+          dstFactor: 'one-minus-src-alpha',
+          operation: 'add',
+        },
+      },
+    },
+  ];
+
+  mineralRenderPipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: {
       module: renderModule,
-      entryPoint: 'vertex',
-      buffers: [
-        {
-          arrayStride: particleStride,
-          stepMode: 'instance',
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: 'float32x3' },
-            { shaderLocation: 1, offset: 12, format: 'float32' },
-            { shaderLocation: 2, offset: 32, format: 'float32x3' },
-            { shaderLocation: 4, offset: 44, format: 'float32' },
-          ],
-        },
-        {
-          arrayStride: valenceStride,
-          stepMode: 'instance',
-          attributes: [
-            { shaderLocation: 3, offset: 0, format: 'float32x4' },
-          ],
-        },
-        {
-          arrayStride: valenceStride,
-          stepMode: 'instance',
-          attributes: [
-            { shaderLocation: 5, offset: 0, format: 'float32x4' },
-          ],
-        },
-      ],
+      entryPoint: 'vertexMinerals',
+      buffers: particleVertexBuffers,
     },
     fragment: {
       module: renderModule,
       entryPoint: 'fragment',
-      targets: [
-        {
-          format: presentationFormat,
-          blend: {
-            color: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add',
-            },
-            alpha: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-              operation: 'add',
-            },
-          },
-        },
-      ],
+      targets: renderTargets,
+    },
+    primitive: { topology: 'triangle-strip' },
+  });
+
+  renderPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: renderModule,
+      entryPoint: 'vertexForeground',
+      buffers: particleVertexBuffers,
+    },
+    fragment: {
+      module: renderModule,
+      entryPoint: 'fragment',
+      targets: renderTargets,
     },
     primitive: { topology: 'triangle-strip' },
   });
@@ -2313,19 +2334,23 @@ function render(commandEncoder: GPUCommandEncoder) {
   const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
   const showLife = earthParams.viewLayer !== 'air' && earthParams.lifeOpacity > 0.001;
   const showMinerals = earthParams.mineralOpacity > 0.001;
-  if (
-    (showChem || showLife || showMinerals) &&
-    renderBindGroup &&
-    particleBuffers &&
-    valenceBuffer &&
-    lifeStateBuffers
-  ) {
-    passEncoder.setPipeline(renderPipeline);
-    passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
-    passEncoder.setVertexBuffer(1, valenceBuffer);
-    passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
-    passEncoder.setBindGroup(0, renderBindGroup);
-    passEncoder.draw(6, particleAmt, 0, 0);
+  if (particleBuffers && valenceBuffer && lifeStateBuffers) {
+    if (showMinerals && mineralRenderPipeline && mineralRenderBindGroup) {
+      passEncoder.setPipeline(mineralRenderPipeline);
+      passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
+      passEncoder.setVertexBuffer(1, valenceBuffer);
+      passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
+      passEncoder.setBindGroup(0, mineralRenderBindGroup);
+      passEncoder.draw(6, particleAmt, 0, 0);
+    }
+    if ((showChem || showLife) && renderPipeline && renderBindGroup) {
+      passEncoder.setPipeline(renderPipeline);
+      passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
+      passEncoder.setVertexBuffer(1, valenceBuffer);
+      passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
+      passEncoder.setBindGroup(0, renderBindGroup);
+      passEncoder.draw(6, particleAmt, 0, 0);
+    }
   }
 
   if (lensOverlayPipeline && lensOverlayBindGroup) {
@@ -2745,25 +2770,54 @@ function startWorld() {
         const isFluorTrapVein = mType === 1 && v % 2 === 0;
 
         let placed = 0;
+        const veinPositions: [number, number, number][] = [];
+        const veinIndices: number[] = [];
+        const minSep = 0.0075 / worldR;
+        const minSep2 = minSep * minSep;
+        const symSteps = mType === 1 || mType === 3 ? 4 : 6;
         while (placed < crystalsPerVein && cursor < pool.length) {
           const pi = pool[cursor++];
           if (usedInMineral.has(pi)) continue;
           const el = elements[elemChoice[pi]];
           if (!el) continue;
-          const angR = (0.005 + Math.sqrt(rng()) * 0.018) / worldR;
-          const th = rng() * Math.PI * 2;
-          const ct = Math.cos(th);
-          const st = Math.sin(th);
-          const ca = Math.cos(angR);
-          const sa = Math.sin(angR);
-          let nx = ca * cx + sa * (ct * e1x + st * e2x);
-          let ny = ca * cy + sa * (ct * e1y + st * e2y);
-          let nz = ca * cz + sa * (ct * e1z + st * e2z);
-          const invL = 1 / (Math.hypot(nx, ny, nz) || 1);
-          nx *= invL;
-          ny *= invL;
-          nz *= invL;
-          const cAngle = (veinAngle + (rng() - 0.5) * 0.25 + Math.PI * 2) % (Math.PI * 2);
+
+          // Crystallographic spacing across symmetry branches so outcrops form crisp self-similar clusters
+          let nx = cx;
+          let ny = cy;
+          let nz = cz;
+          if (placed > 0) {
+            for (let att = 0; att < 10; att++) {
+              const angR = (0.007 + Math.sqrt(rng()) * 0.025) / worldR;
+              const arm = Math.floor(rng() * symSteps);
+              const th = veinAngle + (arm * Math.PI * 2) / symSteps + (rng() - 0.5) * 0.42;
+              const ct = Math.cos(th);
+              const st = Math.sin(th);
+              const ca = Math.cos(angR);
+              const sa = Math.sin(angR);
+              let cxp = ca * cx + sa * (ct * e1x + st * e2x);
+              let cyp = ca * cy + sa * (ct * e1y + st * e2y);
+              let czp = ca * cz + sa * (ct * e1z + st * e2z);
+              const invL = 1 / (Math.hypot(cxp, cyp, czp) || 1);
+              cxp *= invL;
+              cyp *= invL;
+              czp *= invL;
+              nx = cxp;
+              ny = cyp;
+              nz = czp;
+              let tooClose = false;
+              for (const vp of veinPositions) {
+                const dx = vp[0] - nx;
+                const dy = vp[1] - ny;
+                const dz = vp[2] - nz;
+                if (dx * dx + dy * dy + dz * dz < minSep2) {
+                  tooClose = true;
+                  break;
+                }
+              }
+              if (!tooClose) break;
+            }
+          }
+          const cAngle = (veinAngle + (Math.floor(rng() * symSteps) * Math.PI * 2) / symSteps) % (Math.PI * 2);
           const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, cAngle);
           const b = pi * 12;
           particleData[b + 0] = nx;
@@ -2784,15 +2838,25 @@ function startWorld() {
             mType === 0 ? 0.25 : mType === 1 ? (trap ? 0.1 : 0.3) : mType === 2 ? (trap ? 0.4 : 0.85) : mType === 3 ? 0.9 : 0.95;
           const haz =
             mType === 0 ? 0.0 : mType === 1 ? (trap ? 0.88 : 0.45) : mType === 2 ? (trap ? 0.92 : 0.0) : mType === 3 ? 0.08 : 0.0;
-          const grade = Math.max(0, Math.min(15, Math.round(nutr * 12 + (trap ? 2 : 0))));
           const lBase = pi * 4;
           lifeData[lBase + 0] = 0.56 + 0.44 * rng();
           lifeData[lBase + 1] = nutr;
           lifeData[lBase + 2] = haz;
-          lifeData[lBase + 3] = packLifeMetaJs(3, mType, cAngle, grade, trap);
+          lifeData[lBase + 3] = packLifeMetaJs(3, mType, cAngle, 7, trap);
 
+          veinPositions.push([nx, ny, nz]);
+          veinIndices.push(pi);
           usedInMineral.add(pi);
           placed++;
+        }
+        // Encode live cluster particle count into initial crystal grade (self-similar volume depth)
+        const veinGrade = Math.max(0, Math.min(15, Math.round((placed - 1) * 1.35 + (mType >= 2 ? 2 : 1))));
+        for (const pi of veinIndices) {
+          const lBase = pi * 4;
+          const oldPacked = Math.round(lifeData[lBase + 3]);
+          const trap = (oldPacked >>> 23) & 1;
+          const ang = (((oldPacked >>> 10) & 511) / 512) * Math.PI * 2;
+          lifeData[lBase + 3] = packLifeMetaJs(3, mType, ang, veinGrade, trap);
         }
       }
     }
@@ -2833,6 +2897,18 @@ function startWorld() {
   for (const engineName in engines) {
     engines[engineName].start(device, refs);
   }
+
+  mineralRenderBindGroup = mineralRenderPipeline
+    ? device.createBindGroup({
+        layout: mineralRenderPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: watermanFwdTexture.createView() },
+          { binding: 2, resource: { buffer: worldColoursBuffer } },
+          { binding: 3, resource: { buffer: worldRulesBuffer } },
+        ],
+      })
+    : undefined;
 
   renderBindGroup = device.createBindGroup({
     layout: renderPipeline.getBindGroupLayout(0),
