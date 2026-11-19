@@ -44,6 +44,7 @@ if (hudHeader && controlsHud) {
 let activeViewState: GlobeViewState | null = null;
 let activeD3Proj: d3Geo.GeoProjection | null = null;
 let onViewMutated: (() => void) | null = null;
+let cameraLocked = false;
 let currentMouseTool: 'globe' | 'attract' | 'repel' = 'globe';
 
 export function bindGlobeInput(
@@ -77,11 +78,11 @@ function updateMouseSphere(clientX: number, clientY: number) {
 
 function isUiTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn, #configModal, #game-toggle, #temporal-panel'));
+  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn, #configModal, #globe-switches, #temporal-panel'));
 }
 
 function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
-  if (!activeViewState) return;
+  if (!activeViewState || cameraLocked || (!dx && !dy)) return;
   const spec = PROJECTIONS[activeViewState.projectionId];
   if (spec.sphericalDrag && !forcePan) {
     const sensitivity = 60 / Math.max(activeViewState.scale, 120);
@@ -98,9 +99,10 @@ function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
 }
 
 function applyZoomAt(factor: number, anchorX: number, anchorY: number) {
-  if (!activeViewState || !Number.isFinite(factor) || factor <= 0) return;
+  if (!activeViewState || cameraLocked || !Number.isFinite(factor) || factor <= 0) return;
   const oldScale = activeViewState.scale;
   const newScale = Math.max(120, Math.min(30000, oldScale * factor));
+  if (oldScale === newScale) return;
   const ratio = newScale / oldScale;
 
   if (
@@ -130,6 +132,13 @@ let lastY = 0;
 let prevPinchDist = 0;
 let prevPinchMidX = 0;
 let prevPinchMidY = 0;
+
+export function lockGlobeInput(locked: boolean) {
+  cameraLocked = locked;
+  activePointers.clear();
+  draggingMode = 'none';
+  mouseSphere.mode = 0;
+}
 
 function initPinchFromPointers() {
   const pts = [...activePointers.values()];
@@ -161,7 +170,7 @@ function releaseActivePointer(pointerId: number) {
 }
 
 window.addEventListener('pointerdown', (event) => {
-  if (isUiTarget(event.target)) return;
+  if (cameraLocked || isUiTarget(event.target)) return;
   if (event.pointerType === 'mouse' && event.button !== 0 && event.button !== 2) {
     return;
   }

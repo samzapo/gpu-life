@@ -1,6 +1,23 @@
-<button id="game-toggle" class="game-switch" type="button" aria-pressed="false">
-  <span aria-hidden="true">◷</span> Game mode
-</button>
+<div id="globe-switches" aria-label="Globe modes">
+  <button
+    id="game-toggle"
+    class="game-switch"
+    type="button"
+    aria-pressed="false"
+  >
+    <span aria-hidden="true">◷</span> Game mode
+  </button>
+  <button
+    id="tour-toggle"
+    class="game-switch"
+    type="button"
+    aria-pressed="false"
+    title="Orbit the globe and follow colonies"
+  >
+    <span aria-hidden="true">◎</span> Globe tour
+  </button>
+  <output id="tour-caption" hidden></output>
+</div>
 <div id="event-marker" hidden aria-hidden="true"><i></i></div>
 <div id="force-marker" hidden aria-hidden="true"></div>
 <div id="event-flash" aria-hidden="true" hidden>

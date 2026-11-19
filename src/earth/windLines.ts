@@ -157,6 +157,7 @@ export class WindStreamRenderer {
     gridOrSampler: WindGrid | StreamFieldSampler,
     viewSignature: string,
     active: boolean,
+    cameraMoving = false,
   ): void {
     if (!active) {
       if (this.particles.length > 0) {
@@ -169,16 +170,16 @@ export class WindStreamRenderer {
       'sample' in gridOrSampler ? gridOrSampler : windGridToSampler(gridOrSampler);
     const styles = this.getStyles(sampler.tintRgb);
 
+    this.ensureCount(width, sampler.masked);
     if (viewSignature !== this.viewKey) {
-      this.viewKey = viewSignature;
       ctx.clearRect(0, 0, width, height);
-      this.ensureCount(width, sampler.masked);
-      for (const p of this.particles) {
-        this.respawnInViewport(p, proj, width, height, sampler);
-        p.age = Math.floor(Math.random() * MAX_AGE);
+      if (!cameraMoving || !this.viewKey) {
+        for (const particle of this.particles) {
+          this.respawnInViewport(particle, proj, width, height, sampler);
+          particle.age = Math.floor(Math.random() * MAX_AGE);
+        }
       }
-    } else {
-      this.ensureCount(width, sampler.masked);
+      this.viewKey = viewSignature;
     }
 
     // Fade existing trails using destination-in composite (exact cambecc/earth trail look)
@@ -201,7 +202,9 @@ export class WindStreamRenderer {
     const DEG2RAD = Math.PI / 180;
     const RAD2DEG = 180 / Math.PI;
 
+    const center = cameraMoving ? proj.invert?.(proj.translate()) : null;
     for (const p of this.particles) {
+      if (center && d3Geo.geoDistance(center, [p.lon, p.lat]) > Math.PI / 2) p.age = MAX_AGE;
       if (p.age >= MAX_AGE) {
         this.respawnInViewport(p, proj, width, height, sampler);
       }

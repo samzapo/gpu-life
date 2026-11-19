@@ -24,6 +24,7 @@ export interface LocalTempsSample {
 
 export interface HoverInspectConfig {
   isEnabled: () => boolean;
+  inspectionPaused: () => boolean;
   getProj: () => d3Geo.GeoProjection | null;
   getViewLayer: () => ViewLayerMode;
   isBioLinked: () => boolean;
@@ -1210,6 +1211,8 @@ export class TooltipManager {
   private cachedSnapshot: HoverSimSnapshot | null = null;
   private snapshotPromise: Promise<HoverSimSnapshot | null> | null = null;
   private lastSampleTime = 0;
+  private inspectionRevision = 0;
+  private hasPausedSnapshot = false;
   private lastTouchAt = -10000;
   private lastHtml = '';
   private activeTouchPointers = new Set<number>();
@@ -1289,10 +1292,16 @@ export class TooltipManager {
   private ensureSnapshot(): Promise<HoverSimSnapshot | null> {
     if (this.snapshotPromise) return this.snapshotPromise;
     this.lastSampleTime = performance.now();
+    const paused = this.cfg.inspectionPaused();
+    if (paused && this.hasPausedSnapshot && this.cachedSnapshot)
+      return Promise.resolve(this.cachedSnapshot);
+    const revision = this.inspectionRevision;
     this.snapshotPromise = this.cfg
       .requestSnapshot()
       .then((snap) => {
+        if (revision !== this.inspectionRevision) return null;
         if (snap) {
+          this.hasPausedSnapshot = paused && this.cfg.inspectionPaused();
           this.cachedSnapshot = snap;
         }
         return snap;
@@ -1417,7 +1426,7 @@ export class TooltipManager {
       simCanvas.addEventListener('pointerdown', (ev) => {
         this.hoverCanvas = false;
         if (ev.pointerType !== 'mouse') {
-          if (this.dismissUntilAllTouchUp) return;
+          if (!this.cfg.isEnabled() || this.dismissUntilAllTouchUp) return;
           if (!this.activeTouchTap && ev.isPrimary) {
             this.activeTouchTap = {
               id: ev.pointerId,
@@ -1568,6 +1577,19 @@ export class TooltipManager {
     lensEl.setAttribute('aria-hidden', 'false');
   }
 
+  public invalidateInspectionFrame(): void {
+    this.inspectionRevision++;
+    this.hasPausedSnapshot = false;
+    this.cachedSnapshot = null;
+    this.lastSampleTime = -Infinity;
+  }
+
+  public cancelInspection(): void {
+    this.activeTouchTap = null;
+    this.hoverCanvas = false;
+    this.hide();
+  }
+
   public syncEnabledState(): void {
     if (!this.cfg.isEnabled()) {
       this.hide();
@@ -1645,7 +1667,7 @@ export class TooltipManager {
       this.cachedSnapshot,
       this.cfg,
       isTouch ? 38 : 20,
-      isTouch,
+      isTouch || this.cfg.inspectionPaused(),
       isTouch ? this.pinnedTarget : null,
     );
     if (!info && isTouch && this.pinnedTarget && !this.gpuLensSynced) {

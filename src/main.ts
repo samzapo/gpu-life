@@ -1,9 +1,11 @@
+import { GlobeTour, coordinates } from './earth/globeTour';
 import { TemporalGame } from './temporal/game';
-import { readCheckpoint, type Bloom, type Force, type Point } from './temporal/world';
+import { findColonies, isAlive, readCheckpoint, type Bloom, type Force } from './temporal/world';
 import haloShader from './temporal/halo.wgsl?raw';
 import gameFieldShader from './temporal/field.wgsl?raw';
 import {
   bindGlobeInput,
+  lockGlobeInput,
   mouseSphere,
   refreshBoundProjection,
 } from './input';
@@ -858,7 +860,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.viewLayer && e.viewLayer !== earthParams.viewLayer) {
       nextViewLayer = e.viewLayer;
     }
-    if (e.projection && e.projection !== earthParams.projection) {
+    if (!incidentCameraLocked && e.projection && e.projection !== earthParams.projection) {
       earthParams.projection = e.projection;
       viewState.projectionId = e.projection;
       projUpdated = true;
@@ -899,7 +901,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     }
   }
 
-  if (cfg.view) {
+  if (!incidentCameraLocked && cfg.view) {
     if (cfg.view.rotate) {
       viewState.rotate = [...cfg.view.rotate];
       projUpdated = true;
@@ -934,7 +936,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   syncBioUniformState();
 
   if (projUpdated) {
-    updateProjectionState();
+    manualProjectionChange();
   }
 
   updatePeriodicLegend(colourAmt);
@@ -961,6 +963,10 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
 function updateProjectionState(persist = true) {
   d3Proj = buildConfiguredD3Projection(viewState);
   refreshBoundProjection(d3Proj);
+  if (earthParams.projection !== viewState.projectionId) {
+    earthParams.projection = viewState.projectionId;
+    projectionSelect.refresh();
+  }
   mapDirty = true;
   if (viewState.projectionId === 'waterman') {
     watermanDirty = true;
@@ -969,7 +975,7 @@ function updateProjectionState(persist = true) {
   if (persist) { syncUrlStateDebounced(); scheduleSaveConfig(); }
 }
 
-bindGlobeInput(viewState, () => d3Proj, updateProjectionState);
+bindGlobeInput(viewState, () => d3Proj, manualProjectionChange);
 
 function uploadTempToGpu() {
   if (freezeGameWeather && particleBuffers) return;
@@ -2019,6 +2025,7 @@ function setViewLayerChoice(layer: ViewLayerMode) {
 }
 
 function setProjectionChoice(projId: ProjectionId) {
+  if (incidentCameraLocked) return;
   earthParams.projection = projId;
   projectionSelect.refresh();
   const spec = PROJECTIONS[projId];
@@ -2031,7 +2038,7 @@ function setProjectionChoice(projId: ProjectionId) {
     viewState.width,
     viewState.height,
   );
-  updateProjectionState();
+  manualProjectionChange();
 }
 
 const clampOpacity = (val: boolean | number) =>
@@ -2054,9 +2061,60 @@ let haloPipeline: GPURenderPipeline | undefined;
 let haloMembers: GPUBuffer | undefined;
 let haloGroup: GPUBindGroup | undefined;
 let savedCamera: GlobeViewState | undefined;
+let incidentCameraLocked = false;
+const tour = new GlobeTour();
+const rescuedEpisodes = new Map<number, number>();
+let incidentEpisodes = new Map<number, number>();
+let nextTourSampleMs = 0;
+let samplingTour = false;
+let tourGeneration = 0;
+
+function syncEpisodeTracking() {
+  if (freezeGameWeather || tour.enabled || rescuedEpisodes.size) {
+    if (!gameGroups.length) buildGameGroups();
+  } else {
+    gameGroups = [];
+    gameEpisodes?.destroy();
+    gameEpisodes = undefined;
+  }
+}
+
+function manualProjectionChange() {
+  if (incidentCameraLocked) return;
+  if (tour.enabled || rescuedEpisodes.size || tour.caption) {
+    tour.manualMove();
+    tourGeneration++;
+    rescuedEpisodes.clear();
+    refreshHalo();
+    syncEpisodeTracking();
+    displayCamera();
+  }
+  updateProjectionState();
+}
+
+function displayCamera() {
+  const button = document.getElementById('tour-toggle');
+  const caption = document.getElementById('tour-caption');
+  if (!button || !caption) return;
+  if (button.getAttribute('aria-pressed') !== String(tour.enabled))
+    button.setAttribute('aria-pressed', String(tour.enabled));
+  const label = [tour.caption, rescuedEpisodes.size ? 'Survivors ringed' : '']
+    .filter(Boolean)
+    .join(' · ');
+  if (label !== caption.textContent) caption.textContent = label;
+  caption.hidden = !label;
+}
+
+const colonyRadius = () =>
+  Math.max(
+    0.02,
+    1.35 /
+      Math.max(0.5, oceanOptionParams.r) /
+      Math.max(0.25, optionParams.worldSize),
+  );
 
 function buildGameGroups() {
-  if (!device || !particleBuffers || !lifeStateBuffers || !freezeGameWeather)
+  if (!device || !particleBuffers || !lifeStateBuffers || gameGroups.length)
     return;
   gamePipeline ??= device.createComputePipeline({
     layout: 'auto',
@@ -2097,6 +2155,7 @@ function stepWorld(
   sharedEncoder?: GPUCommandEncoder,
 ) {
   if (!device || !particleBuffers) return;
+  if (incidentCameraLocked) tooltipManager.invalidateInspectionFrame();
   frameCount = (frameCount + 1) % 1000000;
   frameBuf[0] = frameCount;
   if (simBuffer) {
@@ -2115,12 +2174,7 @@ function stepWorld(
   }
   const encoder = sharedEncoder ?? device.createCommandEncoder();
   tick(encoder);
-  if (
-    freezeGameWeather &&
-    gameUniform &&
-    gamePipeline &&
-    gameGroups[alternate]
-  ) {
+  if (gameUniform && gamePipeline && gameGroups[alternate]) {
     const field = new Float32Array(8);
     if (force) {
       field.set(force.point);
@@ -2140,10 +2194,116 @@ function stepWorld(
   if (!sharedEncoder) device.queue.submit([encoder.finish()]);
 }
 
-const coordinates = (point: Point): [number, number] => [
-  (Math.atan2(point[1], point[0]) * 180) / Math.PI,
-  (Math.asin(Math.max(-1, Math.min(1, point[2]))) * 180) / Math.PI,
-];
+function observeSandbox(nowMs: number) {
+  if (
+    !tour.enabled ||
+    game.mode !== 'off' ||
+    samplingTour ||
+    nowMs < nextTourSampleMs ||
+    !device ||
+    !particleBuffers ||
+    !lifeStateBuffers ||
+    !gameEpisodes
+  )
+    return;
+  const intervalMs = 2000;
+  nextTourSampleMs +=
+    (1 + Math.floor((nowMs - nextTourSampleMs) / intervalMs)) * intervalMs;
+  const generation = tourGeneration;
+  samplingTour = true;
+  void readCheckpoint(
+    device,
+    particleBuffers[alternate],
+    lifeStateBuffers[alternate],
+    gameEpisodes,
+    0,
+    frameCount,
+  )
+    .then((state) => {
+      if (generation === tourGeneration && tour.enabled && game.mode === 'off')
+        tour.observe(findColonies(state, colonyRadius()), state.episodes);
+    })
+    .catch(() => {
+      /* Geographic stops remain available during a missed readback. */
+    })
+    .finally(() => {
+      samplingTour = false;
+    });
+}
+
+function refreshHalo() {
+  if (!rescuedEpisodes.size && !incidentEpisodes.size) {
+    haloMembers?.destroy();
+    haloMembers = undefined;
+    haloGroup = undefined;
+    return;
+  }
+  if (
+    !device ||
+    !uniformBuffer ||
+    !watermanFwdTexture ||
+    !particleBuffers ||
+    !lifeStateBuffers ||
+    !gameEpisodes
+  )
+    return;
+  if (!haloPipeline) {
+    const module = device.createShaderModule({
+      code: structsShader + '\n' + projectionShader + '\n' + haloShader,
+    });
+    haloPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module,
+        entryPoint: 'vertex',
+        buffers: [
+          {
+            arrayStride: particleStride,
+            stepMode: 'instance',
+            attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+          },
+          {
+            arrayStride: valenceStride,
+            stepMode: 'instance',
+            attributes: [{ shaderLocation: 1, offset: 12, format: 'float32' }],
+          },
+          {
+            arrayStride: 4,
+            stepMode: 'instance',
+            attributes: [{ shaderLocation: 2, offset: 0, format: 'uint32' }],
+          },
+          {
+            arrayStride: 4,
+            stepMode: 'instance',
+            attributes: [{ shaderLocation: 3, offset: 0, format: 'uint32' }],
+          },
+        ],
+      },
+      fragment: {
+        module,
+        entryPoint: 'fragment',
+        targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }],
+      },
+    });
+  }
+  const members = new Uint32Array(particleAmt);
+  for (const [index, episode] of rescuedEpisodes) members[index] = episode + 1;
+  for (const [index, episode] of incidentEpisodes) members[index] = episode + 1;
+  haloMembers?.destroy();
+  haloMembers = device.createBuffer({
+    label: 'colonyHaloEpisodes',
+    size: members.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(haloMembers, 0, members);
+  haloGroup = device.createBindGroup({
+    layout: haloPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: watermanFwdTexture.createView() },
+    ],
+  });
+}
 
 const game = new TemporalGame({
   ready: () =>
@@ -2156,17 +2316,24 @@ const game = new TemporalGame({
       gameEpisodes!,
       tickNumber,
       frameCount,
+      { valence: valenceBuffer!, bioForce: bioForceBuffer! },
     );
   },
   restore(state) {
     if (!device || !particleBuffers || !lifeStateBuffers || !gameEpisodes)
       return;
+    tooltipManager.invalidateInspectionFrame();
     device.queue.writeBuffer(particleBuffers[alternate], 0, state.particles);
     device.queue.writeBuffer(lifeStateBuffers[alternate], 0, state.life);
     device.queue.writeBuffer(gameEpisodes, 0, state.episodes);
+    if (state.inspection && valenceBuffer && bioForceBuffer) {
+      device.queue.writeBuffer(valenceBuffer, 0, state.inspection.valence);
+      device.queue.writeBuffer(bioForceBuffer, 0, state.inspection.bioForce);
+    }
     frameCount = state.frame;
   },
   step: stepWorld,
+  forceStarted: () => tooltipManager.cancelInspection(),
   focus(point, fraction) {
     if (!savedCamera) {
       savedCamera = {
@@ -2195,79 +2362,31 @@ const game = new TemporalGame({
     updateProjectionState(false);
   },
   highlight(colony, baseline) {
-    if (
-      !device ||
-      !uniformBuffer ||
-      !watermanFwdTexture ||
-      !particleBuffers ||
-      !lifeStateBuffers ||
-      !gameEpisodes
-    )
-      return;
-    if (!haloPipeline) {
-      const module = device.createShaderModule({
-        code: structsShader + '\n' + projectionShader + '\n' + haloShader,
-      });
-      haloPipeline = device.createRenderPipeline({
-        layout: 'auto',
-        vertex: {
-          module,
-          entryPoint: 'vertex',
-          buffers: [
-            {
-              arrayStride: particleStride,
-              stepMode: 'instance',
-              attributes: [
-                { shaderLocation: 0, offset: 0, format: 'float32x3' },
-              ],
-            },
-            {
-              arrayStride: valenceStride,
-              stepMode: 'instance',
-              attributes: [
-                { shaderLocation: 1, offset: 12, format: 'float32' },
-              ],
-            },
-            {
-              arrayStride: 4,
-              stepMode: 'instance',
-              attributes: [{ shaderLocation: 2, offset: 0, format: 'uint32' }],
-            },
-            {
-              arrayStride: 4,
-              stepMode: 'instance',
-              attributes: [{ shaderLocation: 3, offset: 0, format: 'uint32' }],
-            },
-          ],
-        },
-        fragment: {
-          module,
-          entryPoint: 'fragment',
-          targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }],
-        },
-      });
+    incidentEpisodes = new Map(
+      colony.members.map((index) => [index, baseline.episodes[index]]),
+    );
+    refreshHalo();
+  },
+  continueRescue(colony, baseline, outcome) {
+    for (const index of colony.members) {
+      if (
+        isAlive(outcome, index) &&
+        outcome.episodes[index] === baseline.episodes[index]
+      )
+        rescuedEpisodes.set(index, outcome.episodes[index]);
     }
-    const members = new Uint32Array(particleAmt);
-    for (const index of colony.members)
-      members[index] = baseline.episodes[index] + 1;
-    haloMembers?.destroy();
-    haloMembers = device.createBuffer({
-      size: members.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(haloMembers, 0, members);
-    haloGroup = device.createBindGroup({
-      layout: haloPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: watermanFwdTexture.createView() },
-      ],
-    });
+    savedCamera = undefined;
+    tour.rescue(viewState);
+    displayCamera();
+  },
+  observeColonies(colonies, state) {
+    tour.observe(colonies, state.episodes);
   },
   leaveFocus() {
-    haloMembers?.destroy();
-    haloMembers = undefined;
-    haloGroup = undefined;
+    if (incidentEpisodes.size) {
+      incidentEpisodes.clear();
+      refreshHalo();
+    }
     if (!savedCamera) return;
     const { projectionId, rotate, pan, scale } = savedCamera;
     Object.assign(viewState, { projectionId, rotate, pan, scale });
@@ -2300,23 +2419,20 @@ const game = new TemporalGame({
       Math.sin(lat),
     ];
   },
-  groupRadius: () =>
-    Math.max(
-      0.02,
-      1.35 /
-        Math.max(0.5, oceanOptionParams.r) /
-        Math.max(0.25, optionParams.worldSize),
-    ),
+  groupRadius: colonyRadius,
   settingsLocked(locked, incident = false) {
+    if (incidentCameraLocked !== incident) {
+      incidentCameraLocked = incident;
+      lockGlobeInput(incident);
+      tour.pauseClock();
+    }
     advanced.disabled = incident;
     particlesBinding.disabled = incident;
     if (locked === freezeGameWeather) return;
     freezeGameWeather = locked;
-    if (locked && !gameGroups.length) buildGameGroups();
+    tourGeneration++;
+    syncEpisodeTracking();
     if (!locked) {
-      gameGroups = [];
-      gameEpisodes?.destroy();
-      gameEpisodes = undefined;
       if (currentOceanGrid) uploadOceanToGpu(currentOceanGrid);
       uploadWindToGpu(currentWindGrid);
       uploadUvToGpu();
@@ -2324,8 +2440,19 @@ const game = new TemporalGame({
   },
 });
 
+document.getElementById('tour-toggle')!.onclick = () => {
+  if (incidentCameraLocked) return;
+  tour.setEnabled(!tour.enabled);
+  tourGeneration++;
+  nextTourSampleMs = 0;
+  syncEpisodeTracking();
+  displayCamera();
+};
+document.addEventListener('visibilitychange', () => tour.pauseClock());
+
 const tooltipManager = new TooltipManager({
-  isEnabled: () => earthParams.tooltips && (game.mode === 'off' || game.mode === 'watch'),
+  isEnabled: () => earthParams.tooltips && game.canInspect,
+  inspectionPaused: () => game.inspectionPaused,
   getProj: () => d3Proj,
   getViewLayer: () => earthParams.viewLayer,
   isBioLinked: () => earthParams.bioLink && earthParams.bioRate > 0,
@@ -2347,14 +2474,20 @@ const tooltipManager = new TooltipManager({
     const z = Math.max(-1, Math.min(1, u[2] ?? 0));
     const latDeg = Math.asin(z) * (180 / Math.PI);
     const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
-    return sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[2] * earthParams.oceanStrength;
+    return (
+      sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[2] *
+      earthParams.oceanStrength
+    );
   },
   getWindSpeedMs: (u) => {
     if (!earthParams.vortex) return 0;
     const z = Math.max(-1, Math.min(1, u[2] ?? 0));
     const latDeg = Math.asin(z) * (180 / Math.PI);
     const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
-    return sampleWindLonLat(currentWindGrid, lonDeg, latDeg)[2] * earthParams.windStrength;
+    return (
+      sampleWindLonLat(currentWindGrid, lonDeg, latDeg)[2] *
+      earthParams.windStrength
+    );
   },
   getLocalTemps: (u) => sampleLocalTempsAtUnit(u),
   getLocalUv: (u) => sampleLocalUvAtUnit(u),
@@ -2622,13 +2755,14 @@ window.complexLife = {
     pan: [...viewState.pan],
   }),
   setViewState: (patch: Partial<GlobeViewState>) => {
+    if (incidentCameraLocked) return;
     if (patch.projectionId) viewState.projectionId = patch.projectionId;
     if (patch.rotate) viewState.rotate = [...patch.rotate];
     if (patch.pan) viewState.pan = [...patch.pan];
     if (typeof patch.scale === 'number') viewState.scale = patch.scale;
     earthParams.projection = viewState.projectionId;
     projectionSelect.refresh();
-    updateProjectionState();
+    manualProjectionChange();
   },
   readParticles: (count: number = 16) =>
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
@@ -2663,8 +2797,15 @@ function syncCanvasDimensions() {
     }
   }
   mapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  viewState.width = w;
-  viewState.height = h;
+  if (viewState.width !== w || viewState.height !== h) {
+    if (incidentCameraLocked) {
+      viewState.scale *= Math.min(w, h) / Math.min(viewState.width, viewState.height);
+      viewState.pan = [viewState.pan[0] * w / viewState.width, viewState.pan[1] * h / viewState.height];
+    }
+    viewState.width = w;
+    viewState.height = h;
+    updateProjectionState(false);
+  }
 }
 
 const windBootPromise = earthParams.windLevel === 'surface' ? loadFallbackWind().catch(() => null) : Promise.resolve(null);
@@ -3267,7 +3408,15 @@ function startWorld() {
   }
 
   game.reset();
+  tooltipManager.invalidateInspectionFrame();
+  tourGeneration++;
+  tour.resetWorld();
+  rescuedEpisodes.clear();
+  incidentEpisodes.clear();
+  refreshHalo();
+  displayCamera();
   gameEpisodes?.destroy();
+  gameEpisodes = undefined;
   gameGroups = [];
   particleBuffers?.[0].destroy();
   particleBuffers?.[1].destroy();
@@ -3789,7 +3938,7 @@ function startWorld() {
       { binding: 3, resource: { buffer: worldRulesBuffer } },
     ],
   });
-  buildGameGroups();
+  syncEpisodeTracking();
   rebuildLensTrackBindGroups();
 }
 
@@ -3868,6 +4017,13 @@ function update() {
   lastTime = start;
 
   syncCanvasDimensions();
+  let cameraMoving = false;
+  if (!document.hidden && (game.mode === 'watch' || game.mode === 'off')) {
+    cameraMoving = tour.frame(start, viewState);
+    if (cameraMoving) updateProjectionState(false);
+    observeSandbox(start);
+    if (tour.enabled || rescuedEpisodes.size) displayCamera();
+  }
 
   if (
     viewState.projectionId === 'waterman' &&
@@ -3918,6 +4074,7 @@ function update() {
       oceanGridToSampler(currentOceanGrid, oceanTint),
       viewSignature,
       showOcean && earthParams.oceanLines > 0.001,
+      cameraMoving,
     );
   }
 
@@ -3930,6 +4087,7 @@ function update() {
       currentWindGrid,
       viewSignature,
       showAir && earthParams.windLines > 0.001,
+      cameraMoving,
     );
   }
 
@@ -4242,7 +4400,8 @@ mineralRateBinding.on('change', () => {
 });
 
 projectionSelect.on('change', (ev) => {
-  if (suppressPaneEvents) return;
+  // Refreshing the selector after an automated move also emits a change.
+  if (suppressPaneEvents || ev.value === viewState.projectionId) return;
   setProjectionChoice(ev.value);
 });
 
@@ -4315,6 +4474,7 @@ coastlinesBinding.on('change', () => {
 });
 
 resetViewBtn.on('click', () => {
+  if (incidentCameraLocked) return;
   earthParams.projection = 'orthographic';
   suppressPaneEvents = true;
   projectionSelect.refresh();
@@ -4326,7 +4486,7 @@ resetViewBtn.on('click', () => {
     140,
     Math.round(423 * Math.min(viewState.width / 1280, viewState.height / 800) || 423),
   );
-  updateProjectionState();
+  manualProjectionChange();
 });
 
 setInterval(() => {

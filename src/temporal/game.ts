@@ -19,7 +19,10 @@ interface Globe {
   restore(state: Snapshot): void;
   step(force: Force | undefined, bloom: Bloom | undefined): void;
   focus(point: Point, fraction: number): void;
+  forceStarted(): void;
   leaveFocus(): void;
+  continueRescue(colony: Colony, baseline: Snapshot, outcome: Snapshot): void;
+  observeColonies(colonies: Colony[], state: Snapshot): void;
   highlight(colony: Colony, baseline: Snapshot): void;
   project(point: Point): { x: number; y: number; scale: number } | null;
   pointer(x: number, y: number): Point | null;
@@ -56,6 +59,7 @@ export class TemporalGame {
   private plan = new Map<number, Force>();
   private held?: Force;
   private pointerId?: number;
+  private pendingHold?: { id: number; x: number; y: number; timer: number };
   private sign = 1;
   private nextStroke = 0;
   private lastHealthyCount = 0;
@@ -120,6 +124,10 @@ export class TemporalGame {
     canvas.addEventListener(
       'pointerdown',
       (event) => {
+        if (this.pendingHold) {
+          this.cancelHold();
+          return;
+        }
         if (
           this.mode !== 'edit' ||
           event.button !== 0 ||
@@ -130,22 +138,49 @@ export class TemporalGame {
         const point = this.world.pointer(event.clientX, event.clientY);
         if (!point || this.tick >= this.endTick() || this.leftTicks() <= 0)
           return;
-        event.preventDefault();
-        event.stopPropagation();
-        this.pointerId = event.pointerId;
+        const startForce = () => {
+          this.world.forceStarted();
+          this.pointerId = event.pointerId;
+          this.held = { point, sign: this.sign, stroke: ++this.nextStroke };
+          this.running = true;
+          this.nextStepMs = 0;
+        };
         canvas.setPointerCapture(event.pointerId);
-        this.held = { point, sign: this.sign, stroke: ++this.nextStroke };
-        this.running = true;
-        this.nextStepMs = 0;
+        if (event.pointerType !== 'mouse' && !this.running) {
+          // Leave a short tap to the ordinary inspector. A sustained press starts
+          // playback and charges only the ticks that actually receive a force.
+          if (!event.isPrimary) return;
+          const timer = window.setTimeout(() => {
+            this.pendingHold = undefined;
+            startForce();
+          }, 320);
+          this.pendingHold = {
+            id: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            timer,
+          };
+        } else {
+          event.preventDefault();
+          event.stopPropagation();
+          startForce();
+        }
       },
       true,
     );
     canvas.addEventListener('pointermove', (event) => {
+      const pending = this.pendingHold;
+      if (
+        pending?.id === event.pointerId &&
+        Math.hypot(event.clientX - pending.x, event.clientY - pending.y) > 12
+      )
+        this.cancelHold();
       if (event.pointerId !== this.pointerId || !this.held) return;
       const point = this.world.pointer(event.clientX, event.clientY);
       if (point) this.held.point = point;
     });
     const release = (event: PointerEvent) => {
+      if (this.pendingHold?.id === event.pointerId) this.cancelHold();
       if (this.pointerId === event.pointerId) this.release();
     };
     for (const type of [
@@ -169,7 +204,24 @@ export class TemporalGame {
   reset() {
     if (this.mode !== 'off') this.watch();
   }
+  get canInspect() {
+    return this.mode === 'off' || this.mode === 'watch' || this.inspectionPaused;
+  }
+  get inspectionPaused() {
+    return (
+      this.mode === 'confirm' ||
+      this.mode === 'result' ||
+      ((this.mode === 'edit' || this.mode === 'commit') &&
+        !this.running &&
+        this.seekTo === undefined)
+    );
+  }
+  private cancelHold() {
+    if (this.pendingHold) window.clearTimeout(this.pendingHold.timer);
+    this.pendingHold = undefined;
+  }
   private release() {
+    this.cancelHold();
     this.held = undefined;
     this.pointerId = undefined;
     element('force-marker').hidden = true;
@@ -190,7 +242,6 @@ export class TemporalGame {
     this.nextStepMs = 0;
     this.lastHealthyCount = 0;
     this.world.leaveFocus();
-    this.world.settingsLocked(false);
   }
   private watch() {
     if (this.disabledReason.startsWith('Checkpoint memory'))
@@ -210,6 +261,7 @@ export class TemporalGame {
       this.world.restore(this.incident.original);
     this.clear();
     this.mode = 'off';
+    this.world.settingsLocked(false);
     this.display();
   }
   private arrivalTick() {
@@ -319,6 +371,7 @@ export class TemporalGame {
       .catch(() => {
         if (this.epoch !== epoch) return;
         this.clear();
+        this.world.settingsLocked(false);
         this.mode = 'watch';
         this.running = false;
         this.unavailable(
@@ -332,7 +385,9 @@ export class TemporalGame {
       const checkpointBytes =
         state.life.byteLength +
         state.particles.byteLength +
-        state.episodes.byteLength;
+        state.episodes.byteLength +
+        (state.inspection?.valence.byteLength ?? 0) +
+        (state.inspection?.bioForce.byteLength ?? 0);
       // Space for both the original recording and an edited branch.
       const slots = Math.max(
         3,
@@ -341,6 +396,7 @@ export class TemporalGame {
       this.intervalTicks = Math.ceil(20 / (slots - 1)) * ticksPerSecond;
     }
     const colonies = findColonies(state, this.world.groupRadius());
+    this.world.observeColonies(colonies, state);
     this.history.push({ state, colonies });
     while (
       this.history.length > 2 &&
@@ -574,6 +630,11 @@ export class TemporalGame {
     if (!incident || this.mode === 'film') return;
     if (action === 'skip' || action === 'continue') {
       if (action === 'skip') this.world.restore(incident.original);
+      else {
+        const outcome = this.saved(this.endTick());
+        if (this.mode !== 'result' || !outcome) return;
+        this.world.continueRescue(incident.colony, incident.healthy, outcome);
+      }
       this.watch();
       return;
     }
@@ -613,7 +674,8 @@ export class TemporalGame {
       );
     const point = bloom?.point ?? this.incident?.colony.center;
     const marker = element('event-marker');
-    const projected = point && this.world.project(point);
+    const projected =
+      this.mode === 'film' && point && this.world.project(point);
     marker.hidden = !projected;
     if (projected) {
       const size = Math.max(20, 2 * (bloom?.radius ?? 0.04) * projected.scale);
@@ -649,6 +711,7 @@ export class TemporalGame {
     document.body.dataset.temporal = mode;
     element('game-toggle').setAttribute('aria-pressed', String(mode !== 'off'));
     element('event-flash').hidden = mode !== 'film';
+    if (mode !== 'film') element('event-marker').hidden = true;
     if (mode === 'off') {
       element('event-marker').hidden = true;
       return;
@@ -722,23 +785,21 @@ export class TemporalGame {
         originalSurvivors +
         '. ' +
         (clear
-          ? 'Your timeline can continue.'
+          ? 'Continue to watch the survivors. Move the camera to dismiss their rings.'
           : 'Save 60% to clear. Your next attempt is free.');
       return;
     }
     title.textContent = committed
       ? 'Committed timeline'
       : 'Edit the intervention';
-    message.textContent = committed
-      ? 'Playing your recorded forces.'
-      : this.exposed ||
-          this.blooms.some(
-            (bloom) =>
-              bloom.startTick <= incident.original.tick &&
-              bloom.endTick >= incident.start,
-          )
-        ? 'Hold to steer the mint-ringed cells outside the amber bloom. Scrub to edit.'
-        : 'Hold to steer the mint-ringed cells away from danger. Scrub to edit.';
+    if (committed)
+      message.textContent = this.running
+        ? 'Playing your recorded forces.'
+        : 'Paused · hover or tap to inspect.';
+    else
+      message.textContent = this.running
+        ? 'Hold to steer the ringed cells away from danger. Scrub to edit.'
+        : 'Hover or tap to inspect. Hold to steer the ringed cells away from danger.';
     this.timeline.min = String(this.arrivalTick());
     this.timeline.max = String(this.endTick());
     this.timeline.value = String(this.seekTo ?? this.tick);

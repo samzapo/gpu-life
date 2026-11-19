@@ -12,6 +12,10 @@ export interface Snapshot {
   particles: Float32Array<ArrayBuffer>;
   life: Float32Array<ArrayBuffer>;
   episodes: Uint32Array<ArrayBuffer>;
+  inspection?: {
+    valence: Float32Array<ArrayBuffer>;
+    bioForce: Float32Array<ArrayBuffer>;
+  };
 }
 export interface Colony {
   members: number[];
@@ -132,9 +136,12 @@ export async function readCheckpoint(
   episodes: GPUBuffer,
   tick: number,
   frame: number,
+  inspection?: { valence: GPUBuffer; bioForce: GPUBuffer },
 ): Promise<Snapshot> {
+  const valenceOffset = particles.size + life.size + episodes.size;
+  const bioForceOffset = valenceOffset + (inspection?.valence.size ?? 0);
   const staging = device.createBuffer({
-    size: particles.size + life.size + episodes.size,
+    size: bioForceOffset + (inspection?.bioForce.size ?? 0),
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   try {
@@ -148,12 +155,40 @@ export async function readCheckpoint(
       particles.size + life.size,
       episodes.size,
     );
+    if (inspection) {
+      encoder.copyBufferToBuffer(
+        inspection.valence,
+        0,
+        staging,
+        valenceOffset,
+        inspection.valence.size,
+      );
+      encoder.copyBufferToBuffer(
+        inspection.bioForce,
+        0,
+        staging,
+        bioForceOffset,
+        inspection.bioForce.size,
+      );
+    }
     device.queue.submit([encoder.finish()]);
     await staging.mapAsync(GPUMapMode.READ);
     const bytes = staging.getMappedRange().slice(0);
     return {
       tick,
       frame,
+      inspection: inspection && {
+        valence: new Float32Array(
+          bytes,
+          valenceOffset,
+          inspection.valence.size / 4,
+        ),
+        bioForce: new Float32Array(
+          bytes,
+          bioForceOffset,
+          inspection.bioForce.size / 4,
+        ),
+      },
       particles: new Float32Array(bytes, 0, particles.size / 4),
       life: new Float32Array(bytes, particles.size, life.size / 4),
       episodes: new Uint32Array(
