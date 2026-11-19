@@ -108,29 +108,37 @@ fn unpackPhase(packed: f32) -> u32 {
     if (packed < 0.5) {
         return 0u;
     }
-    return u32(packed + 0.5) & 3u;
+    return u32(round(packed)) & 3u;
 }
 
 fn unpackBioSpecies(packed: f32) -> u32 {
     if (packed < 0.5) {
         return 0u;
     }
-    return (u32(packed + 0.5) >> 2u) & 255u;
+    return (u32(round(packed)) >> 2u) & 255u;
 }
 
 fn unpackKinPhase(packed: f32) -> f32 {
     if (packed < 0.5) {
         return 0.0;
     }
-    return (f32((u32(packed + 0.5) >> 10u) & 1023u) / 1024.0) * TWO_PI;
+    return (f32((u32(round(packed)) >> 10u) & 511u) / 512.0) * TWO_PI;
 }
 
-fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32) -> f32 {
+fn unpackEncapGene(packed: f32) -> u32 {
+    if (packed < 0.5) {
+        return 7u;
+    }
+    return (u32(round(packed)) >> 19u) & 15u;
+}
+
+fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32, encapGene: u32) -> f32 {
     if (phase == 0u) {
         return 0.0;
     }
-    let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 1024.0)) & 1023u;
-    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u));
+    let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 512.0)) & 511u;
+    let g = min(encapGene, 15u);
+    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u) | (g << 19u));
 }
 
 struct ForceAccum {

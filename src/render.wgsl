@@ -63,9 +63,9 @@ fn vertex(
 
     let phase = unpackPhase(particle.lifeState.w);
     let bioSp = unpackBioSpecies(particle.lifeState.w);
-    let phaseF = select(0.0, 1.0, phase == 1u);
+    let phaseF = f32(phase);
     let bioSpeciesF = f32(bioSp);
-    let layerOpacity = select(uniforms.earthFlags.w, uniforms.renderParams.y, phase == 1u);
+    let layerOpacity = select(uniforms.earthFlags.w, uniforms.renderParams.y, phase != 0u);
 
     let n = normalize(particle.pos);
     let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
@@ -140,7 +140,8 @@ fn vertex(
     let orbScale = select(1.0, 1.68, uniforms.flags.x > 0.5);
     let chemAngR = max(uniforms.size * orbScale, 1.55 / scalePx);
     let bioAngR = max(uniforms.renderParams.x, 1.75 / scalePx);
-    let angR = select(chemAngR, bioAngR, phase == 1u);
+    let lipidAngR = bioAngR * 1.28;
+    let angR = select(chemAngR, select(bioAngR, lipidAngR, phase == 2u), phase != 0u);
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
 
@@ -191,10 +192,45 @@ fn fragment(
     let cIdx = min(u32(max(chemSpecies, 0.0)), nChem - 1u);
     let chemCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
     let d = length(uv);
-    let isBio = phaseF > 0.5;
-    let layerOpacity = clamp(select(uniforms.earthFlags.w, uniforms.renderParams.y, isBio), 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
-    if (d > 1.0 || layerOpacity <= 0.001) {
+    let isLipid = phaseF > 1.5;
+    let isBio = phaseF > 0.5 && !isLipid;
+    let layerOpacity = clamp(select(uniforms.earthFlags.w, uniforms.renderParams.y, phaseF > 0.5), 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
+    if ((!isLipid && d > 1.0) || (isLipid && max(abs(uv.x), abs(uv.y)) > 1.0) || layerOpacity <= 0.001) {
         discard;
+    }
+
+    if (isLipid) {
+        let bIdx = nChem + min(u32(max(bioSpeciesF, 0.0) + 0.5), nBio - 1u);
+        let bioCol = vec3f(colours[bIdx * 3u], colours[bIdx * 3u + 1u], colours[bIdx * 3u + 2u]);
+        let energy = clamp(lifeState.x, 0.0, 1.45);
+        let poi = clamp(lifeState.z, 0.0, 1.0);
+        let energyTone = clamp(0.72 + 0.35 * energy, 0.55, 1.25);
+
+        let wave = 0.045 * sin(uv.x * 11.0);
+        let tailOffset = 0.14 + wave;
+        let dTail = min(abs(uv.y - tailOffset), abs(uv.y + tailOffset));
+        let tailMaskX = smoothstep(-0.92, -0.84, uv.x) * (1.0 - smoothstep(0.12, 0.22, uv.x));
+        let tailAlpha = (1.0 - smoothstep(0.085 - delta * 0.5, 0.085 + delta * 0.5, dTail)) * tailMaskX;
+        let tailCol = min(vec3f(0.96, 0.74, 0.30) * energyTone, vec3f(1.0));
+
+        let dHead = length(uv - vec2f(0.36, 0.0));
+        let headAlpha = 1.0 - smoothstep(0.36 - delta, 0.36 + delta * 0.6, dHead);
+        let specCore = (1.0 - smoothstep(0.0, 0.24, dHead)) * 0.25;
+        var headCol = mix(vec3f(0.76, 0.96, 1.0), bioCol, 0.22) * energyTone + vec3f(specCore);
+        if (poi > 0.20) {
+            let rim = smoothstep(0.18, 0.36, dHead) * clamp((poi - 0.20) * 1.15, 0.0, 0.85);
+            headCol = mix(headCol, vec3f(0.92, 0.28, 0.98), rim);
+        }
+        headCol = min(headCol, vec3f(1.0));
+
+        let premulTail = tailCol * tailAlpha;
+        let premulHead = headCol * headAlpha;
+        let premulLip = premulHead + premulTail * (1.0 - headAlpha);
+        let lipAlpha = headAlpha + tailAlpha * (1.0 - headAlpha);
+        if (lipAlpha <= 0.002) {
+            discard;
+        }
+        return vec4f(premulLip * layerOpacity, lipAlpha * layerOpacity);
     }
 
     if (isBio) {

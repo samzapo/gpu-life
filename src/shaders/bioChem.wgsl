@@ -1,7 +1,7 @@
-// Unified conserved-mass emergent blob ecology + bio-chemistry helpers.
+// Unified conserved-mass emergent blob ecology + biogenic lipid bilayers + bio-chemistry helpers.
 // Every particle carries an immutable `chemSpecies` (`p.colour`), live `phase`
-// (0 = Chemistry, 1 = Particle Life Organism Biomass, 2 = reserved Lipid Bilayer),
-// `bioSpecies` (0..M-1), and continuous circular `kinPhase` packed in `lifeState.w`.
+// (0 = Chemistry, 1 = Particle Life Organism Cytoplasm, 2 = Biogenic Amphiphilic Lipid Bilayer),
+// `bioSpecies` (0..M-1), circular `kinPhase`, and heritable 4-bit `encapGene` (0..15) packed in `lifeState.w`.
 // Producer / Consumer / Mixotroph / Decomposer / Halophile identities emerge
 // directly from the asymmetric Particle Life matrix traits, self-propulsion speed,
 // and conserved elemental makeup (C, H, O, S) of each blob's constituent particles.
@@ -32,6 +32,55 @@ fn isBiogenicElement(atomicNum: u32, valence: u32) -> bool {
     }
     // Biogenic pool: H(1), C(5), O(6), S(12). Si(11), halogens, metals, noble gases remain strictly abiotic.
     return atomicNum == 1u || atomicNum == 5u || atomicNum == 6u || atomicNum == 12u;
+}
+
+fn isLipidElement(atomicNum: u32, valence: u32) -> bool {
+    if (valence == 0u) {
+        return false;
+    }
+    // Membrane lipids assemble strictly from conserved H(1), C(5), O(6).
+    return atomicNum == 1u || atomicNum == 5u || atomicNum == 6u;
+}
+
+fn encapReqColors(gene: u32) -> u32 {
+    if (gene <= 2u) {
+        return 3u;
+    }
+    if (gene <= 7u) {
+        return 4u;
+    }
+    if (gene <= 12u) {
+        return 5u;
+    }
+    return 6u;
+}
+
+fn encapReqSize(gene: u32) -> f32 {
+    if (gene <= 4u) {
+        return 6.0 + 0.5 * f32(gene);
+    }
+    if (gene <= 10u) {
+        return 8.5 + 0.65 * f32(gene - 4u);
+    }
+    return 12.5 + 0.9 * f32(gene - 10u);
+}
+
+fn encapNoveltyDrive(gene: u32, currentColors: u32) -> f32 {
+    let g = f32(min(gene, 15u)) / 15.0;
+    let goalColors = 5.0 + g * 4.0;
+    return 0.10 + 0.24 * clamp((goalColors - f32(currentColors)) / 4.0, 0.0, 1.0);
+}
+
+fn mutateEncapGene(baseGene: u32, pi: u32, frameU: u32, salt: u32, pMut: f32) -> u32 {
+    let g = min(baseGene, 15u);
+    let r = hashFloat(pi, frameU, salt);
+    if (r >= pMut) {
+        return g;
+    }
+    if (r < pMut * 0.5) {
+        return select(0u, g - 1u, g > 0u);
+    }
+    return min(g + 1u, 15u);
 }
 
 fn bioRoleKind(atomicNum: u32, valence: u32) -> u32 {
@@ -102,10 +151,10 @@ fn evalOceanCurrentVel(pos: vec3f, oc: vec4f, currentScale: f32) -> vec3f {
     let eEast = sphereEastBasis(pos);
     let eNorth = normalize(cross(pos, eEast));
     let cur3D = oc.x * eEast + oc.y * eNorth;
-    var cTarget = (cur3D / 0.7) * (0.36 * currentScale);
+    var cTarget = (cur3D / 0.7) * (0.30 * currentScale) * smoothstep(0.35, 0.55, oc.w);
     let cLen = length(cTarget);
-    if (cLen > 1.25) {
-        cTarget *= 1.25 / cLen;
+    if (cLen > 1.15) {
+        cTarget *= 1.15 / cLen;
     }
     return cTarget;
 }
@@ -127,6 +176,43 @@ fn getBioSpeciesTraits(nChem: u32, nBio: u32, sp: u32) -> vec4f {
     let traitBase = oceanBase + max(nBio, 1u) * max(nBio, 1u);
     let idx = traitBase + min(sp, max(nBio, 1u) - 1u) * 4u;
     return vec4f(matrix[idx + 0u], matrix[idx + 1u], matrix[idx + 2u], matrix[idx + 3u]);
+}
+
+fn pickCompatibleNovelSpecies(
+    nChem: u32,
+    nBio: u32,
+    hostSp: u32,
+    spMask: u32,
+    pi: u32,
+    frameU: u32,
+    salt: u32,
+) -> u32 {
+    if (nBio <= 1u) {
+        return hostSp;
+    }
+    var fallbackSp = hostSp;
+    var hasFallback = false;
+    for (var attempt: u32 = 0u; attempt < 4u; attempt++) {
+        let candSp = u32(floor(hashFloat(pi, frameU, salt + attempt) * f32(nBio))) % nBio;
+        if (candSp == hostSp) {
+            continue;
+        }
+        let aHC = getBioMatrixA(nChem, nBio, hostSp, candSp);
+        let aCH = getBioMatrixA(nChem, nBio, candSp, hostSp);
+        let compat = (aHC > 0.12) || (abs(aHC - aCH) > 0.42 && (aHC + aCH) > -0.22);
+        if (!compat) {
+            continue;
+        }
+        let isNovel = (spMask & (1u << (candSp % 24u))) == 0u;
+        if (isNovel) {
+            return candSp;
+        }
+        if (!hasFallback) {
+            fallbackSp = candSp;
+            hasFallback = true;
+        }
+    }
+    return fallbackSp;
 }
 
 // Computes `(dEnergy, dVitamin, dPoison, signedSteerMag)` imparted to one living Biomass particle
@@ -301,12 +387,33 @@ struct BioUnifiedAccum {
     nearHalogen: f32,
     nearTotalBio: f32,
     nearStressedBio: f32,
-    // Chemistry-side emergent autotrophic fixer accumulation
+    // Chemistry-side emergent autotrophic fixer + lipid bilayer accumulation
     nearFixer: f32,
     bestFixW: f32,
     bestFixSp: u32,
     bestFixKin: f32,
-    // Same-blob organism anatomy & energy/kin sharing
+    bestFixGene: u32,
+    bestAdjW: f32,
+    bestAdjSp: u32,
+    bestAdjKin: f32,
+    adjSpeciesMask: u32,
+    adjBlobCount: f32,
+    adjEnergySum: f32,
+    adjGeneSum: f32,
+    adjKinCos: f32,
+    adjKinSin: f32,
+    adjKinW: f32,
+    blobCentroid: vec3f,
+    blobCentW: f32,
+    lipidCentroid: vec3f,
+    lipidCentW: f32,
+    nearLipidCount: f32,
+    nearLipidEnergySum: f32,
+    bestLipidW: f32,
+    bestLipidSp: u32,
+    bestLipidKin: f32,
+    bestLipidGene: u32,
+    // Same-blob organism anatomy, heterogeneity mask, lipids, & gene sharing
     blobCount: f32,
     blobWeightSum: f32,
     blobEnergySum: f32,
@@ -318,31 +425,33 @@ struct BioUnifiedAccum {
     blobKinCos: f32,
     blobKinSin: f32,
     blobKinWeight: f32,
+    blobSpeciesMask: u32,
+    blobLipidCount: f32,
+    blobGeneSum: f32,
     // Foreign-blob grazing & predation
     nearForeignPrey: f32,
     nearPredThreat: f32,
     bestPredW: f32,
     bestPredSp: u32,
     bestPredKin: f32,
+    bestPredGene: u32,
     predRepelDir: vec3f,
     // Emergent saprotrophic decomposition
     nearDecompPower: f32,
     bestDecompW: f32,
     bestDecompSp: u32,
     bestDecompKin: f32,
+    bestDecompGene: u32,
 }
 
 fn initBioUnifiedAccum() -> BioUnifiedAccum {
-    return BioUnifiedAccum(
-        vec3f(0.0), 1.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, vec3f(0.0), 0.0,
-        vec3f(0.0),
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0u, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0u, 0.0, vec3f(0.0),
-        0.0, 0.0, 0u, 0.0,
-    );
+    var acc = BioUnifiedAccum();
+    acc.actScale = 1.0;
+    acc.bestFixGene = 7u;
+    acc.bestLipidGene = 7u;
+    acc.bestPredGene = 7u;
+    acc.bestDecompGene = 7u;
+    return acc;
 }
 
 fn accumulateBioUnifiedNeighbor(
@@ -409,14 +518,72 @@ fn accumulateBioUnifiedNeighbor(
             if (isBiogenicElement(nbAtomicNum, nbValence) && myTraits.x > 0.45) {
                 (*acc).bioSteer += dToNb * (wDist * 0.14);
             }
+        } else if (myPhase == 2u) {
+            // Amphiphilic bilayer intercepts dissolving halogens on behalf of sheltered cytoplasm
+            if (nbKind == 4u) {
+                (*acc).dPoi += 0.30 * wDist * bio.rate;
+            }
         }
         return;
     }
 
-    // Neighbor is living Particle Life biomass (`nbPhase == 1u`)
     let nbEnergy = clamp(nbLifeState.x, 0.0, 1.6);
     let nbPoi = clamp(nbLifeState.z, 0.0, 1.0);
     let nbKin = unpackKinPhase(nbLifeState.w);
+    let nbGene = unpackEncapGene(nbLifeState.w);
+
+    // Neighbor is an oriented amphiphilic lipid bilayer particle (`nbPhase == 2u`)
+    if (nbPhase == 2u) {
+        if (myPhase == 0u) {
+            (*acc).nearLipidCount += 1.0;
+            (*acc).nearLipidEnergySum += nbEnergy;
+            (*acc).lipidCentroid += wDist * nbPos;
+            (*acc).lipidCentW += wDist;
+            let lipScore = wDist * clamp(nbEnergy, 0.25, 1.5);
+            if (lipScore > (*acc).bestLipidW) {
+                (*acc).bestLipidW = lipScore;
+                (*acc).bestLipidSp = nbSp;
+                (*acc).bestLipidKin = nbKin;
+                (*acc).bestLipidGene = nbGene;
+            }
+            let myKind = bioRoleKind(myAtomicNum, myValence);
+            if (myKind == 4u) {
+                (*acc).kick -= dToNb * (wDist * 1.55 * bio.rate);
+                (*acc).chemBioCount += 1.0;
+            } else if (isBiogenicElement(myAtomicNum, myValence)) {
+                (*acc).kick += dToNb * (wDist * 0.45 * bio.rate);
+                (*acc).glowSum += 0.40 * wDist;
+                (*acc).chemBioCount += 1.0;
+            }
+        } else if (myPhase == 1u) {
+            let myKin = unpackKinPhase(myLifeState.w);
+            if (kinAngularDist(myKin, nbKin) < 0.30) {
+                (*acc).blobLipidCount += 1.0;
+                let lw = max(wDist, 0.15) * 0.35;
+                (*acc).blobKinCos += lw * cos(nbKin);
+                (*acc).blobKinSin += lw * sin(nbKin);
+                (*acc).blobKinWeight += lw;
+            } else {
+                (*acc).predRepelDir += dToNb * wDist;
+            }
+        } else {
+            // Lateral energy, kin, and gene diffusion along own bilayer leaflets
+            let myKin = unpackKinPhase(myLifeState.w);
+            if (kinAngularDist(myKin, nbKin) < 0.32) {
+                let bw = max(wDist, 0.15);
+                (*acc).blobLipidCount += 1.0;
+                (*acc).blobWeightSum += 0.85;
+                (*acc).blobEnergySum += nbEnergy * 0.85;
+                (*acc).blobGeneSum += f32(nbGene) * 0.85;
+                (*acc).blobKinCos += (bw * 0.85) * cos(nbKin);
+                (*acc).blobKinSin += (bw * 0.85) * sin(nbKin);
+                (*acc).blobKinWeight += bw * 0.85;
+            }
+        }
+        return;
+    }
+
+    // Neighbor is living Particle Life cytoplasm (`nbPhase == 1u`)
     let curVel = evalOceanCurrentVel(nbPos, oc, bio.oceanCurrentScale);
     let nbSelfVel = nbVel - curVel;
     let nbSelfSpeed = length(nbSelfVel);
@@ -430,6 +597,23 @@ fn accumulateBioUnifiedNeighbor(
     }
 
     if (myPhase == 0u) {
+        // Order-independent host telemetry for heterogeneous encapsulation gating
+        (*acc).adjSpeciesMask |= (1u << (nbSp % 24u));
+        (*acc).adjBlobCount += 1.0;
+        (*acc).adjEnergySum += nbEnergy;
+        (*acc).adjGeneSum += f32(nbGene);
+        (*acc).adjKinCos += wDist * cos(nbKin);
+        (*acc).adjKinSin += wDist * sin(nbKin);
+        (*acc).adjKinW += wDist;
+        (*acc).blobCentroid += wDist * nbPos;
+        (*acc).blobCentW += wDist;
+        let adjScore = wDist * max(nbEnergy, 0.25);
+        if (adjScore > (*acc).bestAdjW) {
+            (*acc).bestAdjW = adjScore;
+            (*acc).bestAdjSp = nbSp;
+            (*acc).bestAdjKin = nbKin;
+        }
+
         // Check if nearby living blob particle can fix free biogenic C/H/O/S atom
         let nbAutoInst = clamp(
             (0.35 + 0.85 * nbTraits.x) * (0.45 + 0.85 * nbSolarElem) / (1.0 + 0.65 * nbMotility),
@@ -443,6 +627,7 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).bestFixW = fixScore;
                 (*acc).bestFixSp = nbSp;
                 (*acc).bestFixKin = nbKin;
+                (*acc).bestFixGene = nbGene;
             }
         }
 
@@ -455,15 +640,40 @@ fn accumulateBioUnifiedNeighbor(
         return;
     }
 
-    // Both particles are living biomass (`myPhase == 1u && nbPhase == 1u`)
+    if (myPhase == 2u) {
+        let myKin = unpackKinPhase(myLifeState.w);
+        if (kinAngularDist(myKin, nbKin) < 0.32) {
+            let bw = max(wDist, 0.15);
+            (*acc).blobCount += 1.0;
+            (*acc).blobSpeciesMask |= (1u << (nbSp % 24u));
+            (*acc).blobWeightSum += 1.0;
+            (*acc).blobEnergySum += nbEnergy;
+            (*acc).blobGeneSum += f32(nbGene);
+            (*acc).blobKinCos += (bw * 1.4) * cos(nbKin);
+            (*acc).blobKinSin += (bw * 1.4) * sin(nbKin);
+            (*acc).blobKinWeight += bw * 1.4;
+        } else {
+            let nbPredInst = clamp(
+                (0.20 + 0.95 * nbTraits.w) * (0.35 + 0.85 * nbMotility) * (0.55 + 0.65 * nbRedoxElem),
+                0.05,
+                1.60,
+            );
+            if (nbEnergy > 0.24 && nbPredInst > 0.32) {
+                (*acc).nearPredThreat += wDist * nbPredInst;
+            }
+        }
+        return;
+    }
+
+    // Both particles are living cytoplasm (`myPhase == 1u && nbPhase == 1u`)
     let myKin = unpackKinPhase(myLifeState.w);
     let kinDist = kinAngularDist(myKin, nbKin);
     let aMyNb = getBioMatrixA(nChem, nBio, myBioSp, nbSp);
     let aNbMy = getBioMatrixA(nChem, nBio, nbSp, myBioSp);
     let mutualCoh = aMyNb + aNbMy;
 
-    let sameBlob = (r < bio.catRadius * 0.90) &&
-        ((kinDist < 0.22) || (r < bio.catRadius * 0.56 && (mutualCoh > 0.22 || length(myVel - nbVel) < 0.30)));
+    let sameBlob = (r < bio.catRadius * 0.92) &&
+        ((kinDist < 0.24) || (r < bio.catRadius * 0.62 && (mutualCoh > 0.08 || (abs(aMyNb - aNbMy) > 0.45 && mutualCoh > -0.30) || length(myVel - nbVel) < 0.32)));
 
     if (sameBlob) {
         let bw = max(wDist, 0.15);
@@ -478,6 +688,10 @@ fn accumulateBioUnifiedNeighbor(
         (*acc).blobKinCos += bw * cos(nbKin);
         (*acc).blobKinSin += bw * sin(nbKin);
         (*acc).blobKinWeight += bw;
+        (*acc).blobSpeciesMask |= (1u << (nbSp % 24u));
+        (*acc).blobGeneSum += f32(nbGene);
+        (*acc).blobCentroid += bw * nbPos;
+        (*acc).blobCentW += bw;
         return;
     }
 
@@ -517,6 +731,7 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).bestPredW = threatScore;
                 (*acc).bestPredSp = nbSp;
                 (*acc).bestPredKin = nbKin;
+                (*acc).bestPredGene = nbGene;
             }
         }
     }
@@ -528,6 +743,7 @@ fn accumulateBioUnifiedNeighbor(
             (*acc).bestDecompW = decScore;
             (*acc).bestDecompSp = nbSp;
             (*acc).bestDecompKin = nbKin;
+            (*acc).bestDecompGene = nbGene;
         }
     }
 }
@@ -583,41 +799,124 @@ fn finalizeBioUnified(
             return BioStepResult(vec4f(0.0), chemForce);
         }
 
-        let crowdHeadroom = clamp(1.0 - acc.nearTotalBio / 26.0, 0.0, 1.0);
+        let adjColors = countOneBits(acc.adjSpeciesMask);
+        let adjCount = acc.adjBlobCount;
+        let adjAvgE = acc.adjEnergySum / max(adjCount, 1.0);
+        let hasAdj = adjCount > 0.5;
+        let adjGene = select(
+            acc.bestLipidGene,
+            u32(clamp(round(acc.adjGeneSum / max(adjCount, 1.0)), 0.0, 15.0)),
+            hasAdj,
+        );
+        let avgLipidE = acc.nearLipidEnergySum / max(acc.nearLipidCount, 1.0);
+        let eBase = sphereEastBasis(pos);
+        var outwardDir = eBase;
+        if (acc.blobCentW > 1e-4) {
+            let cLen = length(acc.blobCentroid);
+            if (cLen > 1e-5) {
+                let blobCenter = acc.blobCentroid / cLen;
+                outwardDir = orthoBasis(pos, pos - blobCenter);
+            }
+        }
         let bondEase = 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0));
 
-        // 1. Emergent autotrophic fixation of biogenic C/H/O/S atoms into neighboring blob's species & kin
-        if (acc.nearFixer > 0.0 && crowdHeadroom > 0.01) {
-            let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
-            let pFix = clamp(
-                0.34 * solar * (0.55 + 0.85 * upwell) * min(acc.nearFixer, 3.0) * elemAffinity * crowdHeadroom * bondEase * dtBio,
-                0.0,
-                0.080,
-            );
-            if (hashFloat(pi, frameU, 10u) < pFix) {
-                var targetSp = min(acc.bestFixSp, nBio - 1u);
-                // 4% tissue differentiation: adopt a mutually compatible species j from A so blobs build multi-species anatomy
-                if (nBio > 1u && hashFloat(pi, frameU, 11u) < 0.04) {
-                    let candSp = u32(floor(hashFloat(pi, frameU, 12u) * f32(nBio))) % nBio;
-                    if (getBioMatrixA(nChem, nBio, targetSp, candSp) > 0.15) {
-                        targetSp = candSp;
-                    }
-                }
-                return BioStepResult(
-                    vec4f(0.65, 0.06, 0.0, packLifeMeta(1u, targetSp, acc.bestFixKin)),
-                    vec4f(0.0, 0.0, 0.0, 0.9),
+        // 0A. Deferred biogenic lipid bilayer synthesis (`0 -> 2`, strictly C/H/O only)
+        let kinCoherence = length(vec2f(acc.adjKinCos, acc.adjKinSin)) / max(acc.adjKinW, 1e-4);
+        if (isLipidElement(atomicNum, valence) && adjCount >= 3.0 && kinCoherence > 0.80) {
+            let matureDeNovo = (adjColors >= encapReqColors(adjGene)) && (adjCount >= encapReqSize(adjGene)) && (adjAvgE > 0.54);
+            let expandExisting = (acc.nearLipidCount >= 1.0) && (adjColors >= 3u) && (adjCount >= 3.0) && (max(adjAvgE, avgLipidE) > 0.48);
+            let maxLocalLipids = 7.0;
+            let lipidHeadroom = clamp(1.0 - acc.nearLipidCount / maxLocalLipids, 0.0, 1.0);
+            if ((matureDeNovo || expandExisting) && lipidHeadroom > 0.05) {
+                let zipBoost = select(1.0, 1.65, expandExisting && acc.nearLipidCount < 5.0);
+                let pLipid = clamp(
+                    0.85 * zipBoost * solar * (0.55 + 0.85 * upwell) * clamp(max(adjAvgE, avgLipidE), 0.5, 1.4) * lipidHeadroom * bondEase * dtBio,
+                    0.0,
+                    0.16,
                 );
+                if (hashFloat(pi, frameU, 30u) < pLipid) {
+                    let hostSp = min(select(select(acc.bestLipidSp, acc.bestAdjSp, acc.bestAdjW > 0.0), acc.bestFixSp, acc.bestFixW > 0.0), nBio - 1u);
+                    let hostKin = select(select(acc.bestLipidKin, acc.bestAdjKin, acc.bestAdjW > 0.0), acc.bestFixKin, acc.bestFixW > 0.0);
+                    var initOrient = -outwardDir;
+                    if (acc.nearLipidCount >= 1.5 && acc.lipidCentW > 1e-4 && acc.blobCentW > 1e-4) {
+                        let bLen = length(acc.blobCentroid);
+                        let lLen = length(acc.lipidCentroid);
+                        if (bLen > 1e-5 && lLen > 1e-5) {
+                            let blobCenter = acc.blobCentroid / bLen;
+                            let lipidCenter = acc.lipidCentroid / lLen;
+                            let dPos = pos - blobCenter;
+                            let dLip = lipidCenter - blobCenter;
+                            if (dot(dPos, dPos) > dot(dLip, dLip)) {
+                                initOrient = outwardDir;
+                            }
+                        }
+                    }
+                    return BioStepResult(
+                        vec4f(0.78, 0.06, 0.0, packLifeMeta(2u, hostSp, hostKin, adjGene)),
+                        vec4f(initOrient, 2.0),
+                    );
+                }
             }
         }
 
-        // 2. Low-rate abiogenesis / spore floor in sparse sunlit water so regions never become permanently barren
-        if (acc.nearTotalBio < 1.5 && oc.w >= 0.46) {
+        // 0B. Transmembrane nutrient import into encapsulated protocells OR naked autotrophic fixation (`0 -> 1`)
+        if (acc.nearLipidCount >= 1.0 && adjCount >= 1.0) {
+            let cap = 22.0 + 3.2 * acc.nearLipidCount + 1.2 * f32(adjGene);
+            let encapHeadroom = clamp(1.0 - adjCount / cap, 0.0, 1.0);
+            if (encapHeadroom > 0.02 && max(adjAvgE, avgLipidE) > 0.52) {
+                let fixPow = clamp(max(acc.nearFixer, acc.nearLipidCount * 0.6), 0.4, 3.0);
+                let pImport = clamp(
+                    0.32 * solar * (0.55 + 0.85 * upwell) * fixPow * encapHeadroom * bondEase * dtBio,
+                    0.0,
+                    0.075,
+                );
+                if (hashFloat(pi, frameU, 10u) < pImport) {
+                    let hostSp = min(select(acc.bestAdjSp, acc.bestFixSp, acc.bestFixW > 0.0), nBio - 1u);
+                    let hostKin = select(acc.bestAdjKin, acc.bestFixKin, acc.bestFixW > 0.0);
+                    var nextSp = hostSp;
+                    if (nBio > 1u && hashFloat(pi, frameU, 11u) < encapNoveltyDrive(adjGene, adjColors)) {
+                        nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
+                    }
+                    let childGene = mutateEncapGene(adjGene, pi, frameU, 17u, 0.06);
+                    return BioStepResult(
+                        vec4f(0.68, 0.06, 0.0, packLifeMeta(1u, nextSp, hostKin, childGene)),
+                        vec4f(-outwardDir * 2.2, 0.9),
+                    );
+                }
+            }
+        } else if (acc.nearFixer > 0.0) {
+            let crowdHeadroom = clamp(1.0 - acc.nearTotalBio / 34.0, 0.0, 1.0);
+            if (crowdHeadroom > 0.01) {
+                let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
+                let pFix = clamp(
+                    0.36 * solar * (0.55 + 0.85 * upwell) * min(acc.nearFixer, 3.0) * elemAffinity * crowdHeadroom * bondEase * dtBio,
+                    0.0,
+                    0.085,
+                );
+                if (hashFloat(pi, frameU, 10u) < pFix) {
+                    var nextSp = min(acc.bestFixSp, nBio - 1u);
+                    let pDiff = select(0.18, 0.07, adjColors >= 6u);
+                    if (nBio > 1u && hashFloat(pi, frameU, 11u) < pDiff) {
+                        nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
+                    }
+                    let childGene = mutateEncapGene(acc.bestFixGene, pi, frameU, 17u, 0.05);
+                    return BioStepResult(
+                        vec4f(0.66, 0.06, 0.0, packLifeMeta(1u, nextSp, acc.bestFixKin, childGene)),
+                        vec4f(0.0, 0.0, 0.0, 0.9),
+                    );
+                }
+            }
+        }
+
+        // 0C. Low-rate abiogenesis / spore floor in sparse sunlit water so regions never become permanently barren
+        if (acc.nearTotalBio < 1.5 && acc.nearLipidCount < 0.5 && oc.w >= 0.46) {
             let pSpore = clamp(0.0028 * solar * (0.50 + upwell) * dtBio, 0.0, 0.0045);
             if (hashFloat(pi, frameU, 13u) < pSpore) {
                 let sp = u32(floor(hashFloat(pi, frameU, 14u) * f32(nBio))) % nBio;
                 let freshKin = hashFloat(pi, frameU, 15u) * TWO_PI;
+                let freshGene = u32(floor(hashFloat(pi, frameU, 16u) * 16.0)) & 15u;
                 return BioStepResult(
-                    vec4f(0.66, 0.05, 0.0, packLifeMeta(1u, sp, freshKin)),
+                    vec4f(0.66, 0.05, 0.0, packLifeMeta(1u, sp, freshKin, freshGene)),
                     vec4f(0.0, 0.0, 0.0, 0.6),
                 );
             }
@@ -626,9 +925,73 @@ fn finalizeBioUnified(
         return BioStepResult(vec4f(0.0), chemForce);
     }
 
-    // Current particle is living Particle Life biomass (`myPhase == 1u`, or future `2u`)
     let myBioSp = min(unpackBioSpecies(curLifeState.w), nBio - 1u);
     let myKin = unpackKinPhase(curLifeState.w);
+    let myGene = unpackEncapGene(curLifeState.w);
+    let dtVit = dtBio * 1.8;
+
+    // Amphiphilic Lipid Bilayer (`myPhase == 2u`): sustained by host cytoplasm + lateral diffusion, dissolves back to C/H/O on rupture
+    if (myPhase == 2u) {
+        let totalWeight = 1.0 + acc.blobWeightSum;
+        let avgE = (curLifeState.x + acc.blobEnergySum) / totalWeight;
+        let diffAlpha = select(0.0, clamp(4.2 * dtBio, 0.0, 0.38), acc.blobWeightSum > 0.1);
+        let eDiffused = mix(curLifeState.x, avgE, diffAlpha);
+
+        var nextKin = myKin;
+        if (acc.blobKinWeight > 0.01) {
+            let goalKin = wrapAngle(atan2(acc.blobKinSin, acc.blobKinCos));
+            var dAngle = goalKin - myKin;
+            if (dAngle > PI) {
+                dAngle -= TWO_PI;
+            } else if (dAngle < -PI) {
+                dAngle += TWO_PI;
+            }
+            nextKin = wrapAngle(myKin + dAngle * clamp(3.5 * dtBio, 0.0, 0.30));
+        }
+
+        var nextGene = myGene;
+        if (acc.blobWeightSum > 0.1) {
+            let avgG = (f32(myGene) + acc.blobGeneSum) / totalWeight;
+            nextGene = u32(clamp(round(mix(f32(myGene), avgG, clamp(2.5 * dtBio, 0.0, 0.25))), 0.0, 15.0));
+        }
+
+        let vit = clamp(curLifeState.y - 0.12 * rate * curLifeState.y * dtVit, 0.0, 1.0);
+        let poi = clamp(curLifeState.z + (min(acc.dPoi, 1.2) - 0.20 * curLifeState.z) * dtVit, 0.0, 1.0);
+
+        let upkeep = select(0.55, 0.055, acc.blobCount >= 1.0 || acc.blobLipidCount >= 2.0);
+        let poisonPenalty = 0.24 * poi;
+        let landPenalty = select(0.45, 0.0, oc.w >= 0.38);
+        let nextEnergy = clamp(eDiffused - (upkeep + poisonPenalty + landPenalty) * dtVit, 0.02, 1.45);
+
+        let hostColors = countOneBits(acc.blobSpeciesMask);
+        let simpleHostStress = (acc.blobCount >= 1.0 && hostColors <= 2u && acc.blobLipidCount >= 2.0);
+        let orphanStress = (acc.blobCount < 0.5 && nextEnergy < 0.52);
+        if (nextEnergy <= 0.14 || poi >= 0.85 || oc.w < 0.30 || orphanStress || simpleHostStress) {
+            let pDissolve = select(clamp(0.65 * dtBio, 0.0, 0.18), clamp(2.4 * dtBio, 0.0, 0.35), simpleHostStress);
+            if (hashFloat(pi, frameU, 31u) < pDissolve) {
+                return BioStepResult(
+                    vec4f(0.0),
+                    vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.9, -0.7)),
+                );
+            }
+        }
+        if (acc.nearPredThreat > 1.15) {
+            let pBreach = clamp(0.20 * (acc.nearPredThreat - 1.0) * dtBio, 0.0, 0.05);
+            if (hashFloat(pi, frameU, 32u) < pBreach) {
+                return BioStepResult(
+                    vec4f(0.0),
+                    vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.85, -0.8)),
+                );
+            }
+        }
+
+        return BioStepResult(
+            vec4f(nextEnergy, vit, poi, packLifeMeta(2u, myBioSp, nextKin, nextGene)),
+            vec4f(0.0),
+        );
+    }
+
+    // Current particle is living Particle Life cytoplasm (`myPhase == 1u`)
     let myTraits = getBioSpeciesTraits(nChem, nBio, myBioSp);
     let curVel = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
     let mySelfSpeed = length(vel - curVel);
@@ -641,6 +1004,15 @@ fn finalizeBioUnified(
     let avgSolarFrac = (elemSolarWeight(atomicNum) + acc.blobSolarAtomSum) / nMembers;
     let avgRedoxFrac = (elemRedoxWeight(atomicNum) + acc.blobRedoxAtomSum) / nMembers;
     let avgSelfSpeed = (mySelfSpeed + acc.blobSpeedSum) / nMembers;
+
+    let mySpeciesMask = acc.blobSpeciesMask | (1u << (myBioSp % 24u));
+    let myDistinctColors = countOneBits(mySpeciesMask);
+    let membraneShield = clamp(acc.blobLipidCount / 6.0, 0.0, 1.0);
+    let nextGene = select(
+        myGene,
+        u32(clamp(round(mix(f32(myGene), (f32(myGene) + acc.blobGeneSum) / nMembers, clamp(2.5 * dtBio, 0.0, 0.25))), 0.0, 15.0)),
+        acc.blobCount > 0.0,
+    );
 
     let motility = clamp(avgSelfSpeed / 0.45, 0.0, 1.5);
     let lightExposure = clamp(1.12 - 0.015 * acc.nearTotalBio, 0.45, 1.0);
@@ -663,10 +1035,9 @@ fn finalizeBioUnified(
     let haloTol = clamp(0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh, 0.0, 1.0);
 
     let normChem = select(0.0, 1.0 / (1.0 + 0.35 * max(acc.bioChemCount - 1.0, 0.0)), acc.bioChemCount > 0.0);
-    let dtVit = dtBio * 1.8;
     let vit = clamp(curLifeState.y + (acc.dVit * normChem - 0.16 * rate * curLifeState.y) * dtVit, 0.0, 1.0);
     let detoxRate = 0.24 + 0.45 * vit + 0.35 * max(0.0, haloTol - 0.40);
-    let poiIn = acc.dPoi * normChem * (1.0 - 0.65 * max(0.0, haloTol - 0.50));
+    let poiIn = acc.dPoi * normChem * (1.0 - 0.65 * max(0.0, haloTol - 0.50)) * (1.0 - 0.72 * membraneShield);
     let poi = clamp(curLifeState.z + (poiIn - detoxRate * curLifeState.z) * dtVit, 0.0, 1.0);
 
     // Intra-blob energy sharing (sunlit skin feeds interior; hunter head shares prey energy with tail)
@@ -676,8 +1047,8 @@ fn finalizeBioUnified(
     // Intra-blob kin signature consensus + slow stochastic drift when isolated
     var nextKin = myKin;
     if (acc.blobKinWeight > 0.01) {
-        let targetKin = wrapAngle(atan2(acc.blobKinSin, acc.blobKinCos));
-        var dAngle = targetKin - myKin;
+        let goalKin = wrapAngle(atan2(acc.blobKinSin, acc.blobKinCos));
+        var dAngle = goalKin - myKin;
         if (dAngle > PI) {
             dAngle -= TWO_PI;
         } else if (dAngle < -PI) {
@@ -695,9 +1066,9 @@ fn finalizeBioUnified(
     let detritusGain = 0.26 * min(acc.nearStressedBio, 2.5) * decompCap;
     let grazeEnvGain = 0.34 * min(acc.nearForeignPrey, 2.5) * predCap;
     let chemBonus = 0.08 * acc.dE * normChem;
-    let basalBurn = 0.13 + 0.11 * motility * motility + 0.04 * avgAsym;
+    let basalBurn = (0.13 + 0.11 * motility * motility + 0.04 * avgAsym) * (1.0 - 0.14 * membraneShield);
     let foreignBio = max(0.0, acc.nearTotalBio - acc.blobCount);
-    let crowdPenalty = 0.035 * max(0.0, foreignBio - 10.0) + 0.025 * max(0.0, acc.blobCount - 48.0);
+    let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) + 0.020 * max(0.0, acc.blobCount - 56.0);
     let poisonPenalty = 0.28 * poi * (1.0 - 0.65 * clamp(haloTol - 0.35, 0.0, 1.0));
     let landPenalty = select(0.38, 0.0, oc.w >= 0.38);
 
@@ -705,11 +1076,11 @@ fn finalizeBioUnified(
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty;
     let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, 1.55);
 
-    // Inter-blob Grazing: foreign hunter eats vulnerable prey (~65% assimilated into hunter species/kin, ~35% respired to Chemistry)
+    // Inter-blob Grazing: foreign hunter eats vulnerable prey (~65% assimilated with endosymbiosis, ~35% respired)
     if (acc.nearPredThreat > 0.0) {
         let haloShield = 1.0 / (1.0 + 1.4 * acc.nearHalogen);
         let pGraze = clamp(
-            0.42 * min(acc.nearPredThreat, 3.0) * haloShield * (1.0 - 0.30 * vit) * dtBio,
+            0.42 * min(acc.nearPredThreat, 3.0) * haloShield * (1.0 - 0.30 * vit) * (1.0 - 0.76 * membraneShield) * dtBio,
             0.0,
             0.085,
         );
@@ -717,8 +1088,12 @@ fn finalizeBioUnified(
             let outcome = hashFloat(pi, frameU, 21u);
             if (outcome < 0.65) {
                 let predSp = min(acc.bestPredSp, nBio - 1u);
+                var nextSpAssimilated = predSp;
+                if (outcome >= 0.43 && myBioSp != predSp && getBioMatrixA(nChem, nBio, predSp, myBioSp) > -0.15) {
+                    nextSpAssimilated = myBioSp;
+                }
                 return BioStepResult(
-                    vec4f(0.76, vit * 0.8, poi * 0.6, packLifeMeta(1u, predSp, acc.bestPredKin)),
+                    vec4f(0.76, vit * 0.8, poi * 0.6, packLifeMeta(1u, nextSpAssimilated, acc.bestPredKin, acc.bestPredGene)),
                     vec4f(0.0, 0.0, 0.0, 0.75),
                 );
             } else {
@@ -753,7 +1128,7 @@ fn finalizeBioUnified(
             } else {
                 let decSp = min(acc.bestDecompSp, nBio - 1u);
                 return BioStepResult(
-                    vec4f(0.64, vit * 0.6, poi * 0.5, packLifeMeta(1u, decSp, acc.bestDecompKin)),
+                    vec4f(0.64, vit * 0.6, poi * 0.5, packLifeMeta(1u, decSp, acc.bestDecompKin, acc.bestDecompGene)),
                     vec4f(0.0, 0.0, 0.0, 0.55),
                 );
             }
@@ -771,6 +1146,21 @@ fn finalizeBioUnified(
         }
     }
 
+    // Controlled post-encapsulation somatic innovation & mega-cell budding
+    var outSp = myBioSp;
+    var outKin = nextKin;
+    var outGene = nextGene;
+    if (acc.blobLipidCount >= 2.0 && nextEnergy > 0.86 && myDistinctColors < 8u && acc.blobCount >= 7.0) {
+        let pInnov = clamp(0.018 * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.008);
+        if (hashFloat(pi, frameU, 26u) < pInnov) {
+            outSp = pickCompatibleNovelSpecies(nChem, nBio, myBioSp, mySpeciesMask, pi, frameU, 50u);
+        }
+    }
+    if (acc.blobCount > 38.0 && nextEnergy > 0.90 && hashFloat(pi, frameU, 28u) < clamp(0.010 * dtBio, 0.0, 0.004)) {
+        outKin = wrapAngle(nextKin + 0.55);
+        outGene = mutateEncapGene(nextGene, pi, frameU, 29u, 0.5);
+    }
+
     // Gentle chemotaxis / foraging steer clamped so native asymmetric Particle Life blobs stay crisp
     var st = acc.steer * (normChem * 1.4) + acc.bioSteer * max(rate, 0.2);
     let stLen = length(st);
@@ -781,7 +1171,7 @@ fn finalizeBioUnified(
     let trophicCue = clamp((predCap - autoCap) * 0.85, -1.0, 1.0);
 
     return BioStepResult(
-        vec4f(nextEnergy, vit, poi, packLifeMeta(1u, myBioSp, nextKin)),
+        vec4f(nextEnergy, vit, poi, packLifeMeta(1u, outSp, outKin, outGene)),
         vec4f(st, trophicCue),
     );
 }

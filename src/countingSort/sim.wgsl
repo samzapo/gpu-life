@@ -75,6 +75,8 @@ fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress
 fn getBioCellForce(
     pi: u32,
     p: Particle,
+    myPhase: u32,
+    myKin: f32,
     oceanBase: u32,
     rowOffset: u32,
     nBio: u32,
@@ -88,16 +90,34 @@ fn getBioCellForce(
 
     for (var i = idxRange.x; i < idxRange.x + idxRange.y; i++) {
         let ip = sorted[i];
-        if (ip.idx == pi || ip.phase != 1u) {
+        if (ip.idx == pi) {
             continue;
         }
-        let colIdx = min(ip.bioSpecies, nBio - 1u);
-        let a = matrix[oceanBase + rowOffset + colIdx];
-        accumulateOceanNeighbor(pi, p, ip.pos, a, acc, oceanSim);
+        let nbLs = lifeStateNext[ip.idx];
+        let nbPhase = unpackPhase(nbLs.w);
+        if (nbPhase != 1u && nbPhase != 2u) {
+            continue;
+        }
+        let nbKin = unpackKinPhase(nbLs.w);
+        let colIdx = min(unpackBioSpecies(nbLs.w), nBio - 1u);
+        let a = select(0.0, matrix[oceanBase + rowOffset + colIdx], myPhase == 1u && nbPhase == 1u);
+        accumulateOceanOrLipidNeighbor(
+            pi,
+            p,
+            myPhase,
+            myKin,
+            ip.pos,
+            ip.orient,
+            nbPhase,
+            nbKin,
+            a,
+            acc,
+            oceanSim,
+        );
     }
 }
 
-fn getBioForce(pi: u32, p: Particle, bioSp: u32) -> vec3f {
+fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32) -> ForceResult {
     let nChem = max(u32(sim.colours), 1u);
     let nBio = max(u32(oceanSim.colours), 1u);
     let oceanBase = nChem * SPECIES_STRIDE + nChem * nChem;
@@ -113,12 +133,12 @@ fn getBioForce(pi: u32, p: Particle, bioSp: u32) -> vec3f {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getBioCellForce(pi, p, oceanBase, rowOffset, nBio, c, &acc);
+                getBioCellForce(pi, p, myPhase, myKin, oceanBase, rowOffset, nBio, c, &acc);
             }
         }
     }
 
-    return finalizeOceanForce(acc, oceanSim);
+    return ForceResult(finalizeOceanForce(acc, oceanSim), acc.torque);
 }
 
 @compute @workgroup_size(128)
@@ -132,13 +152,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ls = lifeStateNext[pi];
     let myPhase = unpackPhase(ls.w);
 
-    if (myPhase == 1u) {
+    if (myPhase == 1u || myPhase == 2u) {
         let bioSp = unpackBioSpecies(ls.w);
-        let netForce = getBioForce(pi, p, bioSp);
+        let myKin = unpackKinPhase(ls.w);
+        let resBio = getBioForce(pi, p, myPhase, bioSp, myKin);
         output[pi] = integrateOceanParticle(
             pi,
             p,
-            netForce,
+            resBio.force,
+            resBio.torque,
+            myPhase,
             oceanSim,
             oceanTex,
             uniforms.mouseSphere,

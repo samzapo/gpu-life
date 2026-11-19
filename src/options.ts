@@ -387,7 +387,7 @@ export const engineSelect = withTooltip(
 export const particlesBinding = withTooltip(
   pane.addBinding(params, 'particles', { min: 1, step: 1 }),
   'World Particle Pool (N)',
-  'Total conserved particles cycling between Chemistry (phase 0) and Living Biomass (phase 1); takes effect on New Sim.',
+  'Total conserved particles cycling across Chemistry (phase 0), Emergent Biomass (phase 1), and Biogenic Lipid Bilayers (phase 2); takes effect on New Sim.',
 );
 export const seedInput = withTooltip(
   pane.addBinding(params, 'seed', { view: 'text' }),
@@ -556,7 +556,7 @@ export const bioLinkBinding = withTooltip(
     label: 'bioChem',
   }),
   'Bio-Chemistry Exchange',
-  'Enable bidirectional metabolic & catalytic coupling between immutable Ocean Life and Air Chemistry.',
+  'Enable conserved metabolic cycling across Chemistry (0), heterogeneous Particle Life blobs (1), and deferred C/H/O amphiphilic lipid bilayers (2) with evolvable encapsulation timing.',
 );
 export const bioRateBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'bioRate', {
@@ -630,7 +630,7 @@ export const oceanColoursBinding = withTooltip(
     step: 1,
   }),
   'Ocean Species Count',
-  'Number of Particle Life organ/tissue species interacting via the random asymmetric matrix to form emergent blobs.',
+  'Number of Particle Life organ/tissue species interacting asymmetrically to self-organize multi-color gliders, rotators, and protocell interiors.',
 );
 const oceanParamSpecs: Record<string, BindingParams> = {
   r: { min: 2, max: 60, step: 0.5 },

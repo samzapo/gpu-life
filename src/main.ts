@@ -935,8 +935,11 @@ declare global {
         total: number;
         chemCount: number;
         bioCount: number;
+        cytoplasmCount: number;
+        lipidCount: number;
         guildCounts: [number, number, number, number];
         abioticBioViolations: number;
+        lipidAbioticViolations: number;
         chemElementCounts: Record<string, number>;
         bioElementCounts: Record<string, number>;
         avgBioEnergy: number;
@@ -944,8 +947,22 @@ declare global {
         landBioCount: number;
         blobCount: number;
         multiSpeciesBlobs: number;
+        complexBlobs: number;
+        encapsulatedBlobs: number;
+        encapsulatedSimpleViolations: number;
+        nakedBlobs: number;
         avgBlobSize: number;
         maxBlobSize: number;
+        avgBlobDistinctSpecies: number;
+        maxBlobDistinctSpecies: number;
+        avgEncapsulatedSpecies: number;
+        avgNakedSpecies: number;
+        avgEncapGene: number;
+        encapStrategies: {
+          earlyArmorBlobs: number;
+          balancedBlobs: number;
+          lateComplexBlobs: number;
+        };
         emergentRoles: {
           producerBlobs: number;
           consumerBlobs: number;
@@ -1133,13 +1150,21 @@ async function computeWorldStats() {
     decomposerParticles: 0,
     halophileParticles: 0,
   };
+  const emptyStrategies = {
+    earlyArmorBlobs: 0,
+    balancedBlobs: 0,
+    lateComplexBlobs: 0,
+  };
   if (!data) {
     return {
       total: 0,
       chemCount: 0,
       bioCount: 0,
+      cytoplasmCount: 0,
+      lipidCount: 0,
       guildCounts: [0, 0, 0, 0] as [number, number, number, number],
       abioticBioViolations: 0,
+      lipidAbioticViolations: 0,
       chemElementCounts,
       bioElementCounts,
       avgBioEnergy: 0,
@@ -1147,8 +1172,18 @@ async function computeWorldStats() {
       landBioCount: 0,
       blobCount: 0,
       multiSpeciesBlobs: 0,
+      complexBlobs: 0,
+      encapsulatedBlobs: 0,
+      encapsulatedSimpleViolations: 0,
+      nakedBlobs: 0,
       avgBlobSize: 0,
       maxBlobSize: 0,
+      avgBlobDistinctSpecies: 0,
+      maxBlobDistinctSpecies: 0,
+      avgEncapsulatedSpecies: 0,
+      avgNakedSpecies: 0,
+      avgEncapGene: 0,
+      encapStrategies: emptyStrategies,
       emergentRoles: emptyRoles,
     };
   }
@@ -1156,13 +1191,21 @@ async function computeWorldStats() {
   const total = data.particles.length;
   let chemCount = 0;
   let bioCount = 0;
+  let cytoplasmCount = 0;
+  let lipidCount = 0;
   let abioticBioViolations = 0;
+  let lipidAbioticViolations = 0;
   let bioEnergySum = 0;
   let oceanBioCount = 0;
   let landBioCount = 0;
   const RAD2DEG = 180 / Math.PI;
   const bioIndices: number[] = [];
-  const bioMeta = new Array<{ phase: number; bioSpecies: number; kinPhase: number }>(total);
+  const bioMeta = new Array<{
+    phase: number;
+    bioSpecies: number;
+    kinPhase: number;
+    encapGene: number;
+  }>(total);
   const halogenIndices: number[] = [];
 
   for (let i = 0; i < total; i++) {
@@ -1175,6 +1218,15 @@ async function computeWorldStats() {
     const sym = getElementSymbol(el.atomicNumber);
     if (meta.phase !== 0) {
       bioCount++;
+      if (meta.phase === 2) {
+        lipidCount++;
+        const validLipid =
+          el.valence > 0 &&
+          (el.atomicNumber === 1 || el.atomicNumber === 5 || el.atomicNumber === 6);
+        if (!validLipid) lipidAbioticViolations++;
+      } else {
+        cytoplasmCount++;
+      }
       bioIndices.push(i);
       bioEnergySum += ls[0] ?? 0;
       bioElementCounts[sym] = (bioElementCounts[sym] ?? 0) + 1;
@@ -1198,7 +1250,7 @@ async function computeWorldStats() {
     }
   }
 
-  // Build spatial grid hash over living particles to assemble connected emergent blobs (size >= 3)
+  // Build spatial grid hash over living particles to assemble connected emergent blobs & protocells
   const R = Math.max(optionParams.worldSize, 0.25);
   const oceanRMax = 1 / Math.max(oceanOptionParams.r, 0.5);
   const connectChord = Math.max(0.02, (oceanRMax * 1.35) / R);
@@ -1235,10 +1287,20 @@ async function computeWorldStats() {
 
   const visited = new Uint8Array(total);
   const emergentRoles = { ...emptyRoles };
+  const encapStrategies = { ...emptyStrategies };
   let blobCount = 0;
   let multiSpeciesBlobs = 0;
+  let complexBlobs = 0;
+  let encapsulatedBlobs = 0;
+  let encapsulatedSimpleViolations = 0;
+  let nakedBlobs = 0;
   let blobSizeSum = 0;
   let maxBlobSize = 0;
+  let blobSpeciesSum = 0;
+  let maxBlobDistinctSpecies = 0;
+  let encapSpeciesSum = 0;
+  let nakedSpeciesSum = 0;
+  let encapGeneSum = 0;
 
   for (const seedIdx of bioIndices) {
     if (visited[seedIdx]) continue;
@@ -1247,7 +1309,7 @@ async function computeWorldStats() {
     let head = 0;
     const nearbyHalogenSet = new Set<number>();
 
-    while (head < comp.length && comp.length < 512) {
+    while (head < comp.length && comp.length < 640) {
       const u = comp[head++];
       const pu = data.particles[u];
       const mu = bioMeta[u];
@@ -1294,10 +1356,6 @@ async function computeWorldStats() {
     }
 
     if (comp.length < 3) continue;
-    blobCount++;
-    blobSizeSum += comp.length;
-    if (comp.length > maxBlobSize) maxBlobSize = comp.length;
-
     const summary = summarizeAndClassifyBlob(
       comp,
       data.particles,
@@ -1306,7 +1364,31 @@ async function computeWorldStats() {
       speciesTraits,
       nearbyHalogenSet.size,
     );
+    if (summary.lipidCount >= 6 && summary.cytoplasmCount >= 1 && summary.distinctSpecies <= 2) {
+      encapsulatedSimpleViolations++;
+    }
+    if (summary.cytoplasmCount < 2) continue;
+
+    blobCount++;
+    blobSizeSum += comp.length;
+    if (comp.length > maxBlobSize) maxBlobSize = comp.length;
+    blobSpeciesSum += summary.distinctSpecies;
+    if (summary.distinctSpecies > maxBlobDistinctSpecies) {
+      maxBlobDistinctSpecies = summary.distinctSpecies;
+    }
+    encapGeneSum += summary.avgEncapGene;
     if (summary.distinctSpecies >= 2) multiSpeciesBlobs++;
+    if (summary.distinctSpecies >= 4) complexBlobs++;
+    if (summary.encapsulated) {
+      encapsulatedBlobs++;
+      encapSpeciesSum += summary.distinctSpecies;
+    } else {
+      nakedBlobs++;
+      nakedSpeciesSum += summary.distinctSpecies;
+    }
+    if (summary.encapStrategy === 'early-armor') encapStrategies.earlyArmorBlobs++;
+    else if (summary.encapStrategy === 'balanced') encapStrategies.balancedBlobs++;
+    else encapStrategies.lateComplexBlobs++;
 
     if (summary.role === 'producer') {
       emergentRoles.producerBlobs++;
@@ -1330,6 +1412,8 @@ async function computeWorldStats() {
     total,
     chemCount,
     bioCount,
+    cytoplasmCount,
+    lipidCount,
     guildCounts: [
       emergentRoles.producerParticles,
       emergentRoles.consumerParticles,
@@ -1337,6 +1421,7 @@ async function computeWorldStats() {
       emergentRoles.decomposerParticles,
     ] as [number, number, number, number],
     abioticBioViolations,
+    lipidAbioticViolations,
     chemElementCounts,
     bioElementCounts,
     avgBioEnergy: bioCount > 0 ? bioEnergySum / bioCount : 0,
@@ -1344,8 +1429,18 @@ async function computeWorldStats() {
     landBioCount,
     blobCount,
     multiSpeciesBlobs,
+    complexBlobs,
+    encapsulatedBlobs,
+    encapsulatedSimpleViolations,
+    nakedBlobs,
     avgBlobSize: blobCount > 0 ? blobSizeSum / blobCount : 0,
     maxBlobSize,
+    avgBlobDistinctSpecies: blobCount > 0 ? blobSpeciesSum / blobCount : 0,
+    maxBlobDistinctSpecies,
+    avgEncapsulatedSpecies: encapsulatedBlobs > 0 ? encapSpeciesSum / encapsulatedBlobs : 0,
+    avgNakedSpecies: nakedBlobs > 0 ? nakedSpeciesSum / nakedBlobs : 0,
+    avgEncapGene: blobCount > 0 ? encapGeneSum / blobCount : 7,
+    encapStrategies,
     emergentRoles,
   };
 }
@@ -2090,13 +2185,24 @@ function render(commandEncoder: GPUCommandEncoder) {
   resolveTimestamp(commandEncoder, 'render');
 }
 
-function packLifeMetaJs(phase: number, bioSp: number, kinAngle: number): number {
+function packLifeMetaJs(
+  phase: number,
+  bioSp: number,
+  kinAngle: number,
+  encapGene: number = 7,
+): number {
   if (phase === 0) return 0;
   const twoPi = Math.PI * 2;
   let a = kinAngle % twoPi;
   if (a < 0) a += twoPi;
-  const k = Math.floor((a / twoPi) * 1024) & 1023;
-  return ((phase & 3) | ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) | (k << 10)) >>> 0;
+  const k = Math.floor((a / twoPi) * 512) & 511;
+  const g = Math.max(0, Math.min(15, Math.floor(encapGene)));
+  return (
+    (phase & 3) |
+    ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) |
+    (k << 10) |
+    (g << 19)
+  ) >>> 0;
 }
 
 function startWorld() {
@@ -2246,39 +2352,49 @@ function startWorld() {
     (a, b) => (speciesTraits[b]?.[3] ?? 0) - (speciesTraits[a]?.[3] ?? 0),
   );
 
-  const pickBlobSpeciesSet = (isMotileSeed: boolean): number[] => {
-    if (nBio === 1) return [0];
-    if (!isMotileSeed) {
-      const poolLen = Math.max(1, Math.ceil(nBio * 0.45));
-      const s0 = cohSorted[Math.floor(rng() * poolLen)];
-      const partners = Array.from({ length: nBio }, (_, j) => j)
-        .filter((j) => j !== s0)
-        .sort(
-          (a, b) =>
-            oceanMatrixData[s0 * nBio + b] +
-            oceanMatrixData[b * nBio + s0] -
-            (oceanMatrixData[s0 * nBio + a] + oceanMatrixData[a * nBio + s0]),
-        );
-      return partners.length >= 2 ? [s0, partners[0], partners[1]] : [s0, partners[0]];
+  const pickHeterogeneousSpeciesSet = (isGliderCommunity: boolean): number[] => {
+    if (nBio <= 1) return [0];
+    if (nBio < 6) {
+      return Array.from({ length: nBio }, (_, i) => i);
     }
-    const poolLen = Math.max(1, Math.ceil(nBio * 0.5));
-    const s0 = asymSorted[Math.floor(rng() * poolLen)];
-    const chaseList = Array.from({ length: nBio }, (_, j) => j)
-      .filter((j) => j !== s0)
-      .sort(
-        (a, b) =>
-          Math.abs(oceanMatrixData[s0 * nBio + b] - oceanMatrixData[b * nBio + s0]) -
-          Math.abs(oceanMatrixData[s0 * nBio + a] - oceanMatrixData[a * nBio + s0]),
-      );
-    return chaseList.length >= 2 ? [s0, chaseList[0], chaseList[1]] : [s0, chaseList[0]];
+    const desired = Math.min(nBio, 6 + Math.floor(rng() * 5));
+    const poolLen = Math.max(2, Math.ceil(nBio * 0.55));
+    const s0 = isGliderCommunity
+      ? asymSorted[Math.floor(rng() * poolLen)]
+      : cohSorted[Math.floor(rng() * poolLen)];
+    const selected = [s0];
+    const chosen = new Set<number>([s0]);
+
+    while (selected.length < desired) {
+      const cur = selected[selected.length - 1];
+      const candidates = Array.from({ length: nBio }, (_, j) => j)
+        .filter((j) => !chosen.has(j))
+        .map((j) => {
+          const aCurJ = oceanMatrixData[cur * nBio + j] ?? 0;
+          const aJCur = oceanMatrixData[j * nBio + cur] ?? 0;
+          const aJS0 = oceanMatrixData[j * nBio + s0] ?? 0;
+          const aS0J = oceanMatrixData[s0 * nBio + j] ?? 0;
+          const score = isGliderCommunity
+            ? Math.abs(aCurJ - aJCur) + 0.45 * aCurJ + 0.35 * aJS0
+            : aCurJ + aJCur + 0.5 * (aS0J + aJS0) + 0.25 * Math.abs(aCurJ - aJCur);
+          return { j, score };
+        })
+        .sort((a, b) => b.score - a.score);
+      if (candidates.length === 0) break;
+      const pick =
+        candidates.length > 1 && rng() < 0.28 ? candidates[1].j : candidates[0].j;
+      chosen.add(pick);
+      selected.push(pick);
+    }
+    return selected;
   };
 
   const targetBio = Math.min(
-    Math.round(particleAmt * 0.2),
-    Math.floor(biogenicPool.length * 0.7),
+    Math.round(particleAmt * 0.28),
+    Math.floor(biogenicPool.length * 0.72),
   );
   const numBlobs =
-    targetBio >= 12 ? Math.max(12, Math.min(180, Math.round(targetBio / 38))) : 0;
+    targetBio >= 24 ? Math.max(12, Math.min(110, Math.round(targetBio / 88))) : 0;
   const DEG2RAD = Math.PI / 180;
 
   const sampleOceanCenter = (): [number, number, number] => {
@@ -2314,11 +2430,17 @@ function startWorld() {
       const e2y = cz * e1x - cx * e1z;
       const e2z = cx * e1y - cy * e1x;
       const kinPhase = rng() * Math.PI * 2;
-      const blobSpecies = pickBlobSpeciesSet(bi % 2 === 1);
+      const blobSpecies = pickHeterogeneousSpeciesSet(bi % 2 === 1);
+      const patchGene =
+        bi % 3 === 0
+          ? 1 + Math.floor(rng() * 4)
+          : bi % 3 === 1
+            ? 5 + Math.floor(rng() * 6)
+            : 11 + Math.floor(rng() * 4);
 
       while (bioCursor < endCursor) {
         const pi = biogenicPool[bioCursor++];
-        const angR = (0.008 + Math.sqrt(rng()) * 0.022) / worldR;
+        const angR = (0.012 + Math.sqrt(rng()) * 0.044) / worldR;
         const th = rng() * Math.PI * 2;
         const ct = Math.cos(th);
         const st = Math.sin(th);
@@ -2350,7 +2472,7 @@ function startWorld() {
         lifeData[lBase + 0] = 0.72 + 0.23 * rng();
         lifeData[lBase + 1] = 0.05;
         lifeData[lBase + 2] = 0.0;
-        lifeData[lBase + 3] = packLifeMetaJs(1, sp, kinPhase);
+        lifeData[lBase + 3] = packLifeMetaJs(1, sp, kinPhase, patchGene);
       }
     }
   }
