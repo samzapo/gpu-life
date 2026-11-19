@@ -136,10 +136,13 @@ export function cloudTransmission(cloudFrac: number): number {
 let baselineUvPromise: Promise<UvGrid> | null = null;
 const gfsUvCache = new Map<string, UvGrid>();
 
-export async function loadCpcUvBaseline(): Promise<UvGrid> {
+export async function loadCpcUvBaseline(forceRefresh = false): Promise<UvGrid> {
+  if (forceRefresh) {
+    baselineUvPromise = null;
+  }
   if (baselineUvPromise) return baselineUvPromise;
   baselineUvPromise = (async () => {
-    const res = await fetch('./data/uv-index.json');
+    const res = await fetch('./data/uv-index.json', forceRefresh ? { cache: 'no-store' } : undefined);
     if (!res.ok) {
       throw new Error(`UV index snapshot HTTP ${res.status}`);
     }
@@ -247,10 +250,21 @@ export async function loadCpcUvBaseline(): Promise<UvGrid> {
   return baselineUvPromise;
 }
 
-export async function fetchLiveGfsUvFields(baseGrid: UvGrid): Promise<UvGrid> {
-  const cycle = await getLatestGfsCycleInfo();
-  const cached = gfsUvCache.get(cycle.cycleLabel);
+export async function fetchLiveGfsUvFields(
+  baseGrid: UvGrid,
+  opts?: { forceRefresh?: boolean },
+): Promise<UvGrid> {
+  const cycle = await getLatestGfsCycleInfo(Boolean(opts?.forceRefresh));
+  const cacheKey = `${cycle.cycleLabel}:${baseGrid.cpcRefTime}`;
+  const cached = gfsUvCache.get(cacheKey);
   if (cached) return cached;
+
+  // Prune older cycles / baselines so open tabs stay bounded in memory
+  for (const k of gfsUvCache.keys()) {
+    if (!k.startsWith(`${cycle.cycleLabel}:`)) {
+      gfsUvCache.delete(k);
+    }
+  }
 
   const ozEntry = cycle.idxEntries.find(
     (e) =>
@@ -291,7 +305,7 @@ export async function fetchLiveGfsUvFields(baseGrid: UvGrid): Promise<UvGrid> {
     source: 'NOAA CPC + Live GFS O₃/Clouds',
     isLive: true,
   };
-  gfsUvCache.set(cycle.cycleLabel, live);
+  gfsUvCache.set(cacheKey, live);
   return live;
 }
 

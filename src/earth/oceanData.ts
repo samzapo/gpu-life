@@ -53,11 +53,14 @@ function defaultSstClimatologyC(j: number, ny: number): number {
 /**
  * Loads the daily NOAA CoastWatch Blended NRT global ocean surface currents & Geo-Polar Blended SST snapshot (`./data/ocean-currents.json`).
  */
-export function loadOceanCurrents(): Promise<OceanGrid> {
+export function loadOceanCurrents(forceRefresh = false): Promise<OceanGrid> {
+  if (forceRefresh) {
+    oceanPromise = null;
+  }
   if (oceanPromise) return oceanPromise;
 
   oceanPromise = (async () => {
-    const res = await fetch('./data/ocean-currents.json');
+    const res = await fetch('./data/ocean-currents.json', forceRefresh ? { cache: 'no-store' } : undefined);
     if (!res.ok) {
       throw new Error(`Ocean currents HTTP ${res.status}`);
     }

@@ -210,9 +210,9 @@ async function resolveLatestGfsCycle(nowMs: number): Promise<{
 let cachedCyclePromise: Promise<GfsCycleInfo> | null = null;
 let cachedCycleFetchedAt = 0;
 
-export function getLatestGfsCycleInfo(): Promise<GfsCycleInfo> {
+export function getLatestGfsCycleInfo(forceRefresh = false): Promise<GfsCycleInfo> {
   const now = Date.now();
-  if (!cachedCyclePromise || now - cachedCycleFetchedAt > 15 * 60 * 1000) {
+  if (forceRefresh || !cachedCyclePromise || now - cachedCycleFetchedAt >= 15 * 60 * 1000) {
     cachedCycleFetchedAt = now;
     cachedCyclePromise = resolveLatestGfsCycle(now).catch((err) => {
       cachedCyclePromise = null;
@@ -302,12 +302,27 @@ export async function loadFallbackWind(): Promise<WindGrid> {
   return grid;
 }
 
-export async function fetchLiveGfsWind(levelId: WindLevelId): Promise<WindGrid> {
+export async function fetchLiveGfsWind(
+  levelId: WindLevelId,
+  opts?: { forceRefresh?: boolean },
+): Promise<WindGrid> {
   const spec = WIND_LEVELS[levelId];
-  const cycle = await getLatestGfsCycleInfo();
+  const cycle = await getLatestGfsCycleInfo(Boolean(opts?.forceRefresh));
   const cacheKey = `${cycle.cycleLabel}:${levelId}`;
   const cached = levelCache.get(cacheKey);
   if (cached) return cached;
+
+  // Prune stale GFS cycles so long-running open tabs do not accumulate old grids
+  for (const k of levelCache.keys()) {
+    if (k !== 'fallback' && !k.startsWith(`${cycle.cycleLabel}:`)) {
+      levelCache.delete(k);
+    }
+  }
+  for (const k of sfcTempCache.keys()) {
+    if (k !== cycle.cycleLabel) {
+      sfcTempCache.delete(k);
+    }
+  }
 
   const uEntry = cycle.idxEntries.find(
     (e) => e.varName === 'UGRD' && e.level === spec.gribLevel,

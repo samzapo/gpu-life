@@ -1079,6 +1079,104 @@ async function loadWindLevel(levelId: WindLevelId) {
   }
 }
 
+const GFS_AUTO_REFRESH_MS = 15 * 60 * 1000;
+const DAILY_SNAPSHOT_REFRESH_MS = 6 * 60 * 60 * 1000;
+let lastGfsCheckAt = Date.now();
+let lastSnapshotCheckAt = Date.now();
+let bgRefreshInFlight: Promise<boolean> | null = null;
+
+async function backgroundRefreshWeather(opts?: {
+  forceGfs?: boolean;
+  forceSnapshots?: boolean;
+}): Promise<boolean> {
+  if (bgRefreshInFlight) return bgRefreshInFlight;
+  bgRefreshInFlight = (async () => {
+    const now = Date.now();
+    const doSnapshots =
+      Boolean(opts?.forceSnapshots) || now - lastSnapshotCheckAt >= DAILY_SNAPSHOT_REFRESH_MS;
+    const doGfs = Boolean(opts?.forceGfs) || now - lastGfsCheckAt >= GFS_AUTO_REFRESH_MS;
+    if (!doSnapshots && !doGfs) return false;
+
+    let updatedAny = false;
+    let uvBaselineUpdated = false;
+
+    if (doSnapshots) {
+      lastSnapshotCheckAt = now;
+      const [freshOcean, freshUv] = await Promise.all([
+        loadOceanCurrents(true).catch(() => null),
+        loadCpcUvBaseline(true).catch(() => null),
+      ]);
+      if (
+        freshOcean &&
+        (!currentOceanGrid ||
+          freshOcean.refTime !== currentOceanGrid.refTime ||
+          freshOcean.sstRefTime !== currentOceanGrid.sstRefTime)
+      ) {
+        currentOceanGrid = freshOcean;
+        uploadOceanToGpu(freshOcean);
+        refreshOceanHud(freshOcean);
+        updatedAny = true;
+      }
+      if (
+        freshUv &&
+        (!currentUvGrid || freshUv.cpcRefTime !== currentUvGrid.cpcRefTime)
+      ) {
+        currentUvGrid = freshUv;
+        uvBaselineUpdated = true;
+        updatedAny = true;
+      }
+    }
+
+    if (doGfs || uvBaselineUpdated) {
+      lastGfsCheckAt = now;
+      const targetLevel = earthParams.windLevel;
+      const reqId = activeWindLoadId;
+      try {
+        const live = await fetchLiveGfsWind(targetLevel, {
+          forceRefresh: Boolean(opts?.forceGfs),
+        });
+        if (
+          reqId === activeWindLoadId &&
+          earthParams.windLevel === targetLevel &&
+          (!currentWindGrid.isLive ||
+            live.refTime !== currentWindGrid.refTime ||
+            live.validTime !== currentWindGrid.validTime)
+        ) {
+          currentWindGrid = live;
+          uploadWindToGpu(live);
+          refreshHudBadges(live);
+          updatedAny = true;
+        }
+        if (
+          currentUvGrid &&
+          (uvBaselineUpdated ||
+            !currentUvGrid.isLive ||
+            currentUvGrid.gfsRefTime !== live.refTime ||
+            currentUvGrid.gfsValidTime !== live.validTime)
+        ) {
+          try {
+            const liveUv = await fetchLiveGfsUvFields(currentUvGrid, {
+              forceRefresh: Boolean(opts?.forceGfs),
+            });
+            currentUvGrid = liveUv;
+            uploadUvToGpu();
+            updatedAny = true;
+          } catch {
+            if (uvBaselineUpdated) uploadUvToGpu();
+          }
+        }
+      } catch {
+        if (uvBaselineUpdated) uploadUvToGpu();
+      }
+    }
+
+    return updatedAny;
+  })().finally(() => {
+    bgRefreshInFlight = null;
+  });
+  return bgRefreshInFlight;
+}
+
 function writeWorldRuleAndColourBuffers() {
   if (!device || !worldRulesBuffer || !worldColoursBuffer) return;
   const { flat: traitsFlat, table } = computeSpeciesTraitsFromMatrix(
@@ -1188,6 +1286,13 @@ declare global {
         gfsValidTime: string;
         source: string;
         isLive: boolean;
+      };
+      refreshWeatherData: (opts?: { forceSnapshots?: boolean }) => Promise<boolean>;
+      getWeatherRefreshState: () => {
+        lastGfsCheckAt: number;
+        lastSnapshotCheckAt: number;
+        gfsIntervalMs: number;
+        snapshotIntervalMs: number;
       };
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
       inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
@@ -2165,6 +2270,17 @@ window.complexLife = {
     source: currentUvGrid?.source ?? 'Solar Zenith Model',
     isLive: Boolean(currentUvGrid?.isLive),
   }),
+  refreshWeatherData: (opts?: { forceSnapshots?: boolean }) =>
+    backgroundRefreshWeather({
+      forceGfs: true,
+      forceSnapshots: opts?.forceSnapshots ?? true,
+    }),
+  getWeatherRefreshState: () => ({
+    lastGfsCheckAt,
+    lastSnapshotCheckAt,
+    gfsIntervalMs: GFS_AUTO_REFRESH_MS,
+    snapshotIntervalMs: DAILY_SNAPSHOT_REFRESH_MS,
+  }),
   refreshTooltipSnapshot: async () => {
     const snap = await captureHoverSnapshot();
     if (snap) {
@@ -2591,6 +2707,19 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
       uploadUvToGpu();
     }
   }, 45_000);
+  window.setInterval(() => {
+    if (!document.hidden) {
+      void backgroundRefreshWeather();
+    }
+  }, GFS_AUTO_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      if (uvUtcOverrideMs === null) {
+        uploadUvToGpu();
+      }
+      void backgroundRefreshWeather();
+    }
+  });
   bindOptions(
     device,
     simData,
