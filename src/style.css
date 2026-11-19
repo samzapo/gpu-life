@@ -267,6 +267,18 @@ canvas {
   border-color: rgba(250, 212, 92, 0.72);
 }
 
+#hoverTooltip[data-theme='mineral'] {
+  border-color: rgba(212, 182, 118, 0.68);
+}
+
+#hoverTooltip[data-theme='mineralWindfall'] {
+  border-color: rgba(74, 232, 206, 0.68);
+}
+
+#hoverTooltip[data-theme='mineralTrap'] {
+  border-color: rgba(246, 86, 152, 0.74);
+}
+
 #hoverTooltip .tip-head {
   margin-bottom: 3px;
 }
@@ -310,6 +322,21 @@ canvas {
 #hoverTooltip .tip-badge-complex {
   background: rgba(250, 204, 72, 0.24);
   color: #ffe896;
+}
+
+#hoverTooltip .tip-badge-mineral {
+  background: rgba(212, 182, 118, 0.22);
+  color: #f3dba0;
+}
+
+#hoverTooltip .tip-badge-mineralWindfall {
+  background: rgba(58, 224, 198, 0.22);
+  color: #74f8e2;
+}
+
+#hoverTooltip .tip-badge-mineralTrap {
+  background: rgba(244, 78, 146, 0.24);
+  color: #ff9ec8;
 }
 
 #hoverTooltip .tip-title {

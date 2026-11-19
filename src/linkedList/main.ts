@@ -165,6 +165,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 7, resource: { buffer: refs.bioForceBuffer } },
           { binding: 8, resource: { buffer: headsBuffer } },
           { binding: 9, resource: { buffer: linkedListBuffer } },
+          { binding: 10, resource: refs.windTexView },
         ],
       }),
     );

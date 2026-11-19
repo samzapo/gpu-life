@@ -1,10 +1,13 @@
-// Unified conserved-mass emergent blob ecology + biogenic lipid bilayers + bio-chemistry helpers.
+// Unified conserved-mass emergent blob ecology + biogenic lipid bilayers + inorganic mineral crust.
 // Every particle carries an immutable `chemSpecies` (`p.colour`), live `phase`
-// (0 = Chemistry, 1 = Particle Life Organism Cytoplasm, 2 = Biogenic Amphiphilic Lipid Bilayer),
-// `bioSpecies` (0..M-1), circular `kinPhase`, and heritable 4-bit `encapGene` (0..15) packed in `lifeState.w`.
-// Producer / Consumer / Mixotroph / Decomposer / Halophile identities emerge
-// directly from the asymmetric Particle Life matrix traits, self-propulsion speed,
-// and conserved elemental makeup (C, H, O, S) of each blob's constituent particles.
+// (0 = Fluid Chemistry, 1 = Organism Cytoplasm, 2 = Biogenic Lipid Bilayer, 3 = Crust-Pinned Mineral),
+// `bioSpecies` (0..M-1) / `mineralType` (0..4), circular `kinPhase` / `crystalAngle`, and 4-bit `encapGene` / `grade` in `lifeState.w`.
+
+const MINERAL_SILICATE: u32 = 0u;
+const MINERAL_EVAPORITE: u32 = 1u;
+const MINERAL_CARBONATE: u32 = 2u;
+const MINERAL_SULFIDE: u32 = 3u;
+const MINERAL_CLAY: u32 = 4u;
 
 struct BioLink {
     enabled: f32,
@@ -19,6 +22,10 @@ struct BioLink {
     frame: f32,
     seedHash: f32,
     oceanCurrentScale: f32,
+    windScale: f32,
+    windStreamMax: f32,
+    mineralEnabled: f32,
+    mineralRate: f32,
 }
 
 struct BioStepResult {
@@ -40,6 +47,41 @@ fn isLipidElement(atomicNum: u32, valence: u32) -> bool {
     }
     // Membrane lipids assemble strictly from conserved H(1), C(5), O(6).
     return atomicNum == 1u || atomicNum == 5u || atomicNum == 6u;
+}
+
+fn isMineralCandidate(atomicNum: u32, valence: u32) -> bool {
+    // Noble gases (valence == 0: He, Ne, Ar) never crystallize into crust minerals.
+    return valence > 0u && atomicNum >= 1u;
+}
+
+fn elementFitsMineralType(atomicNum: u32, valence: u32, mType: u32) -> bool {
+    if (valence == 0u) {
+        return false;
+    }
+    if (mType == MINERAL_SILICATE) {
+        return atomicNum == 11u || atomicNum == 6u || atomicNum == 10u || atomicNum == 3u;
+    }
+    if (mType == MINERAL_EVAPORITE) {
+        return atomicNum == 9u || atomicNum == 3u || atomicNum == 13u || atomicNum == 7u || atomicNum == 10u;
+    }
+    if (mType == MINERAL_CARBONATE) {
+        return atomicNum == 5u || atomicNum == 6u || atomicNum == 10u || atomicNum == 4u;
+    }
+    if (mType == MINERAL_SULFIDE) {
+        return atomicNum == 12u || atomicNum == 10u || atomicNum == 6u || atomicNum == 4u || atomicNum == 7u;
+    }
+    // MINERAL_CLAY (Hydrated phyllosilicates / zeolites): traps Si, O, H, Mg, C
+    return atomicNum == 11u || atomicNum == 6u || atomicNum == 1u || atomicNum == 10u || atomicNum == 5u;
+}
+
+fn evalWindVel3D(pos: vec3f, windRaw: vec3f, bio: BioLink) -> vec3f {
+    if (bio.windScale <= 0.0) {
+        return vec3f(0.0);
+    }
+    let eEast = sphereEastBasis(pos);
+    let eNorth = normalize(cross(pos, eEast));
+    let w3 = windRaw.x * eEast + windRaw.y * eNorth;
+    return (w3 / max(bio.windStreamMax, 10.0)) * (0.45 * bio.windScale);
 }
 
 fn encapReqColors(gene: u32) -> u32 {
@@ -448,6 +490,20 @@ struct BioUnifiedAccum {
     bestDecompSp: u32,
     bestDecompKin: f32,
     bestDecompGene: u32,
+    // Inorganic mineral crust accumulation & bio-geochemical exchange
+    nearMineralCount: f32,
+    nearMineralBioMine: f32,
+    nearSeedW: f32,
+    nearSeedType: u32,
+    nearSeedTrap: u32,
+    nearSeedAngle: f32,
+    nearClayCat: f32,
+    nearPreSilica: f32,
+    nearPreHalide: f32,
+    nearPreCarb: f32,
+    nearPreSulf: f32,
+    nearBe: f32,
+    nearClayH: f32,
 }
 
 fn initBioUnifiedAccum() -> BioUnifiedAccum {
@@ -512,7 +568,27 @@ fn accumulateBioUnifiedNeighbor(
         if (nbKind == 4u) {
             (*acc).nearHalogen += wDist;
         }
-        if (myPhase == 1u) {
+        if (myPhase == 0u) {
+            // Geochemical stoichiometric precursor clustering for primary mineral nucleation
+            if (nbAtomicNum == 11u || nbAtomicNum == 6u) {
+                (*acc).nearPreSilica += wDist * select(0.55, 1.35, nbAtomicNum == 11u);
+            }
+            if (nbAtomicNum == 9u || nbAtomicNum == 3u || nbAtomicNum == 13u || nbAtomicNum == 7u) {
+                (*acc).nearPreHalide += wDist * select(0.8, 1.25, nbAtomicNum == 13u || nbAtomicNum == 7u);
+            }
+            if (nbAtomicNum == 5u || nbAtomicNum == 10u || nbAtomicNum == 4u) {
+                (*acc).nearPreCarb += wDist * select(0.85, 1.25, nbAtomicNum == 5u || nbAtomicNum == 10u);
+                if (nbAtomicNum == 4u) {
+                    (*acc).nearBe += wDist;
+                }
+            }
+            if (nbAtomicNum == 12u || nbAtomicNum == 10u) {
+                (*acc).nearPreSulf += wDist * select(0.35, 1.5, nbAtomicNum == 12u);
+            }
+            if (nbAtomicNum == 1u) {
+                (*acc).nearClayH += wDist;
+            }
+        } else if (myPhase == 1u) {
             let eff = evalLifeFromAtomPair(myTraits, myLifeState, nbAtomicNum, nbValence, nbAtomLoad, r, bio);
             (*acc).dE += eff.x;
             (*acc).dVit += eff.y;
@@ -533,12 +609,125 @@ fn accumulateBioUnifiedNeighbor(
         return;
     }
 
+    // Neighbor is an anchored crustal mineral (`nbPhase == 3u`)
+    if (nbPhase == 3u) {
+        let nbMinType = unpackBioSpecies(nbLifeState.w);
+        let nbMinAngle = unpackKinPhase(nbLifeState.w);
+        let nbMinTrap = unpackGraduated(nbLifeState.w);
+        let nbInteg = clamp(nbLifeState.x, 0.05, 1.25);
+        let nbNutr = clamp(nbLifeState.y, 0.0, 1.0);
+        let nbHaz = clamp(nbLifeState.z, 0.0, 1.0);
+
+        if (myPhase == 3u) {
+            (*acc).nearMineralCount += 1.0;
+            return;
+        }
+        if (myPhase == 0u) {
+            (*acc).nearMineralCount += 1.0;
+            if (wDist > (*acc).nearSeedW && elementFitsMineralType(myAtomicNum, myValence, nbMinType)) {
+                (*acc).nearSeedW = wDist;
+                (*acc).nearSeedType = nbMinType;
+                (*acc).nearSeedAngle = nbMinAngle;
+                (*acc).nearSeedTrap = nbMinTrap;
+            }
+            if (nbMinType == MINERAL_CLAY) {
+                (*acc).nearClayCat += wDist * clamp(nbInteg, 0.25, 1.2);
+                (*acc).glowSum += 0.35 * wDist;
+            } else if (nbMinType == MINERAL_CARBONATE && nbMinTrap == 0u) {
+                (*acc).nearClayCat += 0.45 * wDist * clamp(nbInteg, 0.25, 1.2);
+            }
+            // Gently draw mineral-compatible solutes toward crystal faces, repel bare halogens from clays
+            if (elementFitsMineralType(myAtomicNum, myValence, nbMinType) && nbInteg > 0.25) {
+                (*acc).kick += dToNb * (wDist * 0.18);
+                (*acc).chemBioCount += 1.0;
+            }
+            return;
+        }
+
+        // Living cytoplasm (`1u`) or bilayer (`2u`) encountering crustal mineral (`nbPhase == 3u`): Windfall vs Death Sentence
+        let minScale = max(bio.mineralRate, 0.20) * clamp(0.35 + 0.85 * nbInteg, 0.25, 1.2);
+        let mw = wDist * minScale;
+        (*acc).bioChemCount += 1.0;
+
+        if (myPhase == 2u) {
+            // Lipid bilayer shields internals from brine/Be/acid mineral leaching at modest shell stress
+            if (nbMinTrap == 1u || nbMinType == MINERAL_EVAPORITE) {
+                (*acc).dPoi += (0.18 + 0.24 * nbHaz) * mw;
+            }
+            return;
+        }
+
+        let coh = clamp(myTraits.x, 0.0, 1.0);
+        let asym = clamp(myTraits.w, 0.0, 1.0);
+        let vit = clamp(myLifeState.y, 0.0, 1.0);
+        let haloAff = clamp(0.20 + 0.35 * coh + 0.35 * asym + 0.25 * vit, 0.0, 1.0);
+        let myRedox = elemRedoxWeight(myAtomicNum);
+
+        if (nbMinType == MINERAL_SILICATE) {
+            // Stable reef substrate: mild halogen detox & shelter from fast motion abrasion
+            (*acc).dPoi -= 0.09 * mw;
+            (*acc).dVit += 0.05 * mw;
+            (*acc).dE -= 0.04 * clamp(length(myVel) * 2.0, 0.0, 1.0) * mw;
+        } else if (nbMinType == MINERAL_EVAPORITE) {
+            // Water-soluble salt / fluorite: lethal halogen & osmotic shock unless halotolerant
+            if (haloAff > 0.56) {
+                (*acc).dE += (0.24 + 0.16 * nbNutr) * haloAff * mw;
+                (*acc).steer += dToNb * (0.28 * mw);
+            } else {
+                let shock = (0.42 + 0.48 * max(nbHaz, select(0.25, 0.70, nbMinTrap == 1u))) * mw;
+                (*acc).dPoi += shock;
+                (*acc).dE -= shock * 0.58;
+                (*acc).steer -= dToNb * (0.52 * mw);
+            }
+        } else if (nbMinType == MINERAL_CARBONATE) {
+            if (nbMinTrap == 0u) {
+                // Pure Dolomite/Carbonate: rich C/O energy & cofactor windfall
+                (*acc).dE += (0.28 + 0.24 * nbNutr) * mw;
+                (*acc).dVit += 0.22 * mw;
+                (*acc).steer += dToNb * (0.32 * mw);
+            } else {
+                // Be-doped Beryl Carbonate Trap: attracts cells briefly then unleashes toxic beryllium shock
+                (*acc).dPoi += (0.56 + 0.48 * nbHaz) * mw;
+                (*acc).dE -= (0.24 + 0.26 * nbHaz) * mw;
+                (*acc).steer -= dToNb * (0.35 * mw);
+            }
+        } else if (nbMinType == MINERAL_SULFIDE) {
+            let overWater = smoothstep(0.32, 0.54, oc.w);
+            if (nbMinTrap == 0u && overWater > 0.35) {
+                // Submerged hydrothermal chimney: massive chemosynthetic ATP windfall (works on night side too!)
+                (*acc).dE += (0.34 + 0.30 * nbNutr) * (0.55 + 0.75 * myRedox) * mw;
+                (*acc).dVit += 0.24 * mw;
+                (*acc).steer += dToNb * (0.36 * mw);
+            } else {
+                // Air-oxidizing sulfuric weathering burst on windy land
+                (*acc).dPoi += (0.40 + 0.36 * nbHaz) * mw;
+                (*acc).dE += (0.12 * myRedox - 0.18) * mw;
+            }
+        } else {
+            // Hydrated Clay (MINERAL_CLAY): evolutionary cofactor windfall & toxin scavenger
+            (*acc).dE += 0.15 * mw;
+            (*acc).dVit += (0.34 + 0.26 * nbNutr) * mw;
+            (*acc).dPoi -= 0.14 * mw;
+            (*acc).nearClayCat += mw;
+            (*acc).steer += dToNb * (0.26 * mw);
+        }
+        return;
+    }
+
     let nbEnergy = clamp(nbLifeState.x, 0.0, 1.6);
     let nbVit = clamp(nbLifeState.y, 0.0, 1.0);
     let nbPoi = clamp(nbLifeState.z, 0.0, 1.0);
     let nbKin = unpackKinPhase(nbLifeState.w);
     let nbGene = unpackEncapGene(nbLifeState.w);
     let nbGrad = unpackGraduated(nbLifeState.w);
+
+    if (myPhase == 3u) {
+        // Living cells and bilayers contacting an intact mineral actively bio-weather / mine it
+        let redoxBoost = select(1.0, 1.55, nbPhase == 1u && elemRedoxWeight(nbAtomicNum) > 0.65);
+        let encapBoost = select(1.0, 1.45, nbPhase == 2u || nbGrad == 1u);
+        (*acc).nearMineralBioMine += wDist * clamp(nbEnergy, 0.25, 1.4) * encapBoost * redoxBoost;
+        return;
+    }
 
     // Neighbor is an oriented amphiphilic lipid bilayer particle (`nbPhase == 2u`)
     if (nbPhase == 2u) {
@@ -795,6 +984,118 @@ fn finalizeChemBioForce(acc: BioUnifiedAccum, bio: BioLink) -> vec4f {
     return vec4f(k, packDeltaActGlow(actScale, glow));
 }
 
+fn attemptMineralCrystallize(
+    pi: u32,
+    pos: vec3f,
+    atomicNum: u32,
+    valence: u32,
+    bondEase: f32,
+    solar: f32,
+    upwell: f32,
+    oc: vec4f,
+    landFrac: f32,
+    windNorm: f32,
+    curNorm: f32,
+    frameU: u32,
+    acc: BioUnifiedAccum,
+    bio: BioLink,
+) -> BioStepResult {
+    if (bio.mineralEnabled <= 0.5 || !isMineralCandidate(atomicNum, valence) || acc.nearMineralCount >= 11.0) {
+        return BioStepResult(vec4f(0.0), vec4f(0.0));
+    }
+    let mRate = max(bio.mineralRate, 0.0);
+    if (mRate <= 0.001) {
+        return BioStepResult(vec4f(0.0), vec4f(0.0));
+    }
+
+    let dtMin = bio.dt * mRate;
+    let mineralHeadroom = clamp(1.0 - acc.nearMineralCount / 11.0, 0.0, 1.0);
+    let calmWind = 1.0 / (1.0 + 2.6 * windNorm * windNorm);
+    let calmCur = 1.0 / (1.0 + 2.4 * curNorm * curNorm);
+    let calmEnv = mix(calmCur, calmWind, landFrac);
+
+    var chooseType = 99u;
+    var pCryst = 0.0;
+    var crystAngle = hashFloat(pi, frameU, 60u) * TWO_PI;
+    var trapFlag = 0u;
+    var nutr = 0.25;
+    var haz = 0.0;
+
+    if (acc.nearSeedW > 0.0 && elementFitsMineralType(atomicNum, valence, acc.nearSeedType)) {
+        let mT = acc.nearSeedType;
+        var habFit = 1.0;
+        if (mT == MINERAL_EVAPORITE) {
+            habFit = mix(select(0.25, 0.05, curNorm > 0.22), 0.75 + 0.55 * solar, landFrac);
+        } else if (mT == MINERAL_SULFIDE) {
+            habFit = smoothstep(0.32, 0.52, oc.w) * (0.65 + 0.7 * upwell);
+        } else if (mT == MINERAL_CLAY) {
+            habFit = mix(1.0, 0.15, smoothstep(0.35, 0.78, landFrac));
+        }
+        if (habFit > 0.18) {
+            chooseType = mT;
+            pCryst = clamp(0.16 * mRate * habFit * calmEnv * mineralHeadroom * bondEase * dtMin, 0.0, 0.045);
+            crystAngle = wrapAngle(acc.nearSeedAngle + (hashFloat(pi, frameU, 61u) - 0.5) * 0.22);
+            let toxicAtom = (atomicNum == 4u || atomicNum == 7u || atomicNum == 13u);
+            trapFlag = select(acc.nearSeedTrap, 1u, toxicAtom || (mT == MINERAL_CARBONATE && acc.nearBe > 0.25));
+        }
+    } else if (acc.nearMineralCount < 1.0) {
+        let sSil = select(0.0, acc.nearPreSilica * (0.65 + 0.55 * landFrac), elementFitsMineralType(atomicNum, valence, MINERAL_SILICATE));
+        let sEvap = select(0.0, acc.nearPreHalide * (0.20 + 0.95 * landFrac) * (0.45 + 0.75 * solar), elementFitsMineralType(atomicNum, valence, MINERAL_EVAPORITE));
+        let sCarb = select(0.0, acc.nearPreCarb * (0.60 + 0.45 * (1.0 - windNorm)), elementFitsMineralType(atomicNum, valence, MINERAL_CARBONATE));
+        let sSulf = select(0.0, acc.nearPreSulf * smoothstep(0.35, 0.55, oc.w) * (0.55 + upwell), elementFitsMineralType(atomicNum, valence, MINERAL_SULFIDE));
+        let sClay = select(0.0, (acc.nearClayH + acc.nearPreSilica * 0.45) * smoothstep(0.32, 0.55, oc.w), elementFitsMineralType(atomicNum, valence, MINERAL_CLAY));
+
+        var bestS = 1.25;
+        if (sSil > bestS) { bestS = sSil; chooseType = MINERAL_SILICATE; }
+        if (sEvap > bestS) { bestS = sEvap; chooseType = MINERAL_EVAPORITE; }
+        if (sCarb > bestS) { bestS = sCarb; chooseType = MINERAL_CARBONATE; }
+        if (sSulf > bestS) { bestS = sSulf; chooseType = MINERAL_SULFIDE; }
+        if (sClay > bestS) { bestS = sClay; chooseType = MINERAL_CLAY; }
+
+        if (chooseType <= MINERAL_CLAY) {
+            pCryst = clamp(0.011 * mRate * min(bestS, 3.5) * calmEnv * bondEase * dtMin, 0.0, 0.008);
+            let toxicAtom = (atomicNum == 4u || atomicNum == 7u || atomicNum == 13u);
+            if (chooseType == MINERAL_EVAPORITE) {
+                trapFlag = select(0u, 1u, toxicAtom);
+            } else if (chooseType == MINERAL_CARBONATE) {
+                trapFlag = select(0u, 1u, atomicNum == 4u || acc.nearBe > 0.18);
+            } else if (chooseType == MINERAL_SULFIDE) {
+                trapFlag = select(0u, 1u, landFrac > 0.48 || toxicAtom);
+            }
+        }
+    }
+
+    if (chooseType <= MINERAL_CLAY && pCryst > 0.0 && hashFloat(pi, frameU, 62u) < pCryst) {
+        if (chooseType == MINERAL_SILICATE) {
+            nutr = 0.25;
+            haz = 0.0;
+        } else if (chooseType == MINERAL_EVAPORITE) {
+            nutr = select(0.30, 0.10, trapFlag == 1u);
+            haz = select(0.45, 0.88, trapFlag == 1u);
+        } else if (chooseType == MINERAL_CARBONATE) {
+            nutr = select(0.85, 0.40, trapFlag == 1u);
+            haz = select(0.0, 0.92, trapFlag == 1u);
+        } else if (chooseType == MINERAL_SULFIDE) {
+            nutr = 0.90;
+            haz = select(0.08, 0.72, trapFlag == 1u);
+        } else {
+            nutr = 0.95;
+            haz = 0.0;
+        }
+        let grade = u32(clamp(round(nutr * 12.0 + clamp(acc.nearMineralCount, 0.0, 3.0)), 0.0, 15.0));
+        let eBase = sphereEastBasis(pos);
+        let eNorth = normalize(cross(pos, eBase));
+        let crystDir = cos(crystAngle) * eBase + sin(crystAngle) * eNorth;
+        let initInteg = clamp(0.84 + 0.18 * calmEnv, 0.78, 1.05);
+        return BioStepResult(
+            vec4f(initInteg, nutr, haz, packLifeMetaGrad(3u, chooseType, crystAngle, grade, trapFlag)),
+            vec4f(crystDir, 2.0),
+        );
+    }
+
+    return BioStepResult(vec4f(0.0), vec4f(0.0));
+}
+
 fn finalizeBioUnified(
     pi: u32,
     pos: vec3f,
@@ -803,30 +1104,123 @@ fn finalizeBioUnified(
     valence: u32,
     atomLoad: f32,
     curLifeState: vec4f,
+    windRaw: vec3f,
     oc: vec4f,
     acc: BioUnifiedAccum,
     bio: BioLink,
 ) -> BioStepResult {
     let myPhase = unpackPhase(curLifeState.w);
+    let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
+    let windSim = evalWindVel3D(pos, windRaw, bio);
+    let windNorm = length(windSim);
+    let curSim = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
+    let curNorm = length(curSim);
+    let frameU = u32(max(bio.frame, 0.0)) + u32(max(bio.seedHash, 0.0));
+
+    // Inorganic Crustal Mineral (`myPhase == 3u`): stability, dual-layer wind/current erosion & bio-weathering
+    if (myPhase == 3u) {
+        if (bio.mineralEnabled <= 0.5) {
+            return BioStepResult(vec4f(clamp(curLifeState.x, 0.1, 1.25), curLifeState.y, curLifeState.z, curLifeState.w), vec4f(0.0));
+        }
+        let mType = min(unpackBioSpecies(curLifeState.w), MINERAL_CLAY);
+        let mAngle = unpackKinPhase(curLifeState.w);
+        let mGrade = unpackEncapGene(curLifeState.w);
+        var mTrap = unpackGraduated(curLifeState.w);
+        let integ = clamp(curLifeState.x, 0.02, 1.25);
+        let nutr = clamp(curLifeState.y, 0.0, 1.0);
+        var haz = clamp(curLifeState.z, 0.0, 1.0);
+        let dtMin = bio.dt * max(bio.mineralRate, 0.0);
+
+        let latticeShield = 1.0 / (1.0 + 0.14 * max(0.0, acc.nearMineralCount - 1.0));
+        let bioWeather = min(acc.nearMineralBioMine, 3.5) * 0.18;
+        let inWater = smoothstep(0.36, 0.54, oc.w);
+
+        var waterErode = 0.0;
+        var airErode = 0.0;
+        var mechErode = 0.0;
+
+        if (mType == MINERAL_SILICATE) {
+            mechErode = 0.08 * (windNorm + curNorm) + 0.24 * (windNorm * windNorm + curNorm * curNorm);
+        } else if (mType == MINERAL_EVAPORITE) {
+            waterErode = inWater * (0.65 + 3.2 * curNorm);
+            airErode = (1.0 - inWater) * (0.09 * windNorm + 0.22 * windNorm * windNorm);
+        } else if (mType == MINERAL_CARBONATE) {
+            waterErode = inWater * (0.14 + 1.15 * curNorm);
+            airErode = (1.0 - inWater) * (0.10 + 0.72 * windNorm);
+        } else if (mType == MINERAL_SULFIDE) {
+            waterErode = inWater * (0.05 + 0.26 * curNorm);
+            let airExposed = smoothstep(0.24, 0.68, landFrac);
+            airErode = airExposed * (0.60 + 2.8 * windNorm);
+            if (airExposed > 0.40) {
+                mTrap = 1u;
+                haz = clamp(haz + 0.48 * dtMin, 0.0, 1.0);
+            }
+        } else {
+            // Hydrated Clay: stable underwater/moist coasts, desiccates & cracks inland
+            waterErode = inWater * (0.05 + 0.24 * curNorm);
+            airErode = smoothstep(0.26, 0.72, landFrac) * (0.42 + 2.2 * windNorm);
+        }
+
+        let erodeRate = (waterErode + airErode + mechErode + bioWeather) * latticeShield;
+        var nextInteg = integ - erodeRate * dtMin;
+        if (erodeRate < 0.015 && acc.nearMineralCount >= 6.0) {
+            nextInteg = clamp(integ + 0.012 * dtMin, 0.02, 1.05);
+        }
+        nextInteg = clamp(nextInteg, 0.0, 1.25);
+
+        // Weathered away back to free Chemistry (`3 -> 0`), either when core fractures or outer grains spall under erosion
+        let pSpall = clamp(erodeRate * (1.28 - 0.72 * clamp(nextInteg, 0.0, 1.0)) * dtMin * 1.35, 0.0, 0.16);
+        if (nextInteg <= 0.10 || (erodeRate > 0.03 && hashFloat(pi, frameU, 65u) < pSpall)) {
+            let flowPlume = select(windSim, curSim, inWater >= 0.45) * 6.5;
+            let eEast = sphereEastBasis(pos);
+            let eNorth = normalize(cross(pos, eEast));
+            let s1 = hashFloat(pi, frameU, 63u) * 2.0 - 1.0;
+            let s2 = hashFloat(pi, frameU, 64u) * 2.0 - 1.0;
+            let ejectVel = flowPlume + (eEast * s1 + eNorth * s2) * 0.85;
+            let ejectGlow = select(0.75, -0.85, mTrap == 1u || haz > 0.45);
+            return BioStepResult(
+                vec4f(0.0),
+                vec4f(ejectVel, packDeltaActGlow(0.9, ejectGlow)),
+            );
+        }
+
+        return BioStepResult(
+            vec4f(nextInteg, nutr, haz, packLifeMetaGrad(3u, mType, mAngle, mGrade, mTrap)),
+            vec4f(0.0),
+        );
+    }
+
     if (bio.enabled <= 0.5) {
         if (myPhase != 0u) {
             return BioStepResult(vec4f(max(curLifeState.x, 0.55), curLifeState.y, curLifeState.z, curLifeState.w), vec4f(0.0));
         }
-        return BioStepResult(vec4f(0.0), vec4f(0.0));
+        let chemSolar = evalSolarInsolation(pos);
+        let chemUpwell = evalCoastalUpwelling(oc);
+        let crystRes = attemptMineralCrystallize(
+            pi, pos, atomicNum, valence, 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0)),
+            chemSolar, chemUpwell, oc, landFrac, windNorm, curNorm, frameU, acc, bio,
+        );
+        return crystRes;
     }
 
     let rate = max(bio.rate, 0.0);
     let dtBio = bio.dt * rate;
     let solar = evalSolarInsolation(pos);
     let upwell = evalCoastalUpwelling(oc);
-    let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
-    let frameU = u32(max(bio.frame, 0.0)) + u32(max(bio.seedHash, 0.0));
     let nChem = max(u32(bio.chemColours), 1u);
     let nBio = max(u32(bio.bioColours), 1u);
 
     if (myPhase == 0u) {
         let chemForce = finalizeChemBioForce(acc, bio);
+        let bondEase = 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0));
         if (!isBiogenicElement(atomicNum, valence)) {
+            let crystRes = attemptMineralCrystallize(
+                pi, pos, atomicNum, valence, bondEase,
+                solar, upwell, oc, landFrac, windNorm, curNorm, frameU, acc, bio,
+            );
+            if (unpackPhase(crystRes.nextLifeState.w) == 3u) {
+                return crystRes;
+            }
             return BioStepResult(vec4f(0.0), chemForce);
         }
 
@@ -849,8 +1243,8 @@ fn finalizeBioUnified(
                 outwardDir = orthoBasis(pos, pos - blobCenter);
             }
         }
-        let bondEase = 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0));
-        let envMedia = mix(0.55 + 0.85 * upwell, 0.44 + 0.22 * clamp(acc.nearLipidCount * 0.25, 0.0, 1.0), landFrac);
+        let clayCatBoost = 1.0 + 0.85 * clamp(acc.nearClayCat, 0.0, 1.5);
+        let envMedia = mix(0.55 + 0.85 * upwell, 0.44 + 0.22 * clamp(acc.nearLipidCount * 0.25, 0.0, 1.0), landFrac) * clayCatBoost;
         let hostGrad = acc.adjGradCount >= 1.5;
 
         // 0A. Deferred biogenic lipid bilayer synthesis (`0 -> 2`, strictly C/H/O only; works across ocean and land)
@@ -955,6 +1349,15 @@ fn finalizeBioUnified(
                     vec4f(0.0, 0.0, 0.0, 0.6),
                 );
             }
+        }
+
+        // 0D. Geochemical nucleation into crustal minerals (`0 -> 3`) when unassimilated
+        let crystBioRes = attemptMineralCrystallize(
+            pi, pos, atomicNum, valence, bondEase,
+            solar, upwell, oc, landFrac, windNorm, curNorm, frameU, acc, bio,
+        );
+        if (unpackPhase(crystBioRes.nextLifeState.w) == 3u) {
+            return crystBioRes;
         }
 
         return BioStepResult(vec4f(0.0), chemForce);
@@ -1231,8 +1634,9 @@ fn finalizeBioUnified(
     var outKin = nextKin;
     var outGene = nextGene;
     let maxNovelColors = select(8u, 12u, outGrad == 1u);
-    if (acc.blobLipidCount >= 2.0 && nextEnergy > 0.86 && myDistinctColors < maxNovelColors && acc.blobCount >= 7.0) {
-        let pInnov = clamp(0.018 * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.008);
+    let clayInnovBoost = 1.0 + 1.25 * clamp(acc.nearClayCat, 0.0, 1.5);
+    if ((acc.blobLipidCount >= 2.0 || acc.nearClayCat >= 0.65) && nextEnergy > 0.80 && myDistinctColors < maxNovelColors && acc.blobCount >= 7.0) {
+        let pInnov = clamp(0.018 * clayInnovBoost * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.012);
         if (hashFloat(pi, frameU, 26u) < pInnov) {
             outSp = pickCompatibleNovelSpecies(nChem, nBio, myBioSp, mySpeciesMask, pi, frameU, 50u);
         }

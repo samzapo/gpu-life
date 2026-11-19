@@ -105,7 +105,7 @@ fn getBioCellForce(
         }
         let nbLs = lifeStateNext[ip.idx];
         let nbPhase = unpackPhase(nbLs.w);
-        if (nbPhase != 1u && nbPhase != 2u) {
+        if (nbPhase == 0u) {
             continue;
         }
         let nbKin = unpackKinPhase(nbLs.w);
@@ -161,6 +161,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let p = input[pi];
     let ls = lifeStateNext[pi];
     let myPhase = unpackPhase(ls.w);
+
+    if (myPhase == 3u) {
+        output[pi] = integrateMineralParticle(p, ls, bioForce[pi]);
+        return;
+    }
 
     if (myPhase == 1u || myPhase == 2u) {
         let bioSp = unpackBioSpecies(ls.w);

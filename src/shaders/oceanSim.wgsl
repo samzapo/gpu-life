@@ -113,6 +113,12 @@ fn accumulateOceanOrLipidNeighbor(
 
     let dI = orthoBasis(p.pos, ipPos - dot(ipPos, p.pos) * p.pos);
     let dIJ = dI * r;
+    if (nbPhase == 3u) {
+        // Crustal mineral crystal acts as an anchored physical reef/obstacle
+        (*acc).avoid += siteForce(dIJ, dI, 0.58 * sim.rMax, sim.rMax, 2.1, 0.0);
+        (*acc).div += 0.35;
+        return;
+    }
     let dArm = 0.11 * sim.rMax;
     let sameKin = kinAngularDist(myKin, nbKin) < 0.30;
 
@@ -260,5 +266,25 @@ fn integrateOceanParticle(
     p.vel = stepRes.vel;
     p.orient = stepRes.orient;
     p._pad = clamp(bioSteer.w, -1.0, 1.0);
+    return p;
+}
+
+// Crust-pinned inorganic mineral (`phase == 3u`): resists wind & current advection cleanly until eroded.
+fn integrateMineralParticle(
+    pIn: Particle,
+    mineralState: vec4f,
+    bioReact: vec4f,
+) -> Particle {
+    var p = pIn;
+    p.pos = normalize(p.pos);
+    p.vel = vec3f(0.0);
+    p.omega = 0.0;
+    if (bioReact.w > 1.5 && length(bioReact.xyz) > 1e-4) {
+        p.orient = orthoBasis(p.pos, bioReact.xyz);
+    } else {
+        p.orient = orthoBasis(p.pos, p.orient);
+    }
+    let integrity = clamp(mineralState.x, 0.0, 1.25);
+    p._pad = integrity - 0.5;
     return p;
 }

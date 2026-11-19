@@ -25,6 +25,9 @@ export interface HoverInspectConfig {
   getTemperature: () => number;
   getScale: () => number;
   getOceanMask?: (unitVec: [number, number, number]) => number;
+  getOceanSpeedMs?: (unitVec: [number, number, number]) => number;
+  getWindSpeedMs?: (unitVec: [number, number, number]) => number;
+  getMineralOpacity?: () => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
 
@@ -37,7 +40,10 @@ export type TooltipTheme =
   | 'chem'
   | 'ocean'
   | 'lipid'
-  | 'complex';
+  | 'complex'
+  | 'mineral'
+  | 'mineralWindfall'
+  | 'mineralTrap';
 
 export interface TooltipTarget {
   idx: number;
@@ -70,6 +76,9 @@ const LENS_THEME_COLORS: Record<TooltipTheme, [number, number, number, number]> 
   ocean: [0.22, 0.74, 0.97, 1.0],
   lipid: [0.52, 0.92, 0.96, 1.0],
   complex: [0.98, 0.84, 0.36, 1.0],
+  mineral: [0.83, 0.71, 0.46, 1.0],
+  mineralWindfall: [0.29, 0.91, 0.81, 1.0],
+  mineralTrap: [0.96, 0.31, 0.58, 1.0],
 };
 
 export interface TooltipSelectedElement {
@@ -91,7 +100,7 @@ export interface TooltipContent {
   body: string;
   meta?: string;
   element?: TooltipSelectedElement;
-  targetPhase?: 0 | 1 | 2;
+  targetPhase?: 0 | 1 | 2 | 3;
   targetIdx?: number;
   targetX?: number;
   targetY?: number;
@@ -412,6 +421,7 @@ export function analyzeReactionAt(
   const viewLayer = cfg.getViewLayer();
   const showChem = viewLayer !== 'ocean';
   const showLife = viewLayer !== 'air';
+  const showMinerals = cfg.getMineralOpacity ? cfg.getMineralOpacity() > 0.001 : true;
   const R = Math.max(cfg.getWorldSize(), 0.25);
   const airRMax = cfg.getAirRMax();
   const oceanRMax = cfg.getOceanRMax();
@@ -429,7 +439,7 @@ export function analyzeReactionAt(
 
   let uCur: [number, number, number] | null = null;
   let bestIdx = -1;
-  let bestPhase: 0 | 1 | 2 = 0;
+  let bestPhase: 0 | 1 | 2 | 3 = 0;
   let bestBioSp = 0;
   let bestScore = 1.0;
   let pinnedPt: [number, number] | null = null;
@@ -441,14 +451,18 @@ export function analyzeReactionAt(
     }
     const p = snap.particles[pinnedTarget.idx];
     const meta = unpackLifeMeta(snap.lifeState[pinnedTarget.idx]);
-    if ((meta.phase === 0 && !showChem) || (meta.phase !== 0 && !showLife)) {
+    if (
+      (meta.phase === 0 && !showChem) ||
+      ((meta.phase === 1 || meta.phase === 2) && !showLife) ||
+      (meta.phase === 3 && !showMinerals)
+    ) {
       return null;
     }
     pinnedPt = projectUnitVecToScreen(p, proj);
     if (!pinnedPt) return null;
     uCur = [p[0], p[1], p[2]];
     bestIdx = pinnedTarget.idx;
-    bestPhase = meta.phase === 0 ? 0 : meta.phase === 2 ? 2 : 1;
+    bestPhase = meta.phase === 0 ? 0 : meta.phase === 2 ? 2 : meta.phase === 3 ? 3 : 1;
     bestBioSp = meta.bioSpecies;
   }
 
@@ -474,7 +488,11 @@ export function analyzeReactionAt(
   if (!pinnedTarget) {
     for (let i = 0; i < nParticles; i++) {
       const meta = unpackLifeMeta(snap.lifeState[i]);
-      if ((meta.phase === 0 && !showChem) || (meta.phase !== 0 && !showLife)) {
+      if (
+        (meta.phase === 0 && !showChem) ||
+        ((meta.phase === 1 || meta.phase === 2) && !showLife) ||
+        (meta.phase === 3 && !showMinerals)
+      ) {
         continue;
       }
       const p = snap.particles[i];
@@ -485,7 +503,7 @@ export function analyzeReactionAt(
         if (score < bestScore) {
           bestScore = score;
           bestIdx = i;
-          bestPhase = meta.phase === 0 ? 0 : meta.phase === 2 ? 2 : 1;
+          bestPhase = meta.phase === 0 ? 0 : meta.phase === 2 ? 2 : meta.phase === 3 ? 3 : 1;
           bestBioSp = meta.bioSpecies;
         }
       }
@@ -503,6 +521,7 @@ export function analyzeReactionAt(
   const blobPatchR2 = blobPatchR * blobPatchR;
   const nearbyLife: number[] = [];
   const localLifePool: number[] = [];
+  const localMinerals: number[] = [];
 
   for (let i = 0; i < nParticles; i++) {
     const meta = unpackLifeMeta(snap.lifeState[i]);
@@ -510,13 +529,17 @@ export function analyzeReactionAt(
       if (unitDistChord2(snap.particles[i], centerRef) < localPatchR2) {
         localChemIdx.push(i);
       }
-    } else if (meta.phase !== 0 && showLife) {
+    } else if ((meta.phase === 1 || meta.phase === 2) && showLife) {
       const d2 = unitDistChord2(snap.particles[i], centerRef);
       if (d2 < catRef2) {
         nearbyLife.push(i);
       }
       if (d2 < blobPatchR2) {
         localLifePool.push(i);
+      }
+    } else if (meta.phase === 3 && showMinerals) {
+      if (unitDistChord2(snap.particles[i], centerRef) < blobPatchR2) {
+        localMinerals.push(i);
       }
     }
   }
@@ -791,6 +814,134 @@ export function analyzeReactionAt(
     return null;
   }
 
+  const ocMask = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
+  const overLand = ocMask < 0.42;
+
+  // Inorganic Crust-Pinned Mineral (`bestPhase === 3`): cluster matching crystal vein & inspect risk/reward
+  if (bestPhase === 3) {
+    const minConnectChord2 = Math.pow(Math.max(0.02, (oceanRMax * 1.45) / R), 2);
+    const meta0 = unpackLifeMeta(snap.lifeState[bestIdx]);
+    const minType = Math.min(4, Math.max(0, meta0.bioSpecies));
+
+    const veinIds = [bestIdx];
+    const veinSeen = new Set<number>([bestIdx]);
+    let headMin = 0;
+    while (headMin < veinIds.length && veinIds.length < 180) {
+      const u = veinIds[headMin++];
+      const pu = snap.particles[u];
+      for (const j of localMinerals) {
+        if (veinSeen.has(j)) continue;
+        if (unitDistChord2(pu, snap.particles[j]) < minConnectChord2) {
+          const mj = unpackLifeMeta(snap.lifeState[j]);
+          if (mj.bioSpecies === minType) {
+            veinSeen.add(j);
+            veinIds.push(j);
+          }
+        }
+      }
+    }
+
+    const counts = new Map<string, number>();
+    let integSum = 0;
+    let nutrSum = 0;
+    let hazSum = 0;
+    let trapCount = 0;
+    let beHit = false;
+    let halHit = false;
+    for (const id of veinIds) {
+      const cIdx = Math.max(0, Math.min(els.length - 1, Math.floor(snap.particles[id]?.[6] ?? 0)));
+      const el = els[cIdx];
+      if (el) {
+        const s = getElementSymbol(el.atomicNumber);
+        counts.set(s, (counts.get(s) ?? 0) + 1);
+        if (el.atomicNumber === 4) beHit = true;
+        if (el.atomicNumber === 7 || el.atomicNumber === 13) halHit = true;
+      }
+      const lsi = snap.lifeState[id] ?? [0.85, 0, 0, 3];
+      const mi = unpackLifeMeta(lsi);
+      integSum += lsi[0] ?? 0.85;
+      nutrSum += lsi[1] ?? 0;
+      hazSum += lsi[2] ?? 0;
+      if (mi.graduated) trapCount++;
+    }
+
+    const formula = [...counts.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([s, c]) => `${s}${toSubscript(c)}`)
+      .join('');
+    const avgInteg = Math.round(Math.min(1, integSum / Math.max(1, veinIds.length)) * 100);
+    const avgHaz = hazSum / Math.max(1, veinIds.length);
+    const avgNutr = nutrSum / Math.max(1, veinIds.length);
+    const isTrap = meta0.graduated || trapCount > 0 || beHit || avgHaz >= 0.50;
+    const windMs = cfg.getWindSpeedMs ? cfg.getWindSpeedMs([p0[0], p0[1], p0[2]]) : 0;
+    const curMs = cfg.getOceanSpeedMs ? cfg.getOceanSpeedMs([p0[0], p0[1], p0[2]]) : 0;
+    const crystWord = veinIds.length === 1 ? 'crystal' : 'crystals';
+
+    let theme: TooltipTheme = 'mineral';
+    let badge = 'SILICATE BEDROCK · CRUSTAL REEF';
+    let title = `Quartz-Olivine Reef (${veinIds.length} ${crystWord} · ${formula})`;
+    let stabilityStr = 'Insoluble in air & water · Storm/surf mechanical shear only';
+    let encounterStr =
+      'Physical shelter against currents with mild halogen detoxification, though fast impact abrades unarmored cytoplasm.';
+
+    if (minType === 1) {
+      theme = isTrap || halHit ? 'mineralTrap' : 'mineral';
+      badge = isTrap ? 'EVAPORITE FLUORITE · OSMOTIC HAZARD' : 'EVAPORITE HALITE · WATER-SOLUBLE';
+      title = `${isTrap ? 'Halite-Fluorite Trap' : 'Halite Salt Crust'} (${veinIds.length} ${crystWord} · ${formula})`;
+      stabilityStr = overLand
+        ? 'Stable on dry land · Slowly abraded into salt dust by wind'
+        : 'Dissolving rapidly in ocean water & coastal surf!';
+      encounterStr = isTrap
+        ? 'Death sentence for naked blobs (Cl/F halogen shock drains energy & poison spikes)—only Halophiles & Lipid Protocells tolerate it.'
+        : 'Leaches osmotic salts that stress ordinary blobs while nourishing Halophile biofilms & armored Protocells.';
+    } else if (minType === 2) {
+      theme = isTrap || beHit ? 'mineralTrap' : 'mineralWindfall';
+      badge = isTrap ? 'BERYL-CARBONATE TRAP · POISON' : 'CARBONATE DOLOMITE · CARBON VAULT';
+      title = `${isTrap ? 'Beryl-Doped Carbonate' : 'Dolomite Carbonate Vein'} (${veinIds.length} ${crystWord} · ${formula})`;
+      stabilityStr = overLand
+        ? 'Moderately stable on land · Weathered by winds'
+        : 'Moderately stable underwater · Slow turbulent dissolution';
+      encounterStr = isTrap
+        ? `TRAP VEIN (Be inclusion): lures cells toward ${formula}, then releases toxic beryllium poisoning when bio-mined!`
+        : 'Carbon windfall! Chelation releases C/O fuel + cofactors that boost biomass & rapid Lipid Bilayer assembly.';
+    } else if (minType === 3) {
+      theme = overLand || isTrap ? 'mineralTrap' : 'mineralWindfall';
+      badge = overLand || isTrap ? 'SULFIDE VEIN · ACID OXIDIZING' : 'SULFIDE CHIMNEY · CHEMOSYNTHESIS';
+      title = `${overLand || isTrap ? 'Oxidizing Pyrite Crust' : 'Hydrothermal Sulfide Chimney'} (${veinIds.length} ${crystWord} · ${formula})`;
+      stabilityStr = overLand
+        ? 'Air-unstable! Atmospheric O + wind rapidly oxidize sulfide into acid plumes'
+        : 'Stable in ocean water · Fuels upwelling chemosynthetic vents';
+      encounterStr = overLand || isTrap
+        ? 'Corroding in windy air: triggers acidic sulfur flash-burns on exposed cells (partially scavenged by Decomposers).'
+        : 'Major chemosynthetic windfall: pumps reducing S/Mg ATP energy even in dim high latitudes without sunlight!';
+    } else if (minType === 4) {
+      theme = 'mineralWindfall';
+      badge = 'HYDRATED CLAY · CATALYTIC MATRIX';
+      title = `Montmorillonite Clay (${veinIds.length} ${crystWord} · ${formula})`;
+      stabilityStr = overLand
+        ? 'Inland dehydration! Cracking & flaking into mineral dust under dry winds'
+        : 'Stable in oceans & moist coastal shelves';
+      encounterStr =
+        'Prebiotic evolutionary windfall: detoxifies poisons, boosts enzyme cofactors, and doubles Lipid Bilayer & complex trait evolution!';
+    }
+
+    const habitatLabel = overLand ? 'Land Crust' : 'Marine Shelf/Floor';
+    const bioMineNote =
+      nearbyLife.length > 0 ? ` Active bio-mining by ${nearbyLife.length} nearby cell(s).` : '';
+    return {
+      theme,
+      badge,
+      title,
+      body: `${stabilityStr}. ${encounterStr}${bioMineNote}`,
+      meta: `Crystal #${bestIdx} (${sym0}) · ${habitatLabel} · Integrity ${avgInteg}% · Wind ${windMs.toFixed(0)} m/s · Current ${curMs.toFixed(2)} m/s · Nutr ${Math.round(avgNutr * 100)}% / Haz ${Math.round(avgHaz * 100)}%`,
+      element: selectedElement,
+      targetPhase: 3,
+      targetIdx: bestIdx,
+      targetX,
+      targetY,
+    };
+  }
+
   // Living Biomass or Lipid Bilayer (phase === 1 or 2): assemble emergent multi-particle protocell via BFS
   const blobConnectChord = Math.max(0.02, (oceanRMax * 1.35) / R);
   const blobConnectChord2 = blobConnectChord * blobConnectChord;
@@ -842,9 +993,27 @@ export function analyzeReactionAt(
         ? 'Late-Complex'
         : 'Balanced';
   const strategyGeneStr = `${strategyLabel} (gene ${Math.round(blob.avgEncapGene)}/15)`;
-  const ocMask = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
-  const overLand = ocMask < 0.42;
   const habitatTag = overLand ? 'Terrestrial (calm · +chem · -desicc)' : 'Marine (currents)';
+
+  let nearWindfallMinerals = 0;
+  let nearTrapMinerals = 0;
+  for (const mi of localMinerals) {
+    if (unitDistChord2(snap.particles[mi], centerRef) < catRef2) {
+      const mm = unpackLifeMeta(snap.lifeState[mi]);
+      if (mm.graduated || mm.bioSpecies === 1) nearTrapMinerals++;
+      if (mm.bioSpecies === 4 || (!mm.graduated && (mm.bioSpecies === 2 || mm.bioSpecies === 3))) {
+        nearWindfallMinerals++;
+      }
+    }
+  }
+  const mineralNote =
+    nearTrapMinerals > 0 && nearWindfallMinerals > 0
+      ? ' Grazing mixed crustal veins (catalytic mineral windfall + hazardous Be/halide leach).'
+      : nearTrapMinerals > 0
+        ? ' Exposed to corrosive halide/Be/acid mineral leachate!'
+        : nearWindfallMinerals > 0
+          ? ' Anchored near catalytic Clay/Carbonate/Sulfide mineral windfall.'
+          : '';
 
   if (bestPhase === 2) {
     const theme: TooltipTheme = poi > 0.25 ? 'toxic' : blob.graduated ? 'complex' : 'lipid';
@@ -860,7 +1029,7 @@ export function analyzeReactionAt(
     const gradNote = blob.graduated
       ? ' Graduated post-engulfment bilayer suppressing core crowding Oxygen dissolution.'
       : '';
-    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${gradNote}${landNote}`;
+    const body = `Oriented ${sym0}-bearing amphiphile built by its host blob under the ${strategyLabel} strategy (gene ${Math.round(blob.avgEncapGene)}/15): hydrophilic heads anchor inner ${blob.formula} cytoplasm and import C/H/O/S nutrients while hydrophobic tails block halogens & grazers.${gradNote}${landNote}${mineralNote}`;
     return {
       theme,
       badge,
@@ -957,7 +1126,7 @@ export function analyzeReactionAt(
       theme,
       badge,
       title,
-      body: `${statusDesc}${gradDetail}${landDetail}`,
+      body: `${statusDesc}${gradDetail}${landDetail}${mineralNote}`,
       meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,

@@ -192,9 +192,12 @@ export const earthParams = {
   oceanColors: parseOpacityParam('oceanColors', effectiveCachedConfig?.earth?.oceanColors, FACTORY_DEFAULTS.earth.oceanColors),
   chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
   lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
+  mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
   coastlines: resolveBool('coastlines', effectiveCachedConfig?.earth?.coastlines, FACTORY_DEFAULTS.earth.coastlines),
   bioLink: resolveBool('bioLink', effectiveCachedConfig?.earth?.bioLink, FACTORY_DEFAULTS.earth.bioLink),
   bioRate: resolveNumber('bioRate', effectiveCachedConfig?.earth?.bioRate, FACTORY_DEFAULTS.earth.bioRate),
+  mineralLink: resolveBool('mineralLink', effectiveCachedConfig?.earth?.mineralLink, FACTORY_DEFAULTS.earth.mineralLink),
+  mineralRate: resolveNumber('mineralRate', effectiveCachedConfig?.earth?.mineralRate, FACTORY_DEFAULTS.earth.mineralRate),
   tooltips: resolveBool('tooltips', effectiveCachedConfig?.earth?.tooltips, FACTORY_DEFAULTS.earth.tooltips),
   mouseTool: initialMouseTool,
   windStatus: 'Loading GFS…',
@@ -270,6 +273,10 @@ export function setBioLink(
   bioData[9] = frameCount;
   bioData[10] = seedHash;
   bioData[11] = earthParams.oceanMix ? earthParams.oceanStrength : 0;
+  bioData[12] = earthParams.vortex ? earthParams.windStrength : 0;
+  bioData[13] = WIND_LEVELS[earthParams.windLevel].streamMax;
+  bioData[14] = earthParams.mineralLink && earthParams.mineralRate > 0 ? 1 : 0;
+  bioData[15] = earthParams.mineralRate;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
 
@@ -546,6 +553,14 @@ export const lifeOpacityBinding = withTooltip(
   'Ocean Life Opacity',
   'Opacity (0%–100%) of emergent Life organisms & protocell lipid bilayers across oceans and continents.',
 );
+export const mineralOpacityBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'mineralOpacity', {
+    label: 'minAlpha',
+    ...opacitySliderParams,
+  }),
+  'Mineral Crust Opacity',
+  'Opacity (0%–100%) of crust-affixed Silicate, Evaporite, Carbonate, Sulfide, and Hydrated Clay crystals.',
+);
 export const coastlinesBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'coastlines'),
   'Vector Coastlines',
@@ -567,6 +582,23 @@ export const bioRateBinding = withTooltip(
   }),
   'Bio-Chem Coupling Rate',
   'Master rate multiplier for enzymatic barrier lowering, fuel harvesting, vitamin support, and toxin transfer.',
+);
+export const mineralLinkBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'mineralLink', {
+    label: 'minerals',
+  }),
+  'Inorganic Mineral Cycle',
+  'Enable crust-pinned crystallization, wind/current erosion plumes, and windfall/toxin mineral encounters.',
+);
+export const mineralRateBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'mineralRate', {
+    label: 'minRate',
+    min: 0,
+    max: 3,
+    step: 0.05,
+  }),
+  'Mineral Cycling Rate',
+  'Rate multiplier for crystallization, wind/water weathering, and biological chelation of crust minerals.',
 );
 export const tooltipsBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'tooltips', {
@@ -788,8 +820,14 @@ export function bindOptions(
       onBioSync?.();
     });
   }
-  windMixBinding.on('change', () => setSim(device, simData, simBuffer));
-  windStrengthBinding.on('change', () => setSim(device, simData, simBuffer));
+  windMixBinding.on('change', () => {
+    setSim(device, simData, simBuffer);
+    onBioSync?.();
+  });
+  windStrengthBinding.on('change', () => {
+    setSim(device, simData, simBuffer);
+    onBioSync?.();
+  });
 
   for (const b of oceanParamBindings) {
     b.on('change', () => {
@@ -854,9 +892,12 @@ export function bindConfigPersistence(onChange: () => void) {
     oceanLinesBinding,
     oceanColorsBinding,
     lifeOpacityBinding,
+    mineralOpacityBinding,
     coastlinesBinding,
     bioLinkBinding,
     bioRateBinding,
+    mineralLinkBinding,
+    mineralRateBinding,
     tooltipsBinding,
     mouseToolBinding,
     oceanColoursBinding,

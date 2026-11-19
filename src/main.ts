@@ -37,6 +37,7 @@ import {
   extendedSinebowColor,
   fetchLiveGfsWind,
   loadFallbackWind,
+  sampleWindLonLat,
   WIND_LEVELS,
   type WindGrid,
   type WindLevelId,
@@ -76,6 +77,9 @@ import {
   initialOrientation,
   initialUrlPan,
   lifeOpacityBinding,
+  mineralLinkBinding,
+  mineralOpacityBinding,
+  mineralRateBinding,
   mouseToolBinding,
   newOceanSimBtn,
   newSimBtn,
@@ -149,13 +153,13 @@ const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
 
-const uniformsFloats = 40; // 160 bytes
+const uniformsFloats = 44; // 176 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
 const simData = new Float32Array(simSize);
 const oceanSimSize = 24;
 const oceanSimData = new Float32Array(oceanSimSize);
-const bioUniformFloats = 12;
+const bioUniformFloats = 16;
 const bioUniformData = new Float32Array(bioUniformFloats);
 const frameBuf = new Float32Array(1);
 
@@ -505,9 +509,12 @@ function exportCurrentConfig(): SimConfigV1 {
       oceanLines: earthParams.oceanLines,
       oceanColors: earthParams.oceanColors,
       lifeOpacity: earthParams.lifeOpacity,
+      mineralOpacity: earthParams.mineralOpacity,
       coastlines: earthParams.coastlines,
       bioLink: earthParams.bioLink,
       bioRate: earthParams.bioRate,
+      mineralLink: earthParams.mineralLink,
+      mineralRate: earthParams.mineralRate,
       tooltips: earthParams.tooltips,
       mouseTool: earthParams.mouseTool,
     },
@@ -670,12 +677,15 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.oceanLines !== undefined) earthParams.oceanLines = e.oceanLines;
     if (e.oceanColors !== undefined) earthParams.oceanColors = e.oceanColors;
     if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
+    if (e.mineralOpacity !== undefined) earthParams.mineralOpacity = e.mineralOpacity;
     if (e.coastlines !== undefined) {
       earthParams.coastlines = e.coastlines;
       mapDirty = true;
     }
     if (e.bioLink !== undefined) earthParams.bioLink = e.bioLink;
     if (e.bioRate !== undefined) earthParams.bioRate = e.bioRate;
+    if (e.mineralLink !== undefined) earthParams.mineralLink = e.mineralLink;
+    if (e.mineralRate !== undefined) earthParams.mineralRate = e.mineralRate;
     if (e.tooltips !== undefined) earthParams.tooltips = e.tooltips;
     if (e.mouseTool !== undefined) {
       earthParams.mouseTool = e.mouseTool;
@@ -874,6 +884,10 @@ declare global {
       setBioLink: (on: boolean) => void;
       getBioRate: () => number;
       setBioRate: (rate: number) => void;
+      getMineralLink: () => boolean;
+      setMineralLink: (on: boolean) => void;
+      getMineralRate: () => number;
+      setMineralRate: (rate: number) => void;
       getTooltips: () => boolean;
       setTooltips: (on: boolean) => void;
       getOpacities: () => {
@@ -883,9 +897,11 @@ declare global {
         oceanLines: number;
         oceanColors: number;
         lifeOpacity: number;
+        mineralOpacity: number;
       };
       setChemOpacity: (val: number) => void;
       setLifeOpacity: (val: number) => void;
+      setMineralOpacity: (val: number) => void;
       setOceanColors: (val: boolean | number) => void;
       setOceanLines: (val: boolean | number) => void;
       setWindColors: (val: boolean | number) => void;
@@ -937,6 +953,14 @@ declare global {
         bioCount: number;
         cytoplasmCount: number;
         lipidCount: number;
+        mineralCount: number;
+        mineralOceanCount: number;
+        mineralLandCount: number;
+        mineralTypeCounts: [number, number, number, number, number];
+        mineralTrapCount: number;
+        nobleMineralViolations: number;
+        avgMineralIntegrity: number;
+        mineralElementCounts: Record<string, number>;
         guildCounts: [number, number, number, number];
         abioticBioViolations: number;
         lipidAbioticViolations: number;
@@ -1143,6 +1167,7 @@ async function computeWorldStats() {
   const data = await readUnifiedWorldBuffers(particleAmt, false);
   const chemElementCounts: Record<string, number> = {};
   const bioElementCounts: Record<string, number> = {};
+  const mineralElementCounts: Record<string, number> = {};
   const emptyRoles = {
     producerBlobs: 0,
     consumerBlobs: 0,
@@ -1167,6 +1192,14 @@ async function computeWorldStats() {
       bioCount: 0,
       cytoplasmCount: 0,
       lipidCount: 0,
+      mineralCount: 0,
+      mineralOceanCount: 0,
+      mineralLandCount: 0,
+      mineralTypeCounts: [0, 0, 0, 0, 0] as [number, number, number, number, number],
+      mineralTrapCount: 0,
+      nobleMineralViolations: 0,
+      avgMineralIntegrity: 0,
+      mineralElementCounts,
       guildCounts: [0, 0, 0, 0] as [number, number, number, number],
       abioticBioViolations: 0,
       lipidAbioticViolations: 0,
@@ -1203,6 +1236,13 @@ async function computeWorldStats() {
   let bioCount = 0;
   let cytoplasmCount = 0;
   let lipidCount = 0;
+  let mineralCount = 0;
+  let mineralOceanCount = 0;
+  let mineralLandCount = 0;
+  const mineralTypeCounts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  let mineralTrapCount = 0;
+  let nobleMineralViolations = 0;
+  let mineralIntegSum = 0;
   let abioticBioViolations = 0;
   let lipidAbioticViolations = 0;
   let bioEnergySum = 0;
@@ -1227,7 +1267,7 @@ async function computeWorldStats() {
     const cIdx = Math.max(0, Math.min(elements.length - 1, Math.floor(p[6] ?? 0)));
     const el = elements[cIdx];
     const sym = getElementSymbol(el.atomicNumber);
-    if (meta.phase !== 0) {
+    if (meta.phase === 1 || meta.phase === 2) {
       bioCount++;
       if (meta.phase === 2) {
         lipidCount++;
@@ -1251,6 +1291,24 @@ async function computeWorldStats() {
         const m = sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
         if (m >= 0.42) oceanBioCount++;
         else landBioCount++;
+      }
+    } else if (meta.phase === 3) {
+      mineralCount++;
+      const mType = Math.min(4, Math.max(0, meta.bioSpecies));
+      mineralTypeCounts[mType]++;
+      if (meta.graduated) mineralTrapCount++;
+      mineralIntegSum += ls[0] ?? 0;
+      mineralElementCounts[sym] = (mineralElementCounts[sym] ?? 0) + 1;
+      if (el.valence === 0) {
+        nobleMineralViolations++;
+      }
+      if (currentOceanGrid) {
+        const z = Math.max(-1, Math.min(1, p[2] ?? 0));
+        const latDeg = Math.asin(z) * RAD2DEG;
+        const lonDeg = Math.atan2(p[1] ?? 0, p[0] ?? 1) * RAD2DEG;
+        const m = sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
+        if (m >= 0.42) mineralOceanCount++;
+        else mineralLandCount++;
       }
     } else {
       chemCount++;
@@ -1456,6 +1514,14 @@ async function computeWorldStats() {
     bioCount,
     cytoplasmCount,
     lipidCount,
+    mineralCount,
+    mineralOceanCount,
+    mineralLandCount,
+    mineralTypeCounts,
+    mineralTrapCount,
+    nobleMineralViolations,
+    avgMineralIntegrity: mineralCount > 0 ? mineralIntegSum / mineralCount : 0,
+    mineralElementCounts,
     guildCounts: [
       emergentRoles.producerParticles,
       emergentRoles.consumerParticles,
@@ -1598,6 +1664,21 @@ const tooltipManager = new TooltipManager({
     const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
     return sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
   },
+  getOceanSpeedMs: (u) => {
+    if (!currentOceanGrid || !earthParams.oceanMix) return 0;
+    const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+    const latDeg = Math.asin(z) * (180 / Math.PI);
+    const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+    return sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[2] * earthParams.oceanStrength;
+  },
+  getWindSpeedMs: (u) => {
+    if (!earthParams.vortex) return 0;
+    const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+    const latDeg = Math.asin(z) * (180 / Math.PI);
+    const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+    return sampleWindLonLat(currentWindGrid, lonDeg, latDeg)[2] * earthParams.windStrength;
+  },
+  getMineralOpacity: () => earthParams.mineralOpacity,
   requestSnapshot: captureHoverSnapshot,
 });
 
@@ -1634,6 +1715,18 @@ window.complexLife = {
     bioRateBinding.refresh();
     syncBioUniformState();
   },
+  getMineralLink: () => earthParams.mineralLink,
+  setMineralLink: (on: boolean) => {
+    earthParams.mineralLink = on;
+    mineralLinkBinding.refresh();
+    syncBioUniformState();
+  },
+  getMineralRate: () => earthParams.mineralRate,
+  setMineralRate: (rate: number) => {
+    earthParams.mineralRate = rate;
+    mineralRateBinding.refresh();
+    syncBioUniformState();
+  },
   getTooltips: () => earthParams.tooltips,
   setTooltips: (on: boolean) => {
     earthParams.tooltips = on;
@@ -1647,6 +1740,7 @@ window.complexLife = {
     oceanLines: earthParams.oceanLines,
     oceanColors: earthParams.oceanColors,
     lifeOpacity: earthParams.lifeOpacity,
+    mineralOpacity: earthParams.mineralOpacity,
   }),
   setChemOpacity: (val: number) => {
     earthParams.chemOpacity = clampOpacity(val);
@@ -1655,6 +1749,10 @@ window.complexLife = {
   setLifeOpacity: (val: number) => {
     earthParams.lifeOpacity = clampOpacity(val);
     lifeOpacityBinding.refresh();
+  },
+  setMineralOpacity: (val: number) => {
+    earthParams.mineralOpacity = clampOpacity(val);
+    mineralOpacityBinding.refresh();
   },
   setOceanColors: (val: boolean | number) => {
     earthParams.oceanColors = clampOpacity(val);
@@ -2214,8 +2312,9 @@ function render(commandEncoder: GPUCommandEncoder) {
 
   const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
   const showLife = earthParams.viewLayer !== 'air' && earthParams.lifeOpacity > 0.001;
+  const showMinerals = earthParams.mineralOpacity > 0.001;
   if (
-    (showChem || showLife) &&
+    (showChem || showLife || showMinerals) &&
     renderBindGroup &&
     particleBuffers &&
     valenceBuffer &&
@@ -2552,11 +2651,157 @@ function startWorld() {
     particleData[b + 10] = uz;
   };
 
-  while (bioCursor < biogenicPool.length) {
-    placeFreeAtom(biogenicPool[bioCursor++]);
+  const freePool = [...biogenicPool.slice(bioCursor), ...abioticPool];
+  for (let i = freePool.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = freePool[i];
+    freePool[i] = freePool[j];
+    freePool[j] = tmp;
   }
-  for (const pi of abioticPool) {
-    placeFreeAtom(pi);
+
+  const usedInMineral = new Set<number>();
+  if (earthParams.mineralLink && particleAmt >= 200) {
+    const fitsMinType = (z: number, val: number, mType: number): boolean => {
+      if (val <= 0) return false;
+      if (mType === 0) return z === 11 || z === 6 || z === 10 || z === 3;
+      if (mType === 1) return z === 9 || z === 3 || z === 13 || z === 7 || z === 10;
+      if (mType === 2) return z === 5 || z === 6 || z === 10 || z === 4;
+      if (mType === 3) return z === 12 || z === 10 || z === 6;
+      return z === 11 || z === 6 || z === 1 || z === 10 || z === 5;
+    };
+
+    const sampleHabitatCenter = (mode: 'land' | 'coast' | 'ocean' | 'any'): [number, number, number] => {
+      let lonDeg = (rng() - 0.5) * 360;
+      let latDeg = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
+      if (currentOceanGrid && mode !== 'any') {
+        for (let t = 0; t < 80; t++) {
+          const cLon = (rng() - 0.5) * 360;
+          const cLat = Math.asin(rng() * 2 - 1) * (180 / Math.PI);
+          const m = sampleOceanLonLat(currentOceanGrid, cLon, cLat)[3];
+          const ok =
+            (mode === 'land' && m < 0.34) ||
+            (mode === 'coast' && m >= 0.36 && m <= 0.72) ||
+            (mode === 'ocean' && m >= 0.54);
+          if (ok) {
+            lonDeg = cLon;
+            latDeg = cLat;
+            break;
+          }
+        }
+      }
+      const lonR = lonDeg * DEG2RAD;
+      const latR = latDeg * DEG2RAD;
+      const cLat = Math.cos(latR);
+      return [cLat * Math.cos(lonR), cLat * Math.sin(lonR), Math.sin(latR)];
+    };
+
+    const bins: number[][] = [[], [], [], [], []];
+    for (const pi of freePool) {
+      const el = elements[elemChoice[pi]];
+      if (!el || el.valence <= 0) continue;
+      for (let t = 0; t < 5; t++) {
+        if (fitsMinType(el.atomicNumber, el.valence, t)) {
+          bins[t].push(pi);
+        }
+      }
+    }
+    // Interleave signature crustal elements (Si, Na/Cl/F, C/Be/Mg, S/Mg, H) naturally with abundant O
+    const sigScore = (mType: number, z: number, pi: number): number => {
+      const jitter = ((pi * 2654435761) >>> 0) / 4294967296;
+      let bias = 0;
+      if (mType === 0) bias = z === 11 ? 0.55 : z === 10 || z === 3 ? 0.45 : 0;
+      else if (mType === 1) bias = z === 9 || z === 13 || z === 7 ? 0.60 : z === 3 || z === 10 ? 0.45 : 0;
+      else if (mType === 2) bias = z === 5 ? 0.75 : z === 10 ? 0.55 : z === 4 ? 0.35 : 0;
+      else if (mType === 3) bias = z === 12 ? 0.90 : z === 10 ? 0.50 : 0;
+      else bias = z === 11 ? 0.55 : z === 10 || z === 1 ? 0.40 : 0;
+      return bias + jitter * 0.85;
+    };
+    for (let t = 0; t < 5; t++) {
+      bins[t].sort((a, b) => {
+        const za = elements[elemChoice[a]]?.atomicNumber ?? 0;
+        const zb = elements[elemChoice[b]]?.atomicNumber ?? 0;
+        return sigScore(t, zb, b) - sigScore(t, za, a);
+      });
+    }
+
+    const veinsPerType = Math.max(2, Math.min(10, Math.round((particleAmt / 28000) * 9)));
+    const crystalsPerVein = Math.max(4, Math.min(14, Math.round((particleAmt / 28000) * 12)));
+    const habitats: ('any' | 'land' | 'coast' | 'ocean')[] = ['any', 'land', 'any', 'ocean', 'coast'];
+
+    for (let mType = 0; mType < 5; mType++) {
+      let cursor = 0;
+      const pool = bins[mType];
+      for (let v = 0; v < veinsPerType; v++) {
+        // Place most veins in their stable habitat, plus a few coastal boundary veins actively eroding on Day 0
+        const hab: 'any' | 'land' | 'coast' | 'ocean' =
+          v === 0 ? 'coast' : habitats[mType];
+        const [cx, cy, cz] = sampleHabitatCenter(hab);
+        const [e1x, e1y, e1z] = unitTangentFromSphere(cx, cy, cz, rng() * Math.PI * 2);
+        const e2x = cy * e1z - cz * e1y;
+        const e2y = cz * e1x - cx * e1z;
+        const e2z = cx * e1y - cy * e1x;
+        const veinAngle = rng() * Math.PI * 2;
+        const isBeTrapVein = mType === 2 && v % 3 === 1;
+        const isFluorTrapVein = mType === 1 && v % 2 === 0;
+
+        let placed = 0;
+        while (placed < crystalsPerVein && cursor < pool.length) {
+          const pi = pool[cursor++];
+          if (usedInMineral.has(pi)) continue;
+          const el = elements[elemChoice[pi]];
+          if (!el) continue;
+          const angR = (0.005 + Math.sqrt(rng()) * 0.018) / worldR;
+          const th = rng() * Math.PI * 2;
+          const ct = Math.cos(th);
+          const st = Math.sin(th);
+          const ca = Math.cos(angR);
+          const sa = Math.sin(angR);
+          let nx = ca * cx + sa * (ct * e1x + st * e2x);
+          let ny = ca * cy + sa * (ct * e1y + st * e2y);
+          let nz = ca * cz + sa * (ct * e1z + st * e2z);
+          const invL = 1 / (Math.hypot(nx, ny, nz) || 1);
+          nx *= invL;
+          ny *= invL;
+          nz *= invL;
+          const cAngle = (veinAngle + (rng() - 0.5) * 0.25 + Math.PI * 2) % (Math.PI * 2);
+          const [ux, uy, uz] = unitTangentFromSphere(nx, ny, nz, cAngle);
+          const b = pi * 12;
+          particleData[b + 0] = nx;
+          particleData[b + 1] = ny;
+          particleData[b + 2] = nz;
+          particleData[b + 3] = elemChoice[pi];
+          particleData[b + 8] = ux;
+          particleData[b + 9] = uy;
+          particleData[b + 10] = uz;
+
+          const trap =
+            (isBeTrapVein ||
+              el.atomicNumber === 4 ||
+              (mType === 1 && (isFluorTrapVein || el.atomicNumber === 7 || el.atomicNumber === 13)))
+              ? 1
+              : 0;
+          const nutr =
+            mType === 0 ? 0.25 : mType === 1 ? (trap ? 0.1 : 0.3) : mType === 2 ? (trap ? 0.4 : 0.85) : mType === 3 ? 0.9 : 0.95;
+          const haz =
+            mType === 0 ? 0.0 : mType === 1 ? (trap ? 0.88 : 0.45) : mType === 2 ? (trap ? 0.92 : 0.0) : mType === 3 ? 0.08 : 0.0;
+          const grade = Math.max(0, Math.min(15, Math.round(nutr * 12 + (trap ? 2 : 0))));
+          const lBase = pi * 4;
+          lifeData[lBase + 0] = 0.56 + 0.44 * rng();
+          lifeData[lBase + 1] = nutr;
+          lifeData[lBase + 2] = haz;
+          lifeData[lBase + 3] = packLifeMetaJs(3, mType, cAngle, grade, trap);
+
+          usedInMineral.add(pi);
+          placed++;
+        }
+      }
+    }
+  }
+
+  for (const pi of freePool) {
+    if (!usedInMineral.has(pi)) {
+      placeFreeAtom(pi);
+    }
   }
 
   device.queue.writeBuffer(particleBuffers[0], 0, particleData.buffer);
@@ -2650,6 +2895,10 @@ function writeUniforms() {
   uniformData[37] = showOcean ? earthParams.lifeOpacity : 0;
   uniformData[38] = colourAmt;
   uniformData[39] = oceanColourAmt;
+  uniformData[40] = earthParams.mineralOpacity;
+  uniformData[41] = 0;
+  uniformData[42] = 0;
+  uniformData[43] = 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
@@ -3017,6 +3266,16 @@ bioRateBinding.on('change', () => {
   syncBioUniformState();
 });
 
+mineralLinkBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+mineralRateBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
 projectionSelect.on('change', (ev) => {
   if (suppressPaneEvents) return;
   setProjectionChoice(ev.value);
@@ -3024,6 +3283,7 @@ projectionSelect.on('change', (ev) => {
 
 windLevelSelect.on('change', (ev) => {
   if (suppressPaneEvents) return;
+  syncBioUniformState();
   loadWindLevel(ev.value);
 });
 

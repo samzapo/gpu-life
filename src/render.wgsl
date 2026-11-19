@@ -66,7 +66,12 @@ fn vertex(
     let graduated = unpackGraduated(particle.lifeState.w);
     let phaseF = f32(phase);
     let bioSpeciesF = f32(bioSp);
-    let layerOpacity = select(uniforms.earthFlags.w, uniforms.renderParams.y, phase != 0u);
+    var layerOpacity = uniforms.renderParams.y;
+    if (phase == 0u) {
+        layerOpacity = uniforms.earthFlags.w;
+    } else if (phase == 3u) {
+        layerOpacity = uniforms.mineralParams.x;
+    }
 
     let n = normalize(particle.pos);
     let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
@@ -142,7 +147,15 @@ fn vertex(
     let chemAngR = max(uniforms.size * orbScale, 1.55 / scalePx);
     let bioAngR = max(uniforms.renderParams.x, 1.75 / scalePx);
     let lipidAngR = bioAngR * select(1.28, 1.40, graduated == 1u);
-    let angR = select(chemAngR, select(bioAngR, lipidAngR, phase == 2u), phase != 0u);
+    var angR = bioAngR;
+    if (phase == 0u) {
+        angR = chemAngR;
+    } else if (phase == 2u) {
+        angR = lipidAngR;
+    } else if (phase == 3u) {
+        let integ = clamp(particle.lifeState.x, 0.08, 1.15);
+        angR = max(bioAngR * 1.18, chemAngR * 1.32) * mix(0.68, 1.14, clamp(integ, 0.0, 1.0));
+    }
     let cx = uniforms.viewSize.x * 0.5 + uniforms.viewParams.y;
     let cy = uniforms.viewSize.y * 0.5 + uniforms.viewParams.z;
 
@@ -193,11 +206,109 @@ fn fragment(
     let cIdx = min(u32(max(chemSpecies, 0.0)), nChem - 1u);
     let chemCol = vec3f(colours[cIdx * 3u], colours[cIdx * 3u + 1u], colours[cIdx * 3u + 2u]);
     let d = length(uv);
-    let isLipid = phaseF > 1.5;
-    let isBio = phaseF > 0.5 && !isLipid;
-    let layerOpacity = clamp(select(uniforms.earthFlags.w, uniforms.renderParams.y, phaseF > 0.5), 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
-    if ((!isLipid && d > 1.0) || (isLipid && max(abs(uv.x), abs(uv.y)) > 1.0) || layerOpacity <= 0.001) {
+    let isMineral = phaseF > 2.5;
+    let isLipid = !isMineral && phaseF > 1.5;
+    let isBio = !isMineral && !isLipid && phaseF > 0.5;
+    var layerOpacity = uniforms.renderParams.y;
+    if (phaseF < 0.5) {
+        layerOpacity = uniforms.earthFlags.w;
+    } else if (isMineral) {
+        layerOpacity = uniforms.mineralParams.x;
+    }
+    layerOpacity = clamp(layerOpacity, 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
+    if ((!isLipid && !isMineral && d > 1.0) || ((isLipid || isMineral) && max(abs(uv.x), abs(uv.y)) > 1.0) || layerOpacity <= 0.001) {
         discard;
+    }
+
+    if (isMineral) {
+        let minType = u32(max(bioSpeciesF, 0.0) + 0.5);
+        let integ = clamp(lifeState.x, 0.05, 1.25);
+        let nutr = clamp(lifeState.y, 0.0, 1.0);
+        let haz = clamp(lifeState.z, 0.0, 1.0);
+        let isTrap = unpackGraduated(lifeState.w) == 1u;
+
+        var sdf = 1.0;
+        var baseCol = vec3f(0.65);
+        var facetShade = 1.0;
+        var coreCol = vec3f(0.8);
+        var coreMask = 0.0;
+        var rimCol = vec3f(0.95);
+
+        if (minType == 0u) {
+            // 0: Silicate Bedrock (elongated hexagonal quartz/olivine prism)
+            let p = abs(vec2f(uv.x * 1.12, uv.y * 0.94));
+            sdf = max(p.x * 0.8660254 + p.y * 0.5, p.y) - 0.84;
+            let divDiag = select(-0.18, 0.18, uv.x * 0.7 + uv.y * 0.4 > 0.0);
+            let divSide = select(-0.10, 0.12, uv.y > 0.0);
+            facetShade = clamp(0.88 + divDiag + divSide, 0.62, 1.22);
+            baseCol = mix(vec3f(0.46, 0.55, 0.64), chemCol, 0.28);
+            let ridge = 1.0 - smoothstep(0.0, 0.12, min(abs(uv.x), abs(abs(uv.y) * 0.5 - abs(uv.x) * 0.866)));
+            coreMask = ridge * 0.45;
+            coreCol = vec3f(0.86, 0.94, 1.0);
+            rimCol = vec3f(0.85, 0.93, 0.98);
+        } else if (minType == 1u) {
+            // 1: Evaporite Salt (stepped cubic Halite / Fluorite hopper crystal)
+            let dBox = max(abs(uv.x), abs(uv.y));
+            sdf = dBox - 0.84;
+            let terrace = max(
+                1.0 - smoothstep(0.0, 0.055, abs(dBox - 0.56)),
+                1.0 - smoothstep(0.0, 0.050, abs(dBox - 0.30)),
+            );
+            facetShade = clamp(0.86 + 0.16 * select(-1.0, 1.0, uv.x > -uv.y) + 0.18 * terrace, 0.68, 1.26);
+            baseCol = mix(vec3f(0.85, 0.94, 0.99), chemCol, 0.18);
+            coreCol = mix(vec3f(0.68, 0.92, 1.0), vec3f(0.42, 1.0, 0.46), select(haz * 0.4, 0.95, isTrap));
+            coreMask = (1.0 - smoothstep(0.22, 0.52, dBox)) * select(0.35, 0.85, isTrap || haz > 0.45);
+            rimCol = select(vec3f(0.95, 0.98, 1.0), vec3f(0.55, 1.0, 0.58), isTrap);
+        } else if (minType == 2u) {
+            // 2: Carbonate Vein (Dolomite rhomb — vivid emerald Beryl core if Be-trapped)
+            let dRhomb = abs(uv.x) * 0.90 + abs(uv.y) * 1.14;
+            sdf = dRhomb - 0.86;
+            let cleave = select(-0.16, 0.18, (uv.y - 0.35 * uv.x) > 0.0);
+            facetShade = clamp(0.88 + cleave, 0.66, 1.20);
+            baseCol = mix(vec3f(0.92, 0.80, 0.54), chemCol, 0.25);
+            let berylZone = 1.0 - smoothstep(0.18, 0.46, dRhomb);
+            coreCol = select(vec3f(1.0, 0.92, 0.68), vec3f(0.14, 0.96, 0.52), isTrap);
+            coreMask = select(berylZone * 0.38, berylZone * 0.92, isTrap);
+            rimCol = select(vec3f(1.0, 0.92, 0.72), vec3f(0.95, 0.32, 0.78), isTrap && haz > 0.55);
+        } else if (minType == 3u) {
+            // 3: Sulfide Chimney (intergrown 8-point pyrite octahedra & glowing vent core)
+            let sA = max(abs(uv.x), abs(uv.y));
+            let sB = max(abs(uv.x + uv.y), abs(uv.x - uv.y)) * 0.70710678;
+            sdf = min(sA, sB) - 0.82;
+            let pyFacet = select(-0.14, 0.24, (uv.x * uv.y) > 0.0);
+            facetShade = clamp(0.86 + pyFacet, 0.65, 1.28);
+            baseCol = mix(vec3f(0.28, 0.25, 0.30), vec3f(0.92, 0.76, 0.28), 0.58);
+            let ventGlow = 1.0 - smoothstep(0.12, 0.46, d);
+            coreCol = select(vec3f(1.0, 0.48, 0.14), vec3f(0.86, 0.30, 0.98), isTrap);
+            coreMask = ventGlow * clamp(0.45 + 0.5 * max(nutr, haz), 0.45, 0.95);
+            rimCol = select(vec3f(1.0, 0.84, 0.38), vec3f(0.94, 0.44, 1.0), isTrap);
+        } else {
+            // 4: Hydrated Clay (terraced phyllosilicate plates with turquoise catalytic bands)
+            let octD = max(max(abs(uv.x) * 0.94, abs(uv.y) * 1.12), (abs(uv.x) + abs(uv.y)) * 0.76);
+            sdf = octD - 0.84;
+            let layerBand = 0.5 + 0.5 * cos(uv.y * 18.0);
+            facetShade = clamp(0.82 + 0.20 * layerBand + 0.10 * sign(uv.x), 0.66, 1.18);
+            baseCol = mix(vec3f(0.76, 0.50, 0.36), chemCol, 0.20);
+            coreCol = vec3f(0.22, 0.96, 0.88);
+            coreMask = clamp(layerBand * 0.48 + (1.0 - smoothstep(0.20, 0.55, octD)) * 0.35, 0.0, 0.85);
+            rimCol = vec3f(0.40, 0.96, 0.90);
+        }
+
+        // Erosion chipping & rim sparkle as integrity degrades
+        let erodeWear = clamp((0.86 - integ) / 0.76, 0.0, 1.0);
+        let cellId = floor((uv + 1.0) * 4.0);
+        let chipHash = fract(sin(dot(cellId, vec2f(12.9898, 78.233)) + f32(cIdx) * 3.7) * 43758.5453);
+        let chipD = sdf + erodeWear * 0.30 * chipHash;
+        let crystAlpha = 1.0 - smoothstep(-delta, delta, chipD);
+        if (crystAlpha <= 0.002) {
+            discard;
+        }
+        var col = min(baseCol * facetShade, vec3f(1.0));
+        col = mix(col, coreCol, coreMask);
+        let edgeHighlight = smoothstep(-0.14 - delta * 1.5, -0.02, chipD) * 0.52;
+        col = min(mix(col, rimCol, edgeHighlight), vec3f(1.0));
+        let outA = crystAlpha * layerOpacity;
+        return vec4f(col * outA, outA);
     }
 
     if (isLipid) {

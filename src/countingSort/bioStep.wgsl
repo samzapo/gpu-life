@@ -8,6 +8,7 @@
 @group(0) @binding(7) var<storage, read_write> bioForceOut: array<vec4f>;
 @group(0) @binding(8) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(9) var<storage, read> indices: array<vec2<u32>>;
+@group(0) @binding(10) var windTex: texture_2d<f32>;
 
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -26,11 +27,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let myAtomicNum = u32(matrix[mySBase + 7u]);
     let myV = valence[pi];
     let myAtomLoad = select(0.0, myV.x + myV.y + myV.z, myPhase == 0u);
+    let windRaw = sampleWindTexture(windTex, p.pos);
     let oc = sampleOceanTexture(oceanTex, p.pos);
 
-    if (bio.enabled <= 0.5) {
+    if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, oc, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, initBioUnifiedAccum(), bio,
         );
         lifeStateOut[pi] = resOff.nextLifeState;
         bioForceOut[pi] = resOff.bioForce;
@@ -98,6 +100,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         myValence,
         myAtomLoad,
         curLife,
+        windRaw,
         oc,
         acc,
         bio,

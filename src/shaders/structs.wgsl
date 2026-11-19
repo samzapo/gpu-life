@@ -16,6 +16,7 @@ struct Uniforms {
     earthFlags: vec4f,
     lensParams: vec4f,
     renderParams: vec4f, // x: bioSize, y: lifeOpacity, z: nChemColours, w: nBioColours
+    mineralParams: vec4f, // x: mineralOpacity, y: unused, z: unused, w: unused
 }
 
 struct Sim {

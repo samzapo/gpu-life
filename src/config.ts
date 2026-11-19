@@ -55,9 +55,12 @@ export const FACTORY_DEFAULTS = {
     oceanLines: 0.2,
     oceanColors: 0.2,
     lifeOpacity: 1.0,
+    mineralOpacity: 1.0,
     coastlines: true,
     bioLink: true,
     bioRate: 1.0,
+    mineralLink: true,
+    mineralRate: 1.0,
     tooltips: true,
     mouseTool: 'globe' as ConfigMouseTool,
   },
@@ -111,9 +114,12 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'oceanLines',
   'oceanColors',
   'lifeOpacity',
+  'mineralOpacity',
   'coastlines',
   'bioLink',
   'bioRate',
+  'mineralLink',
+  'mineralRate',
   'tooltips',
   'mouseTool',
   'pan',
@@ -193,9 +199,12 @@ export interface SimConfigV1 {
     oceanLines?: number;
     oceanColors?: number;
     lifeOpacity?: number;
+    mineralOpacity?: number;
     coastlines?: boolean;
     bioLink?: boolean;
     bioRate?: number;
+    mineralLink?: boolean;
+    mineralRate?: number;
     tooltips?: boolean;
     mouseTool?: ConfigMouseTool;
   };
@@ -347,10 +356,13 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.oceanColors = opParam('oceanColors') ?? FACTORY_DEFAULTS.earth.oceanColors;
     cfg.earth!.chemOpacity = opParam('chemOpacity') ?? FACTORY_DEFAULTS.earth.chemOpacity;
     cfg.earth!.lifeOpacity = opParam('lifeOpacity') ?? FACTORY_DEFAULTS.earth.lifeOpacity;
+    cfg.earth!.mineralOpacity = opParam('mineralOpacity') ?? FACTORY_DEFAULTS.earth.mineralOpacity;
     if (sp.has('oceanMix')) cfg.earth!.oceanMix = sp.get('oceanMix') !== 'false';
     if (sp.has('coastlines')) cfg.earth!.coastlines = sp.get('coastlines') !== 'false';
     if (sp.has('bioLink')) cfg.earth!.bioLink = sp.get('bioLink') !== 'false';
     cfg.earth!.bioRate = numParam('bioRate') ?? FACTORY_DEFAULTS.earth.bioRate;
+    if (sp.has('mineralLink')) cfg.earth!.mineralLink = sp.get('mineralLink') !== 'false';
+    cfg.earth!.mineralRate = numParam('mineralRate') ?? FACTORY_DEFAULTS.earth.mineralRate;
     if (sp.has('tooltips')) cfg.earth!.tooltips = sp.get('tooltips') !== 'false';
     const mt = sp.get('mouseTool');
     if (mt === 'globe' || mt === 'attract' || mt === 'repel') {
@@ -473,9 +485,12 @@ export function buildUrlPartsFromConfig(
     setNum('oceanLines', e.oceanLines, FACTORY_DEFAULTS.earth.oceanLines);
     setNum('oceanColors', e.oceanColors, FACTORY_DEFAULTS.earth.oceanColors);
     setNum('lifeOpacity', e.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity);
+    setNum('mineralOpacity', e.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity);
     setBool('coastlines', e.coastlines, FACTORY_DEFAULTS.earth.coastlines);
     setBool('bioLink', e.bioLink, FACTORY_DEFAULTS.earth.bioLink);
     setNum('bioRate', e.bioRate, FACTORY_DEFAULTS.earth.bioRate);
+    setBool('mineralLink', e.mineralLink, FACTORY_DEFAULTS.earth.mineralLink);
+    setNum('mineralRate', e.mineralRate, FACTORY_DEFAULTS.earth.mineralRate);
     setBool('tooltips', e.tooltips, FACTORY_DEFAULTS.earth.tooltips);
     if (e.mouseTool && e.mouseTool !== FACTORY_DEFAULTS.earth.mouseTool) {
       sp.set('mouseTool', e.mouseTool);
@@ -582,9 +597,12 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     oceanLines: unitOpacity(earthRaw.oceanLines),
     oceanColors: unitOpacity(earthRaw.oceanColors),
     lifeOpacity: unitOpacity(earthRaw.lifeOpacity),
+    mineralOpacity: unitOpacity(earthRaw.mineralOpacity),
     coastlines: boolVal(earthRaw.coastlines),
     bioLink: boolVal(earthRaw.bioLink),
     bioRate: finiteNum(earthRaw.bioRate),
+    mineralLink: boolVal(earthRaw.mineralLink),
+    mineralRate: finiteNum(earthRaw.mineralRate),
     tooltips: boolVal(earthRaw.tooltips),
     mouseTool:
       toolRaw === 'globe' || toolRaw === 'attract' || toolRaw === 'repel'
