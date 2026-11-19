@@ -2,6 +2,7 @@
 @group(0) @binding(1) var windTex: texture_2d<f32>;
 @group(0) @binding(2) var watermanInvTex: texture_2d<f32>;
 @group(0) @binding(3) var oceanTex: texture_2d<f32>;
+@group(0) @binding(4) var tempTex: texture_2d<f32>;
 
 struct BgOut {
     @builtin(position) pos: vec4f,
@@ -54,8 +55,12 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
     }
 
     let oceanColOpacity = clamp(uniforms.earthFlags.x, 0.0, 1.0);
+    let tempColOpacity = clamp(uniforms.mineralParams.y, 0.0, 1.0);
+    var oc = vec4f(0.0);
+    if (oceanColOpacity > 0.001 || tempColOpacity > 0.001) {
+        oc = sampleOceanTexture(oceanTex, inv.xyz);
+    }
     if (oceanColOpacity > 0.001) {
-        let oc = sampleOceanTexture(oceanTex, inv.xyz);
         if (oc.w >= 0.42) {
             let ocCol = oceanCurrentsColor(oc.z);
             let ocAlpha = smoothstep(0.42, 0.72, oc.w) * oceanColOpacity;
@@ -72,6 +77,23 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
         let t = clamp(w.z / max(uniforms.flags.z, 1.0), 0.0, 1.0);
         let speedCol = extendedSinebowColor(t);
         baseCol = mix(baseCol, speedCol, windColOpacity);
+    }
+
+    if (tempColOpacity > 0.001) {
+        let tS = sampleTempTexture(tempTex, inv.xyz);
+        let layerMode = u32(uniforms.mineralParams.w + 0.5);
+        if (layerMode == 2u) {
+            baseCol = mix(baseCol, airTempColor(tS.x), tempColOpacity);
+        } else if (layerMode == 1u) {
+            let seaAlpha = smoothstep(0.42, 0.72, max(oc.w, tS.z));
+            if (seaAlpha > 0.001) {
+                baseCol = mix(baseCol, sstTempColor(tS.y), seaAlpha * tempColOpacity);
+            }
+        } else {
+            let seaW = smoothstep(0.42, 0.72, min(oc.w, tS.z));
+            let tCol = mix(airTempColor(tS.x), sstTempColor(tS.y), seaW);
+            baseCol = mix(baseCol, tCol, tempColOpacity);
+        }
     }
 
     return vec4f(baseCol, 1.0);

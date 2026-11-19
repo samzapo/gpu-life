@@ -241,6 +241,7 @@ fn accumulateSimNeighbor(
     actScale: f32,
     bioCleave: f32,
     shearStress: f32,
+    tempWellMod: f32,
     acc: ptr<function, ForceAccum>,
 ) {
     let R = max(sim.worldSize, 0.25);
@@ -303,7 +304,7 @@ fn accumulateSimNeighbor(
         if (sim.activation > 0.0) {
             let u = (rNorm - wellEnd) / max(1.0 - wellEnd, 1e-4);
             let evansPolanyi = max(0.15, 1.0 - max(0.0, aff - 1.04) * 2.4 * max(sim.exchangeDrive, 0.0));
-            let fAct = -(sim.activation * clamp(actScale, 0.05, 1.0) * evansPolanyi) * sin(PI * u);
+            let fAct = -(sim.activation * clamp(actScale, 0.05, 2.5) * evansPolanyi) * sin(PI * u);
             (*acc).repelForce += dI * fAct;
         }
         return;
@@ -358,7 +359,7 @@ fn accumulateSimNeighbor(
     }
 
     let stab = clamp(sim.bondStability, 0.0, 1.0);
-    let wellMod = clamp((1.0 - 0.70 * bioCleave) * (1.0 - 0.75 * shearStress), 0.15, 1.0);
+    let wellMod = clamp((1.0 - 0.70 * bioCleave) * (1.0 - 0.75 * shearStress) * clamp(tempWellMod, 0.45, 1.18), 0.15, 1.18);
 
     if (rNorm >= beta) {
         let rPeak = mix(0.5 * (beta + wellEnd), beta + 0.34 * (wellEnd - beta), stab);
@@ -382,6 +383,22 @@ fn accumulateSimNeighbor(
         (*acc).bondForce += tHat * fTan;
         (*acc).torque += -bondStrength * dlI * lJ;
     }
+}
+
+// Arrhenius barrier scaling (x) and bond-well thermal equilibrium modulation (y) from live GFS Air Temp (K).
+fn evalAirTempChemFactors(tAirK: f32, localTempScale: f32) -> vec2f {
+    let sc = clamp(localTempScale, 0.0, 2.0);
+    if (sc <= 0.001) {
+        return vec2f(1.0, 1.0);
+    }
+    let dT = clamp(tAirK - 288.15, -65.0, 45.0);
+    // Warm air lowers activation hump; frigid polar/upper-air raises barrier (Arrhenius kinetics)
+    let arrhAct = clamp(exp(-0.020 * dT), 0.36, 2.25);
+    let coolStab = clamp(1.0 + (286.15 - tAirK) * 0.0032, 0.88, 1.14);
+    let hotDissoc = smoothstep(298.15, 326.15, tAirK) * 0.42;
+    let wellTherm = clamp(coolStab - hotDissoc, 0.48, 1.14);
+    let blend = min(sc, 1.5);
+    return vec2f(mix(1.0, arrhAct, blend), mix(1.0, wellTherm, blend));
 }
 
 fn finalizeForces(acc: ForceAccum) -> ForceResult {

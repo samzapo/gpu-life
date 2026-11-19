@@ -166,6 +166,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 8, resource: { buffer: headsBuffer } },
           { binding: 9, resource: { buffer: linkedListBuffer } },
           { binding: 10, resource: refs.windTexView },
+          { binding: 11, resource: refs.tempTexView },
         ],
       }),
     );
@@ -187,6 +188,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 10, resource: { buffer: refs.bioForceBuffer } },
           { binding: 11, resource: { buffer: headsBuffer } },
           { binding: 12, resource: { buffer: linkedListBuffer } },
+          { binding: 13, resource: refs.tempTexView },
         ],
       }),
     );

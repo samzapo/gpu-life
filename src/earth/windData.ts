@@ -14,6 +14,7 @@ export interface WindLevelSpec {
   id: WindLevelId;
   label: string;
   gribLevel: string;
+  tempGribLevel: string;
   surfaceType: 'surface' | 'isobaric';
   /** Upper bound (m/s) of extendedSinebow wind speed color scale */
   scaleMax: number;
@@ -26,6 +27,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: 'surface',
     label: 'Sfc (10m)',
     gribLevel: '10 m above ground',
+    tempGribLevel: '2 m above ground',
     surfaceType: 'surface',
     scaleMax: 100,
     streamMax: 17,
@@ -34,6 +36,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '1000hPa',
     label: '1000 hPa',
     gribLevel: '1000 mb',
+    tempGribLevel: '1000 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 18,
@@ -42,6 +45,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '850hPa',
     label: '850 hPa',
     gribLevel: '850 mb',
+    tempGribLevel: '850 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 24,
@@ -50,6 +54,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '700hPa',
     label: '700 hPa',
     gribLevel: '700 mb',
+    tempGribLevel: '700 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 30,
@@ -58,6 +63,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '500hPa',
     label: '500 hPa',
     gribLevel: '500 mb',
+    tempGribLevel: '500 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 40,
@@ -66,6 +72,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '250hPa',
     label: '250 hPa',
     gribLevel: '250 mb',
+    tempGribLevel: '250 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 60,
@@ -74,6 +81,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '70hPa',
     label: '70 hPa',
     gribLevel: '70 mb',
+    tempGribLevel: '70 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 45,
@@ -82,6 +90,7 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     id: '10hPa',
     label: '10 hPa',
     gribLevel: '10 mb',
+    tempGribLevel: '10 mb',
     surfaceType: 'isobaric',
     scaleMax: 100,
     streamMax: 65,
@@ -93,6 +102,9 @@ export interface WindGrid {
   ny: number;
   u: Float32Array;
   v: Float32Array;
+  tempK: Float32Array;
+  sfcTempK: Float32Array;
+  tempLabel: string;
   level: WindLevelId;
   refTime: string;
   validTime: string;
@@ -203,6 +215,21 @@ function getLatestCycleInfo() {
   return cachedCyclePromise;
 }
 
+function fillTempClimatologyK(nx: number, ny: number): Float32Array {
+  const out = new Float32Array(nx * ny);
+  for (let j = 0; j < ny; j++) {
+    const latDeg = 90 - (j / Math.max(1, ny - 1)) * 180;
+    const cosLat = Math.max(0, Math.cos((latDeg * Math.PI) / 180));
+    const tK = 250.15 + 50.0 * Math.pow(cosLat, 1.35);
+    for (let i = 0; i < nx; i++) {
+      out[j * nx + i] = tK;
+    }
+  }
+  return out;
+}
+
+const sfcTempCache = new Map<string, Float32Array>();
+
 export async function loadFallbackWind(): Promise<WindGrid> {
   const cached = levelCache.get('fallback');
   if (cached) return cached;
@@ -218,6 +245,9 @@ export async function loadFallbackWind(): Promise<WindGrid> {
     refTime: string;
     u: number[];
     v: number[];
+    temp?: number[];
+    tempScale?: number;
+    tempOffset?: number;
   };
   const n = raw.nx * raw.ny;
   const u = new Float32Array(n);
@@ -226,11 +256,25 @@ export async function loadFallbackWind(): Promise<WindGrid> {
     u[i] = raw.u[i] * raw.scale;
     v[i] = raw.v[i] * raw.scale;
   }
+  let tempK: Float32Array;
+  if (Array.isArray(raw.temp) && raw.temp.length === n) {
+    const tScale = raw.tempScale ?? 0.1;
+    const tOff = raw.tempOffset ?? 273.15;
+    tempK = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      tempK[i] = tOff + raw.temp[i] * tScale;
+    }
+  } else {
+    tempK = fillTempClimatologyK(raw.nx, raw.ny);
+  }
   const grid: WindGrid = {
     nx: raw.nx,
     ny: raw.ny,
     u,
     v,
+    tempK,
+    sfcTempK: tempK,
+    tempLabel: '2m Air',
     level: 'surface',
     refTime: raw.refTime,
     validTime: raw.refTime,
@@ -257,6 +301,14 @@ export async function fetchLiveGfsWind(levelId: WindLevelId): Promise<WindGrid> 
   if (!uEntry || !vEntry) {
     throw new Error(`GFS level "${spec.gribLevel}" not found in index`);
   }
+  const tEntry = cycle.idxEntries.find(
+    (e) => e.varName === 'TMP' && e.level === spec.tempGribLevel,
+  );
+  const cachedSfcTemp = sfcTempCache.get(cycle.cycleLabel);
+  const tSfcEntry =
+    levelId !== 'surface' && !cachedSfcTemp
+      ? cycle.idxEntries.find((e) => e.varName === 'TMP' && e.level === '2 m above ground')
+      : undefined;
 
   const fetchSlice = async (entry: IdxEntry) => {
     const range =
@@ -268,12 +320,38 @@ export async function fetchLiveGfsWind(levelId: WindLevelId): Promise<WindGrid> 
     return decodeGrib2Field(await res.arrayBuffer());
   };
 
-  const [uGrid, vGrid] = await Promise.all([fetchSlice(uEntry), fetchSlice(vEntry)]);
+  const [uGrid, vGrid, tGrid, tSfcGrid] = await Promise.all([
+    fetchSlice(uEntry),
+    fetchSlice(vEntry),
+    tEntry ? fetchSlice(tEntry).catch(() => null) : Promise.resolve(null),
+    tSfcEntry ? fetchSlice(tSfcEntry).catch(() => null) : Promise.resolve(null),
+  ]);
+
+  const tempK =
+    tGrid && tGrid.values.length === uGrid.nx * uGrid.ny
+      ? tGrid.values
+      : fillTempClimatologyK(uGrid.nx, uGrid.ny);
+  let sfcTempK: Float32Array;
+  if (levelId === 'surface') {
+    sfcTempK = tempK;
+    sfcTempCache.set(cycle.cycleLabel, sfcTempK);
+  } else if (cachedSfcTemp && cachedSfcTemp.length === uGrid.nx * uGrid.ny) {
+    sfcTempK = cachedSfcTemp;
+  } else if (tSfcGrid && tSfcGrid.values.length === uGrid.nx * uGrid.ny) {
+    sfcTempK = tSfcGrid.values;
+    sfcTempCache.set(cycle.cycleLabel, sfcTempK);
+  } else {
+    sfcTempK = fillTempClimatologyK(uGrid.nx, uGrid.ny);
+  }
+
   const grid: WindGrid = {
     nx: uGrid.nx,
     ny: uGrid.ny,
     u: uGrid.values,
     v: vGrid.values,
+    tempK,
+    sfcTempK,
+    tempLabel: levelId === 'surface' ? '2m Air' : `${spec.label} Air`,
     level: levelId,
     refTime: cycle.cycleLabel,
     validTime: cycle.validLabel,
@@ -321,6 +399,89 @@ export function sampleWindLonLat(
   const uu = u[k00] * w00 + u[k10] * w10 + u[k01] * w01 + u[k11] * w11;
   const vv = v[k00] * w00 + v[k10] * w10 + v[k01] * w01 + v[k11] * w11;
   return [uu, vv, Math.hypot(uu, vv)];
+}
+
+/**
+ * Samples bilinearly interpolated `[levelAirTempK, surface2mTempK]` at geographic `[lonDeg, latDeg]`.
+ */
+export function sampleWindTempLonLat(
+  grid: WindGrid,
+  lonDeg: number,
+  latDeg: number,
+): [number, number] {
+  const { nx, ny, tempK, sfcTempK } = grid;
+  const wrappedLon = ((lonDeg % 360) + 360) % 360;
+  const clampedLat = Math.max(-90, Math.min(90, latDeg));
+
+  const gx = (wrappedLon / 360) * nx;
+  const gy = ((90 - clampedLat) / 180) * (ny - 1);
+
+  const i0 = Math.floor(gx) % nx;
+  const i1 = (i0 + 1) % nx;
+  const fx = gx - Math.floor(gx);
+
+  const j0 = Math.min(ny - 1, Math.max(0, Math.floor(gy)));
+  const j1 = Math.min(ny - 1, j0 + 1);
+  const fy = gy - j0;
+
+  const k00 = j0 * nx + i0;
+  const k10 = j0 * nx + i1;
+  const k01 = j1 * nx + i0;
+  const k11 = j1 * nx + i1;
+
+  const w00 = (1 - fx) * (1 - fy);
+  const w10 = fx * (1 - fy);
+  const w01 = (1 - fx) * fy;
+  const w11 = fx * fy;
+
+  const tLvl =
+    tempK[k00] * w00 + tempK[k10] * w10 + tempK[k01] * w01 + tempK[k11] * w11;
+  const tSfc =
+    sfcTempK[k00] * w00 + sfcTempK[k10] * w10 + sfcTempK[k01] * w01 + sfcTempK[k11] * w11;
+  return [tLvl, tSfc];
+}
+
+export function interpolateColorStops(
+  val: number,
+  stops: readonly [number, [number, number, number]][],
+): [number, number, number] {
+  if (val <= stops[0][0]) return [...stops[0][1]];
+  const last = stops[stops.length - 1];
+  if (val >= last[0]) return [...last[1]];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [x0, c0] = stops[i];
+    const [x1, c1] = stops[i + 1];
+    if (val <= x1) {
+      const f = (val - x0) / Math.max(x1 - x0, 1e-6);
+      return [
+        c0[0] + (c1[0] - c0[0]) * f,
+        c0[1] + (c1[1] - c0[1]) * f,
+        c0[2] + (c1[2] - c0[2]) * f,
+      ];
+    }
+  }
+  return [...last[1]];
+}
+
+const AIR_TEMP_STOPS: readonly [number, [number, number, number]][] = [
+  [193.15, [37, 4, 42]],
+  [206.0, [41, 10, 130]],
+  [219.0, [81, 40, 40]],
+  [233.15, [192, 37, 149]],
+  [255.372, [70, 215, 215]],
+  [273.15, [21, 84, 187]],
+  [275.15, [24, 132, 14]],
+  [291.0, [247, 251, 59]],
+  [298.0, [235, 167, 21]],
+  [311.0, [230, 71, 39]],
+  [328.15, [88, 27, 67]],
+];
+
+/**
+ * Exact `earth.nullschool.net` GFS Air Temperature color gradient `[193.15 .. 328.15] K`.
+ */
+export function airTempColorRgb(tempK: number): [number, number, number] {
+  return interpolateColorStops(tempK, AIR_TEMP_STOPS);
 }
 
 /**

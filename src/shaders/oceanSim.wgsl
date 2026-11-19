@@ -203,6 +203,8 @@ fn integrateOceanParticle(
     myPhase: u32,
     sim: OceanSim,
     oceanTex: texture_2d<f32>,
+    tSample: vec4f,
+    localTempScale: f32,
     mouseSphere: vec4f,
     oceanState: vec4f,
     bioSteer: vec4f,
@@ -213,6 +215,8 @@ fn integrateOceanParticle(
     let eEast = sphereEastBasis(p.pos);
     let eNorth = normalize(cross(p.pos, eEast));
     let oc = sampleOceanTexture(oceanTex, p.pos);
+    let tHabK = effectiveSurfaceTempK(tSample, oc.w);
+    let tBlend = clamp(localTempScale, 0.0, 1.5);
 
     var cTarget = vec3f(0.0);
     if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
@@ -225,14 +229,22 @@ fn integrateOceanParticle(
     }
 
     let linBioSteer = select(bioSteer.xyz, vec3f(0.0), myPhase == 2u && bioSteer.w > 1.5);
-    let vitality = select(
+    let baseVitality = select(
         clamp(0.65 + 0.50 * oceanState.x - oceanState.z * 0.35, 0.35, 1.30),
         clamp(0.75 + 0.35 * oceanState.x, 0.45, 1.15),
         myPhase == 2u,
     );
+    // Homeoviscous membrane fluidity & metabolic kinetics shaped by live ocean SST / land surface air temp
+    let thermFluid = mix(
+        1.0,
+        clamp(0.76 + 0.42 * smoothstep(271.5, 304.5, tHabK), 0.72, 1.22),
+        tBlend,
+    );
+    let vitality = baseVitality * select(thermFluid, mix(0.90, thermFluid, 0.65), myPhase == 2u);
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
+    let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
     // Zero ocean-current sweep over land (cTarget == 0), with gentle substrate surface grip
-    let substrateDrag = mix(1.0, 0.94, landFrac);
+    let substrateDrag = mix(1.0, 0.94, landFrac) * frostDrag;
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
     let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
     let vRel = vTang - cTarget;

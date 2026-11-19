@@ -109,6 +109,123 @@ fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
     return vec4f(uvMag, maskSum);
 }
 
+// Samples live global temperatures: `(airTempK, sstK, sstMask, sfcAirTempK)` at sphere normal `n`.
+// Over coastlines/land where `sstMask == 0`, `.y` safely falls back to `sfcAirTempK`.
+fn sampleTempTexture(tempTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(tempTex, 0);
+    let nx = f32(dims.x);
+    let ny = f32(dims.y);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(288.15, 288.15, 0.0, 288.15);
+    }
+
+    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
+    if (lonDeg < 0.0) {
+        lonDeg += 360.0;
+    }
+    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+
+    let gx = (lonDeg / 360.0) * nx;
+    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
+
+    let i0 = u32(floor(gx)) % dims.x;
+    let i1 = (i0 + 1u) % dims.x;
+    let fx = gx - floor(gx);
+
+    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
+    let j1 = min(dims.y - 1u, j0 + 1u);
+    let fy = clamp(gy - f32(j0), 0.0, 1.0);
+
+    let c00 = textureLoad(tempTex, vec2u(i0, j0), 0);
+    let c10 = textureLoad(tempTex, vec2u(i1, j0), 0);
+    let c01 = textureLoad(tempTex, vec2u(i0, j1), 0);
+    let c11 = textureLoad(tempTex, vec2u(i1, j1), 0);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let airK = c00.x * w00 + c10.x * w10 + c01.x * w01 + c11.x * w11;
+    let sfcK = c00.w * w00 + c10.w * w10 + c01.w * w01 + c11.w * w11;
+
+    let k00 = w00 * select(0.0, 1.0, c00.z > 0.45);
+    let k10 = w10 * select(0.0, 1.0, c10.z > 0.45);
+    let k01 = w01 * select(0.0, 1.0, c01.z > 0.45);
+    let k11 = w11 * select(0.0, 1.0, c11.z > 0.45);
+    let maskSum = k00 + k10 + k01 + k11;
+    let sstK = select(
+        sfcK,
+        (c00.y * k00 + c10.y * k10 + c01.y * k01 + c11.y * k11) / max(maskSum, 1e-4),
+        maskSum > 1e-4,
+    );
+
+    return vec4f(airK, sstK, maskSum, sfcK);
+}
+
+fn effectiveSurfaceTempK(tSample: vec4f, oceanMask: f32) -> f32 {
+    let seaBlend = smoothstep(0.25, 0.55, min(oceanMask, tSample.z));
+    return mix(tSample.w, tSample.y, seaBlend);
+}
+
+// Exact `earth.nullschool.net` GFS Air Temperature color gradient `[193.15 .. 328.15] K`.
+fn airTempColor(tempK: f32) -> vec3f {
+    let t = clamp(tempK, 193.15, 328.15);
+    let c0  = vec3f(37.0, 4.0, 42.0) / 255.0;     // 193.15 K (-80 C)
+    let c1  = vec3f(41.0, 10.0, 130.0) / 255.0;   // 206.00 K
+    let c2  = vec3f(81.0, 40.0, 40.0) / 255.0;    // 219.00 K
+    let c3  = vec3f(192.0, 37.0, 149.0) / 255.0;  // 233.15 K (-40 C)
+    let c4  = vec3f(70.0, 215.0, 215.0) / 255.0;  // 255.372 K (0 F)
+    let c5  = vec3f(21.0, 84.0, 187.0) / 255.0;   // 273.15 K (0 C)
+    let c6  = vec3f(24.0, 132.0, 14.0) / 255.0;   // 275.15 K (+2 C)
+    let c7  = vec3f(247.0, 251.0, 59.0) / 255.0;  // 291.00 K
+    let c8  = vec3f(235.0, 167.0, 21.0) / 255.0;  // 298.00 K
+    let c9  = vec3f(230.0, 71.0, 39.0) / 255.0;   // 311.00 K
+    let c10 = vec3f(88.0, 27.0, 67.0) / 255.0;    // 328.15 K (+55 C)
+
+    if (t <= 206.0) { return mix(c0, c1, (t - 193.15) / (206.0 - 193.15)); }
+    if (t <= 219.0) { return mix(c1, c2, (t - 206.0) / (219.0 - 206.0)); }
+    if (t <= 233.15) { return mix(c2, c3, (t - 219.0) / (233.15 - 219.0)); }
+    if (t <= 255.372) { return mix(c3, c4, (t - 233.15) / (255.372 - 233.15)); }
+    if (t <= 273.15) { return mix(c4, c5, (t - 255.372) / (273.15 - 255.372)); }
+    if (t <= 275.15) { return mix(c5, c6, (t - 273.15) / (275.15 - 273.15)); }
+    if (t <= 291.0) { return mix(c6, c7, (t - 275.15) / (291.0 - 275.15)); }
+    if (t <= 298.0) { return mix(c7, c8, (t - 291.0) / (298.0 - 291.0)); }
+    if (t <= 311.0) { return mix(c8, c9, (t - 298.0) / (311.0 - 298.0)); }
+    return mix(c9, c10, (t - 311.0) / (328.15 - 311.0));
+}
+
+// Exact `earth.nullschool.net` Sea Surface Temperature color gradient `[270.0 .. 313.15] K`.
+fn sstTempColor(tempK: f32) -> vec3f {
+    let t = clamp(tempK, 270.0, 313.15);
+    let c0  = vec3f(255.0, 255.0, 255.0) / 255.0; // 270.0
+    let c1  = vec3f(255.0, 255.0, 255.0) / 255.0; // 271.4
+    let c2  = vec3f(15.0, 4.0, 168.0) / 255.0;    // 271.5
+    let c3  = vec3f(15.0, 54.0, 208.0) / 255.0;   // 273.15
+    let c4  = vec3f(15.0, 54.0, 188.0) / 255.0;   // 273.25
+    let c5  = vec3f(15.0, 4.0, 168.0) / 255.0;    // 275.65
+    let c6  = vec3f(24.0, 132.0, 14.0) / 255.0;   // 281.65
+    let c7  = vec3f(247.0, 251.0, 59.0) / 255.0;  // 291.15
+    let c8  = vec3f(235.0, 167.0, 0.0) / 255.0;   // 295.0
+    let c9  = vec3f(245.0, 0.0, 39.0) / 255.0;    // 299.65
+    let c10 = vec3f(87.0, 17.0, 0.0) / 255.0;     // 303.0
+    let c11 = vec3f(210.0, 22.0, 210.0) / 255.0;  // 304.65
+    let c12 = vec3f(255.0, 255.0, 255.0) / 255.0; // 313.15
+
+    if (t <= 271.4) { return mix(c0, c1, (t - 270.0) / 1.4); }
+    if (t <= 271.5) { return mix(c1, c2, (t - 271.4) / 0.1); }
+    if (t <= 273.15) { return mix(c2, c3, (t - 271.5) / 1.65); }
+    if (t <= 273.25) { return mix(c3, c4, (t - 273.15) / 0.1); }
+    if (t <= 275.65) { return mix(c4, c5, (t - 273.25) / 2.4); }
+    if (t <= 281.65) { return mix(c5, c6, (t - 275.65) / 6.0); }
+    if (t <= 291.15) { return mix(c6, c7, (t - 281.65) / 9.5); }
+    if (t <= 295.0) { return mix(c7, c8, (t - 291.15) / 3.85); }
+    if (t <= 299.65) { return mix(c8, c9, (t - 295.0) / 4.65); }
+    if (t <= 303.0) { return mix(c9, c10, (t - 299.65) / 3.35); }
+    if (t <= 304.65) { return mix(c10, c11, (t - 303.0) / 1.65); }
+    return mix(c11, c12, (t - 304.65) / 8.5);
+}
+
 // Exact `cambecc/earth` segmentedColorScale for ocean surface currents `[0 .. 1.5] m/s`.
 fn oceanCurrentsColor(speedMs: f32) -> vec3f {
     let s = clamp(speedMs, 0.0, 1.5);

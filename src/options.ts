@@ -190,6 +190,9 @@ export const earthParams = {
   oceanStrength: resolveNumber('oceanStrength', effectiveCachedConfig?.earth?.oceanStrength, FACTORY_DEFAULTS.earth.oceanStrength),
   oceanLines: parseOpacityParam('oceanLines', effectiveCachedConfig?.earth?.oceanLines, FACTORY_DEFAULTS.earth.oceanLines),
   oceanColors: parseOpacityParam('oceanColors', effectiveCachedConfig?.earth?.oceanColors, FACTORY_DEFAULTS.earth.oceanColors),
+  tempColors: parseOpacityParam('tempColors', effectiveCachedConfig?.earth?.tempColors, FACTORY_DEFAULTS.earth.tempColors),
+  localTemp: resolveBool('localTemp', effectiveCachedConfig?.earth?.localTemp, FACTORY_DEFAULTS.earth.localTemp),
+  tempStrength: resolveNumber('tempStrength', effectiveCachedConfig?.earth?.tempStrength, FACTORY_DEFAULTS.earth.tempStrength),
   chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
   lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
   mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
@@ -202,6 +205,7 @@ export const earthParams = {
   mouseTool: initialMouseTool,
   windStatus: 'Loading GFS…',
   oceanStatus: 'Loading CoastWatch…',
+  tempStatus: 'Loading Temp+SST…',
 };
 setMouseToolMode(earthParams.mouseTool);
 
@@ -277,6 +281,10 @@ export function setBioLink(
   bioData[13] = WIND_LEVELS[earthParams.windLevel].streamMax;
   bioData[14] = earthParams.mineralLink && earthParams.mineralRate > 0 ? 1 : 0;
   bioData[15] = earthParams.mineralRate;
+  bioData[16] = earthParams.localTemp ? earthParams.tempStrength : 0;
+  bioData[17] = 0;
+  bioData[18] = 0;
+  bioData[19] = 0;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
 
@@ -545,6 +553,31 @@ export const oceanColorsBinding = withTooltip(
   'Ocean Color Map Opacity',
   'Opacity (0%–100%) of ocean current velocity color shading inside marine basins.',
 );
+export const tempColorsBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'tempColors', {
+    label: 'tempColors',
+    ...opacitySliderParams,
+  }),
+  'Temperature Color Map Opacity',
+  'Opacity (0%–100%) of live earth.nullschool.net Air Temp & NOAA Geo-Polar Blended SST thermal shading across Earth.',
+);
+export const localTempBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'localTemp', {
+    label: 'localTemp',
+  }),
+  'Local Earth Temperature Effects',
+  'Couple live local Air Temp & SST into Arrhenius chemistry barriers, Q10 metabolism, homeoviscous lipids, and mineral thermodynamics (distinct from Brownian noise).',
+);
+export const tempStrengthBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'tempStrength', {
+    label: 'tempForce',
+    min: 0,
+    max: 2,
+    step: 0.05,
+  }),
+  'Local Temperature Strength',
+  'Multiplier scaling how strongly regional Earth temperature gradients modulate Chemistry, Life, and Minerals.',
+);
 export const lifeOpacityBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'lifeOpacity', {
     label: 'lifeAlpha',
@@ -638,6 +671,14 @@ export const oceanStatusBinding = withTooltip(
   }),
   'Ocean Data Source',
   'Reference timestamp and NOAA CoastWatch dataset driving surface ocean currents.',
+);
+export const tempStatusBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'tempStatus', {
+    readonly: true,
+    label: 'tempSrc',
+  }),
+  'Temperature Data Source',
+  'Live NOAA GFS Air Temperature (at wind altitude & 2m surface) and NOAA Geo-Polar Blended Sea Surface Temperature.',
 );
 export const resetViewBtn = withTooltip(
   earthFolder.addButton({ title: 'Reset Globe View' }),
@@ -891,6 +932,9 @@ export function bindConfigPersistence(onChange: () => void) {
     oceanStrengthBinding,
     oceanLinesBinding,
     oceanColorsBinding,
+    tempColorsBinding,
+    localTempBinding,
+    tempStrengthBinding,
     lifeOpacityBinding,
     mineralOpacityBinding,
     coastlinesBinding,

@@ -13,6 +13,14 @@ export interface HoverSimSnapshot {
   capturedAt: number;
 }
 
+export interface LocalTempsSample {
+  airC: number;
+  sfcAirC: number;
+  sstC: number | null;
+  surfaceC: number;
+  airLabel: string;
+}
+
 export interface HoverInspectConfig {
   isEnabled: () => boolean;
   getProj: () => d3Geo.GeoProjection | null;
@@ -27,6 +35,7 @@ export interface HoverInspectConfig {
   getOceanMask?: (unitVec: [number, number, number]) => number;
   getOceanSpeedMs?: (unitVec: [number, number, number]) => number;
   getWindSpeedMs?: (unitVec: [number, number, number]) => number;
+  getLocalTemps?: (unitVec: [number, number, number]) => LocalTempsSample | null;
   getMineralOpacity?: () => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
@@ -96,6 +105,7 @@ export interface TooltipSelectedElement {
 export interface TooltipContent {
   theme: TooltipTheme;
   badge: string;
+  tempTag?: string;
   title: string;
   body: string;
   meta?: string;
@@ -629,6 +639,11 @@ export function analyzeReactionAt(
     const bio = snap.bioForce[bestIdx] ?? [0, 0, 0, 0];
     const [actScale, glow] = unpackActGlow(bio[3] ?? 0);
     const kickMag = Math.hypot(bio[0] ?? 0, bio[1] ?? 0, bio[2] ?? 0);
+    const localTChem = cfg.getLocalTemps ? cfg.getLocalTemps([p0[0], p0[1], p0[2]]) : null;
+    const airTempChip = localTChem
+      ? `${localTChem.airLabel.replace(' Air', '')} ${localTChem.airC >= 0 ? '+' : ''}${localTChem.airC.toFixed(1)}°C`
+      : undefined;
+
     const bioActive =
       cfg.isBioLinked() &&
       showLife &&
@@ -719,6 +734,7 @@ export function analyzeReactionAt(
       return {
         theme,
         badge,
+        tempTag: airTempChip,
         title: `${badge === 'HALOGEN TOXIN' ? 'Toxic' : 'Catalyzed'} ${radicalSuffix}`,
         body,
         meta,
@@ -782,6 +798,7 @@ export function analyzeReactionAt(
       return {
         theme: 'chem',
         badge,
+        tempTag: airTempChip,
         title,
         body,
         meta: `Shell [${el0.outerElectrons}/${el0.outerCapacity}] · Valence load ${atomLoad.toFixed(2)}/${el0.valence} · Nearby pairs: ${directInteract.length}`,
@@ -798,6 +815,7 @@ export function analyzeReactionAt(
       return {
         theme: 'chem',
         badge: inert ? 'NOBLE GAS' : 'FREE ATOM',
+        tempTag: airTempChip,
         title: `${selectedElement.name} (${sym0}) Atom`,
         body: inert
           ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents; permanently abiotic (filled outer shell).`
@@ -816,6 +834,12 @@ export function analyzeReactionAt(
 
   const ocMask = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
   const overLand = ocMask < 0.42;
+  const localTSurf = cfg.getLocalTemps ? cfg.getLocalTemps([p0[0], p0[1], p0[2]]) : null;
+  const surfTempTag = localTSurf
+    ? overLand || localTSurf.sstC === null
+      ? `Sfc ${localTSurf.sfcAirC >= 0 ? '+' : ''}${localTSurf.sfcAirC.toFixed(1)}°C`
+      : `SST ${localTSurf.sstC >= 0 ? '+' : ''}${localTSurf.sstC.toFixed(1)}°C`
+    : undefined;
 
   // Inorganic Crust-Pinned Mineral (`bestPhase === 3`): cluster matching crystal vein & inspect risk/reward
   if (bestPhase === 3) {
@@ -931,6 +955,7 @@ export function analyzeReactionAt(
     return {
       theme,
       badge,
+      tempTag: surfTempTag,
       title,
       body: `${stabilityStr}. ${encounterStr}${bioMineNote}`,
       meta: `Crystal #${bestIdx} (${sym0}) · ${habitatLabel} · Integrity ${avgInteg}% · Wind ${windMs.toFixed(0)} m/s · Current ${curMs.toFixed(2)} m/s · Nutr ${Math.round(avgNutr * 100)}% / Haz ${Math.round(avgHaz * 100)}%`,
@@ -1033,6 +1058,7 @@ export function analyzeReactionAt(
     return {
       theme,
       badge,
+      tempTag: surfTempTag,
       title,
       body,
       meta: `Lipid #${bestIdx} (${sym0}) · Host #${bestBioSp} · ${habitatTag} · Encap ${strategyGeneStr} · Shell E=${(ls[0] ?? 0).toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
@@ -1125,6 +1151,7 @@ export function analyzeReactionAt(
     return {
       theme,
       badge,
+      tempTag: surfTempTag,
       title,
       body: `${statusDesc}${gradDetail}${landDetail}${mineralNote}`,
       meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
@@ -1159,6 +1186,9 @@ export class TooltipManager {
   private tipAnchorX = 0;
   private tipAnchorY = 0;
   private tipAnchorInit = false;
+  private smoothBoxX = 0;
+  private smoothBoxY = 0;
+  private smoothBoxInit = false;
   private lastTickAt = 0;
   private lastInfo: TooltipContent | null = null;
   private hoverX = 0;
@@ -1672,7 +1702,9 @@ export class TooltipManager {
         : '';
 
       const html =
-        `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span></div>` +
+        `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span>` +
+        (info.tempTag ? `<span class="tip-temp">${escapeHtml(info.tempTag)}</span>` : '') +
+        `</div>` +
         `<div class="tip-title">${escapeHtml(info.title)}</div>` +
         elHtml +
         `<div class="tip-body">${escapeHtml(info.body)}</div>` +
@@ -1714,7 +1746,7 @@ export class TooltipManager {
       }
     } else if (isTouch) {
       left = clientX - tipW * 0.5;
-      const clearance = (this.lensActive ? this.lensRadius : 0) + 14;
+      const clearance = (this.lensActive ? this.lensRadius : 0) + 18;
       const aboveTop = clientY - clearance - tipH;
       const belowTop = clientY + clearance;
       if (aboveTop >= pad) {
@@ -1733,8 +1765,32 @@ export class TooltipManager {
       }
     }
 
-    const clampedL = Math.max(pad, Math.min(vw - tipW - pad, left));
-    const clampedT = Math.max(pad, Math.min(vh - tipH - pad, top));
+    let clampedL = Math.max(pad, Math.min(vw - tipW - pad, left));
+    let clampedT = Math.max(pad, Math.min(vh - tipH - pad, top));
+    if (isTouch && !menuRowEl) {
+      if (!this.smoothBoxInit) {
+        this.smoothBoxX = clampedL;
+        this.smoothBoxY = clampedT;
+        this.smoothBoxInit = true;
+      } else {
+        const dx = clampedL - this.smoothBoxX;
+        const dy = clampedT - this.smoothBoxY;
+        const dist = Math.hypot(dx, dy);
+        const maxStep = 2.4;
+        if (dist > maxStep && dist > 1e-4) {
+          const s = maxStep / dist;
+          this.smoothBoxX += dx * s;
+          this.smoothBoxY += dy * s;
+        } else {
+          this.smoothBoxX = clampedL;
+          this.smoothBoxY = clampedT;
+        }
+        clampedL = this.smoothBoxX;
+        clampedT = this.smoothBoxY;
+      }
+    } else {
+      this.smoothBoxInit = false;
+    }
     el.style.transform = `translate3d(${clampedL.toFixed(2)}px, ${clampedT.toFixed(2)}px, 0)`;
   }
 
@@ -1746,6 +1802,7 @@ export class TooltipManager {
     this.gpuLensSynced = false;
     this.offGlobeStreak = 0;
     this.tipAnchorInit = false;
+    this.smoothBoxInit = false;
     this.lastInfo = null;
     this.pendingTap = null;
     this.lensGeneration++;

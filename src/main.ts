@@ -33,20 +33,25 @@ import {
   type EarthTopoFeatures,
 } from './earth/mapOverlay';
 import {
+  airTempColorRgb,
   buildDivergenceFreeWind,
   extendedSinebowColor,
   fetchLiveGfsWind,
   loadFallbackWind,
   sampleWindLonLat,
+  sampleWindTempLonLat,
   WIND_LEVELS,
   type WindGrid,
   type WindLevelId,
 } from './earth/windData';
 import {
   buildDivergenceFreeOcean,
+  buildGlobalTempTexture,
   loadOceanCurrents,
   OCEAN_CURRENTS_SPEC,
   sampleOceanLonLat,
+  sampleOceanSstLonLat,
+  sstColorRgb,
   type OceanGrid,
 } from './earth/oceanData';
 import { oceanGridToSampler, WindStreamRenderer } from './earth/windLines';
@@ -77,6 +82,7 @@ import {
   initialOrientation,
   initialUrlPan,
   lifeOpacityBinding,
+  localTempBinding,
   mineralLinkBinding,
   mineralOpacityBinding,
   mineralRateBinding,
@@ -103,6 +109,9 @@ import {
   setEngineDisplay,
   setOceanSim,
   setSim,
+  tempColorsBinding,
+  tempStatusBinding,
+  tempStrengthBinding,
   tooltipsBinding,
   updatePeriodicLegend,
   viewLayerSelect,
@@ -146,6 +155,12 @@ const windLevelBadge = document.getElementById('windLevelBadge') as HTMLElement;
 const windTimeBadge = document.getElementById('windTimeBadge') as HTMLElement;
 const oceanLevelBadge = document.getElementById('oceanLevelBadge') as HTMLElement;
 const oceanTimeBadge = document.getElementById('oceanTimeBadge') as HTMLElement;
+const tempHudGroup = document.getElementById('tempHudGroup') as HTMLElement;
+const tempLevelBadge = document.getElementById('tempLevelBadge') as HTMLElement;
+const tempTimeBadge = document.getElementById('tempTimeBadge') as HTMLElement;
+const tempScaleMinLabel = document.getElementById('tempScaleMinLabel') as HTMLElement;
+const tempScaleBar = document.getElementById('tempScaleBar') as HTMLElement;
+const tempScaleMaxLabel = document.getElementById('tempScaleMaxLabel') as HTMLElement;
 const scaleMaxLabel = document.getElementById('scaleMaxLabel') as HTMLElement;
 
 const oceanCtx = oceanCanvas.getContext('2d', { willReadFrequently: true });
@@ -159,7 +174,7 @@ const simSize = 24;
 const simData = new Float32Array(simSize);
 const oceanSimSize = 24;
 const oceanSimData = new Float32Array(oceanSimSize);
-const bioUniformFloats = 16;
+const bioUniformFloats = 20; // 80 bytes
 const bioUniformData = new Float32Array(bioUniformFloats);
 const frameBuf = new Float32Array(1);
 
@@ -280,6 +295,7 @@ let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
+let tempTexture: GPUTexture | undefined;
 let watermanFwdTexture: GPUTexture | undefined;
 let watermanInvTexture: GPUTexture | undefined;
 
@@ -370,11 +386,24 @@ let configPersistenceReady = false;
 let suppressPaneEvents = false;
 
 function createEmptyWindGrid(): WindGrid {
+  const n = GRID_TEX_W * GRID_TEX_H;
+  const climK = new Float32Array(n);
+  for (let row = 0; row < GRID_TEX_H; row++) {
+    const latDeg = 90 - (row / Math.max(1, GRID_TEX_H - 1)) * 180;
+    const cosLat = Math.max(0, Math.cos((latDeg * Math.PI) / 180));
+    const tK = 250.15 + 50.0 * Math.pow(cosLat, 1.35);
+    for (let col = 0; col < GRID_TEX_W; col++) {
+      climK[row * GRID_TEX_W + col] = tK;
+    }
+  }
   return {
     nx: GRID_TEX_W,
     ny: GRID_TEX_H,
-    u: new Float32Array(GRID_TEX_W * GRID_TEX_H),
-    v: new Float32Array(GRID_TEX_W * GRID_TEX_H),
+    u: new Float32Array(n),
+    v: new Float32Array(n),
+    tempK: climK,
+    sfcTempK: climK,
+    tempLabel: '2m Air',
     level: earthParams.windLevel,
     refTime: 'initializing',
     validTime: '',
@@ -395,11 +424,86 @@ function drawScaleBar(maxSpeed: number) {
   scaleMaxLabel.textContent = `${maxSpeed} m/s`;
 }
 
+let defaultTempBadgeText = 'GFS + NOAA SST · loading…';
+let pointerHoverTempActive = false;
+
+function sampleLocalTempsAtUnit(u: [number, number, number]) {
+  const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+  const latDeg = Math.asin(z) * (180 / Math.PI);
+  const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+  return sampleLocalTempsAtLonLat(lonDeg, latDeg);
+}
+
+function sampleLocalTempsAtLonLat(lonDeg: number, latDeg: number) {
+  const [airK, sfcAirK] = sampleWindTempLonLat(currentWindGrid, lonDeg, latDeg);
+  let sstK: number | null = null;
+  let oceanMask = 0;
+  if (currentOceanGrid) {
+    const [sK, sM] = sampleOceanSstLonLat(currentOceanGrid, lonDeg, latDeg);
+    oceanMask = sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3];
+    if (sM >= 0.42 && oceanMask >= 0.35) {
+      sstK = sK;
+    }
+  }
+  const airC = airK - 273.15;
+  const sfcAirC = sfcAirK - 273.15;
+  const sstC = sstK !== null ? sstK - 273.15 : null;
+  const surfaceC = sstC !== null ? sstC : sfcAirC;
+  return {
+    airC,
+    sfcAirC,
+    sstC,
+    surfaceC,
+    oceanMask,
+    airLabel: currentWindGrid.tempLabel || '2m Air',
+  };
+}
+
+function drawTempScaleBar(isOceanSst: boolean) {
+  const minC = isOceanSst ? -2 : -40;
+  const maxC = isOceanSst ? 40 : 45;
+  const stops: string[] = [];
+  const steps = 16;
+  for (let i = 0; i <= steps; i++) {
+    const f = i / steps;
+    const tK = 273.15 + minC + (maxC - minC) * f;
+    const [r, g, b] = isOceanSst ? sstColorRgb(tK) : airTempColorRgb(tK);
+    stops.push(`rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}) ${(f * 100).toFixed(0)}%`);
+  }
+  tempScaleBar.style.background = `linear-gradient(to right, ${stops.join(', ')})`;
+  tempScaleMinLabel.textContent = `${minC}°C`;
+  tempScaleMaxLabel.textContent = `+${maxC}°C`;
+}
+
+function refreshTempHudBadges() {
+  const airTag = currentWindGrid.tempLabel || '2m Air';
+  if (earthParams.viewLayer === 'ocean') {
+    tempLevelBadge.textContent = 'Temp @ Ocean SST';
+  } else if (earthParams.viewLayer === 'air') {
+    tempLevelBadge.textContent = `Temp @ ${airTag}`;
+  } else {
+    tempLevelBadge.textContent = `Temp @ ${airTag} / SST`;
+  }
+  drawTempScaleBar(earthParams.viewLayer === 'ocean');
+  const wTime = currentWindGrid.validTime ? currentWindGrid.validTime : currentWindGrid.source;
+  const sstTime = currentOceanGrid
+    ? currentOceanGrid.sstRefTime.replace('T12:00:00Z', '').replace('T00:00:00Z', '')
+    : 'loading SST';
+  defaultTempBadgeText = `${wTime} · SST ${sstTime}`;
+  if (!pointerHoverTempActive) {
+    tempTimeBadge.textContent = defaultTempBadgeText;
+  }
+  earthParams.tempStatus = `${airTag} (${currentWindGrid.isLive ? 'live' : 'cached'}) · SST ${sstTime}`;
+  tempStatusBinding.refresh();
+}
+
 function refreshHudVisibility() {
   const showAir = earthParams.viewLayer !== 'ocean';
   const showOcean = earthParams.viewLayer !== 'air';
   windHudGroup.style.display = showAir ? '' : 'none';
   oceanHudGroup.style.display = showOcean ? '' : 'none';
+  tempHudGroup.style.display = '';
+  refreshTempHudBadges();
 }
 
 function refreshHudBadges(grid: WindGrid) {
@@ -510,6 +614,9 @@ function exportCurrentConfig(): SimConfigV1 {
       oceanStrength: earthParams.oceanStrength,
       oceanLines: earthParams.oceanLines,
       oceanColors: earthParams.oceanColors,
+      tempColors: earthParams.tempColors,
+      localTemp: earthParams.localTemp,
+      tempStrength: earthParams.tempStrength,
       lifeOpacity: earthParams.lifeOpacity,
       mineralOpacity: earthParams.mineralOpacity,
       coastlines: earthParams.coastlines,
@@ -678,6 +785,9 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.oceanStrength !== undefined) earthParams.oceanStrength = e.oceanStrength;
     if (e.oceanLines !== undefined) earthParams.oceanLines = e.oceanLines;
     if (e.oceanColors !== undefined) earthParams.oceanColors = e.oceanColors;
+    if (e.tempColors !== undefined) earthParams.tempColors = e.tempColors;
+    if (e.localTemp !== undefined) earthParams.localTemp = e.localTemp;
+    if (e.tempStrength !== undefined) earthParams.tempStrength = e.tempStrength;
     if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
     if (e.mineralOpacity !== undefined) earthParams.mineralOpacity = e.mineralOpacity;
     if (e.coastlines !== undefined) {
@@ -768,6 +878,23 @@ function updateProjectionState() {
 
 bindGlobeInput(viewState, () => d3Proj, updateProjectionState);
 
+function uploadTempToGpu() {
+  if (!device || !tempTexture) return;
+  const texData = buildGlobalTempTexture(
+    currentWindGrid,
+    currentOceanGrid,
+    GRID_TEX_W,
+    GRID_TEX_H,
+  );
+  device.queue.writeTexture(
+    { texture: tempTexture },
+    texData,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+  refreshTempHudBadges();
+}
+
 function uploadWindToGpu(grid: WindGrid) {
   if (!device || !windTexture) return;
   const texData = buildDivergenceFreeWind(grid, GRID_TEX_W, GRID_TEX_H);
@@ -777,6 +904,7 @@ function uploadWindToGpu(grid: WindGrid) {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  uploadTempToGpu();
 }
 
 function uploadOceanToGpu(grid: OceanGrid) {
@@ -788,6 +916,7 @@ function uploadOceanToGpu(grid: OceanGrid) {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  uploadTempToGpu();
 }
 
 let activeWindLoadId = 0;
@@ -898,6 +1027,7 @@ declare global {
         chemOpacity: number;
         oceanLines: number;
         oceanColors: number;
+        tempColors: number;
         lifeOpacity: number;
         mineralOpacity: number;
       };
@@ -908,6 +1038,27 @@ declare global {
       setOceanLines: (val: boolean | number) => void;
       setWindColors: (val: boolean | number) => void;
       setWindLines: (val: boolean | number) => void;
+      setTempColors: (val: boolean | number) => void;
+      getLocalTemp: () => boolean;
+      setLocalTemp: (on: boolean) => void;
+      getTempStrength: () => number;
+      setTempStrength: (val: number) => void;
+      getTempAtLonLat: (lonDeg: number, latDeg: number) => {
+        airC: number;
+        sfcAirC: number;
+        sstC: number | null;
+        surfaceC: number;
+        oceanMask: number;
+        airLabel: string;
+      };
+      getTempInfo: () => {
+        airLevel: WindLevelId;
+        airLabel: string;
+        airRefTime: string;
+        sstRefTime: string;
+        sstSource: string;
+        isLive: boolean;
+      };
       refreshTooltipSnapshot: () => Promise<HoverSimSnapshot | null>;
       inspectReactionAt: (clientX: number, clientY: number) => TooltipContent | null;
       getTooltipLens: () => TooltipLensState;
@@ -1680,8 +1831,42 @@ const tooltipManager = new TooltipManager({
     const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
     return sampleWindLonLat(currentWindGrid, lonDeg, latDeg)[2] * earthParams.windStrength;
   },
+  getLocalTemps: (u) => sampleLocalTempsAtUnit(u),
   getMineralOpacity: () => earthParams.mineralOpacity,
   requestSnapshot: captureHoverSnapshot,
+});
+
+canvas.addEventListener('pointermove', (ev) => {
+  if (!d3Proj.invert || ev.pointerType === 'touch') return;
+  const ll = d3Proj.invert([ev.clientX, ev.clientY]);
+  if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) {
+    if (pointerHoverTempActive) {
+      pointerHoverTempActive = false;
+      tempTimeBadge.textContent = defaultTempBadgeText;
+    }
+    return;
+  }
+  const chk = d3Proj(ll);
+  if (!chk || Math.hypot(chk[0] - ev.clientX, chk[1] - ev.clientY) > 12) {
+    if (pointerHoverTempActive) {
+      pointerHoverTempActive = false;
+      tempTimeBadge.textContent = defaultTempBadgeText;
+    }
+    return;
+  }
+  pointerHoverTempActive = true;
+  const t = sampleLocalTempsAtLonLat(ll[0], ll[1]);
+  const aSign = t.airC >= 0 ? '+' : '';
+  const sstPart =
+    t.sstC !== null ? ` · SST ${t.sstC >= 0 ? '+' : ''}${t.sstC.toFixed(1)}°C` : '';
+  tempTimeBadge.textContent = `${t.airLabel} ${aSign}${t.airC.toFixed(1)}°C${sstPart}`;
+});
+
+canvas.addEventListener('pointerleave', () => {
+  if (pointerHoverTempActive) {
+    pointerHoverTempActive = false;
+    tempTimeBadge.textContent = defaultTempBadgeText;
+  }
 });
 
 window.complexLife = {
@@ -1741,6 +1926,7 @@ window.complexLife = {
     chemOpacity: earthParams.chemOpacity,
     oceanLines: earthParams.oceanLines,
     oceanColors: earthParams.oceanColors,
+    tempColors: earthParams.tempColors,
     lifeOpacity: earthParams.lifeOpacity,
     mineralOpacity: earthParams.mineralOpacity,
   }),
@@ -1780,6 +1966,32 @@ window.complexLife = {
       windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
     }
   },
+  setTempColors: (val: boolean | number) => {
+    earthParams.tempColors = clampOpacity(val);
+    tempColorsBinding.refresh();
+  },
+  getLocalTemp: () => earthParams.localTemp,
+  setLocalTemp: (on: boolean) => {
+    earthParams.localTemp = on;
+    localTempBinding.refresh();
+    syncBioUniformState();
+  },
+  getTempStrength: () => earthParams.tempStrength,
+  setTempStrength: (val: number) => {
+    earthParams.tempStrength = Math.max(0, Math.min(2, val));
+    tempStrengthBinding.refresh();
+    syncBioUniformState();
+  },
+  getTempAtLonLat: (lonDeg: number, latDeg: number) =>
+    sampleLocalTempsAtLonLat(lonDeg, latDeg),
+  getTempInfo: () => ({
+    airLevel: currentWindGrid.level,
+    airLabel: currentWindGrid.tempLabel || '2m Air',
+    airRefTime: currentWindGrid.validTime || currentWindGrid.refTime,
+    sstRefTime: currentOceanGrid?.sstRefTime ?? '',
+    sstSource: currentOceanGrid?.sstSource ?? 'Climatology SST',
+    isLive: currentWindGrid.isLive,
+  }),
   refreshTooltipSnapshot: async () => {
     const snap = await captureHoverSnapshot();
     if (snap) {
@@ -1939,7 +2151,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     label: 'oceanSimBuffer',
   });
   bioUniformBuffer = device.createBuffer({
-    size: 64,
+    size: bioUniformFloats * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'bioUniformBuffer',
   });
@@ -1956,6 +2168,13 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'oceanTexture',
   });
+  tempTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'tempTexture',
+  });
+  uploadTempToGpu();
   watermanFwdTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -1998,6 +2217,7 @@ const oceanBootPromise = loadOceanCurrents().catch(() => null);
       { binding: 1, resource: windTexture.createView() },
       { binding: 2, resource: watermanInvTexture.createView() },
       { binding: 3, resource: oceanTexture.createView() },
+      { binding: 4, resource: tempTexture.createView() },
     ],
   });
 
@@ -2396,6 +2616,7 @@ function startWorld() {
     !bioUniformBuffer ||
     !windTexture ||
     !oceanTexture ||
+    !tempTexture ||
     !watermanFwdTexture
   ) {
     return;
@@ -2891,6 +3112,7 @@ function startWorld() {
     bioForceBuffer,
     windTexView: windTexture.createView(),
     oceanTexView: oceanTexture.createView(),
+    tempTexView: tempTexture.createView(),
     particleAmt,
     cellAmt: params.cells,
   };
@@ -2972,9 +3194,10 @@ function writeUniforms() {
   uniformData[38] = colourAmt;
   uniformData[39] = oceanColourAmt;
   uniformData[40] = earthParams.mineralOpacity;
-  uniformData[41] = 0;
-  uniformData[42] = 0;
-  uniformData[43] = 0;
+  uniformData[41] = earthParams.tempColors;
+  uniformData[42] = earthParams.localTemp ? earthParams.tempStrength : 0;
+  uniformData[43] =
+    earthParams.viewLayer === 'ocean' ? 1 : earthParams.viewLayer === 'air' ? 2 : 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
@@ -3390,6 +3613,20 @@ windColorsBinding.on('change', () => {
 
 oceanColorsBinding.on('change', () => {
   // Picked up immediately by bgRender uniform
+});
+
+tempColorsBinding.on('change', () => {
+  // Picked up immediately by bgRender uniform
+});
+
+localTempBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+tempStrengthBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
 });
 
 coastlinesBinding.on('change', () => {

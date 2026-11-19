@@ -10,6 +10,7 @@ export interface UnifiedEngineRefs {
   bioForceBuffer: GPUBuffer;
   windTexView: GPUTextureView;
   oceanTexView: GPUTextureView;
+  tempTexView: GPUTextureView;
   particleAmt: number;
   cellAmt: number;
 }

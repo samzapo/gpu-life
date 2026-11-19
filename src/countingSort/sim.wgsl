@@ -11,6 +11,7 @@
 @group(0) @binding(10) var<storage, read> bioForce: array<vec4f>;
 @group(0) @binding(11) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(12) var<storage, read> indices: array<vec2<u32>>;
+@group(0) @binding(13) var tempTex: texture_2d<f32>;
 
 fn getChemCellForce(
     pi: u32,
@@ -20,6 +21,7 @@ fn getChemCellForce(
     actScale: f32,
     bioCleave: f32,
     shearStress: f32,
+    tempWellMod: f32,
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
@@ -45,12 +47,13 @@ fn getChemCellForce(
             actScale,
             bioCleave,
             shearStress,
+            tempWellMod,
             acc,
         );
     }
 }
 
-fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress: f32) -> ForceResult {
+fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress: f32, tempWellMod: f32) -> ForceResult {
     let sP = getSpeciesInfo(u32(p.colour));
     let mySlots = valence[pi];
     var acc = ForceAccum();
@@ -64,7 +67,7 @@ fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getChemCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, c, &acc);
+                getChemCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, tempWellMod, c, &acc);
             }
         }
     }
@@ -151,6 +154,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let p = input[pi];
     let ls = lifeStateNext[pi];
     let myPhase = unpackPhase(ls.w);
+    let tSample = sampleTempTexture(tempTex, p.pos);
+    let localTempScale = uniforms.mineralParams.z;
 
     if (myPhase == 3u) {
         output[pi] = integrateMineralParticle(p, ls, bioForce[pi]);
@@ -169,6 +174,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             myPhase,
             oceanSim,
             oceanTex,
+            tSample,
+            localTempScale,
             uniforms.mouseSphere,
             ls,
             bioForce[pi],
@@ -179,11 +186,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let mySlots = valence[pi];
     let bReact = bioForce[pi];
     let actGlow = unpackActGlow(bReact.w);
-    let actScale = actGlow.x;
+    let airTherm = evalAirTempChemFactors(tSample.x, localTempScale);
+    let actScale = actGlow.x * airTherm.x;
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
     let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
     let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
-    let res = getChemForce(pi, p, actScale, bioCleave, shearStress);
+    let res = getChemForce(pi, p, actScale, bioCleave, shearStress, airTherm.y);
     output[pi] = integrateParticle(
         pi,
         p,
