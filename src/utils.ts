@@ -159,10 +159,9 @@ export function setupTimestamp(device: GPUDevice, name: string) {
 }
 
 export function linkComputeTimestamp(
-  device: GPUDevice,
+  _device: GPUDevice,
   name: string,
 ): GPUComputePassDescriptor {
-  device.pushErrorScope('validation');
   if (!canTimestamp) {
     return {};
   }
@@ -176,11 +175,10 @@ export function linkComputeTimestamp(
 }
 
 export function linkRenderTimestamp(
-  device: GPUDevice,
+  _device: GPUDevice,
   description: GPURenderPassDescriptor,
   name: string,
 ): GPURenderPassDescriptor {
-  device.pushErrorScope('validation');
   if (!canTimestamp) {
     return description;
   }

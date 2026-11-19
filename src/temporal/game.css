@@ -1,0 +1,316 @@
+#game-toggle,
+#temporal-panel {
+  --aqua: #87f7e1;
+  color: #edf6fc;
+  background: rgba(12, 22, 33, 0.94);
+  border: 1px solid #526779;
+  font:
+    500 14px/1.35 system-ui,
+    sans-serif;
+  touch-action: manipulation;
+}
+#game-toggle {
+  position: fixed;
+  z-index: 32;
+  top: max(12px, env(safe-area-inset-top));
+  left: 66px;
+  padding: 8px 15px;
+  min-height: 40px;
+  border-radius: 24px;
+  cursor: pointer;
+}
+#game-toggle span {
+  font-size: 18px;
+  vertical-align: -1px;
+  margin-right: 4px;
+}
+#game-toggle[aria-pressed='true'] {
+  color: var(--aqua);
+  border-color: #569e99;
+}
+#temporal-panel {
+  position: fixed;
+  z-index: 35;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(440px, calc(100vw - 48px));
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border-radius: 14px;
+  box-shadow: 0 6px 28px #0008;
+  max-height: 54dvh;
+  overflow-y: auto;
+  touch-action: pan-y;
+  font-variant-numeric: tabular-nums;
+}
+#temporal-panel [hidden],
+#temporal-panel[hidden],
+#event-flash[hidden],
+#force-marker[hidden],
+#event-marker[hidden] {
+  display: none !important;
+}
+#temporal-panel header,
+.game-row,
+.timeline-head,
+.arrival,
+#game-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#temporal-panel header,
+.timeline-head,
+#game-stats {
+  justify-content: space-between;
+}
+#game-mode-name {
+  margin: 0;
+  color: #8ec4c0;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+#game-title {
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.12;
+  margin: 3px 0;
+}
+#game-score {
+  white-space: nowrap;
+  color: var(--aqua);
+}
+#game-message {
+  margin: 6px 0 0;
+  color: #c1d3df;
+  font-size: 14px;
+}
+#game-confirm,
+#game-result {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+#temporal-panel button,
+#temporal-panel select {
+  background: #21313e;
+  border: 1px solid #526879;
+  border-radius: 7px;
+  color: #edf6fc;
+  padding: 5px 10px;
+  font: inherit;
+  cursor: pointer;
+  min-height: 36px;
+}
+#temporal-panel button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+#temporal-panel button.primary {
+  background: #96f5dc;
+  color: #072720;
+  border-color: #96f5dc;
+  font-weight: 700;
+}
+#temporal-panel button[aria-pressed='true'] {
+  color: var(--aqua);
+  background: #153f40;
+  border-color: #61c3b6;
+}
+#temporal-panel :focus-visible,
+#game-toggle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+#game-stats {
+  padding: 9px 0;
+  margin: 7px 0;
+  border-block: 1px solid #394857;
+  color: #b2c6d5;
+}
+#game-stats b {
+  display: block;
+  color: white;
+  font-size: 15px;
+}
+.timeline-head {
+  font-size: 13px;
+  color: #b4ced9;
+}
+.timeline-wrap {
+  position: relative;
+  margin: 2px 0 3px;
+}
+#game-timeline {
+  position: relative;
+  height: 26px;
+  width: 100%;
+  margin: 0;
+  accent-color: #81edd8;
+  touch-action: manipulation;
+}
+#plan-track {
+  position: absolute;
+  bottom: 0;
+  height: 4px;
+  left: 1%;
+  width: 98%;
+  overflow: hidden;
+  background: #2d3c4b;
+}
+#plan-track i {
+  height: 100%;
+  position: absolute;
+  min-width: 2px;
+}
+#plan-track .attract {
+  background: #7de5d2;
+}
+#plan-track .repel {
+  background: #f7a666;
+}
+.transport {
+  justify-content: space-between;
+  margin-top: 6px;
+}
+#game-tools {
+  display: inline-flex;
+  gap: 4px;
+}
+.arrival {
+  margin: 9px 0;
+  font-size: 13px;
+  color: #c1d3df;
+  white-space: nowrap;
+}
+.arrival input {
+  min-width: 30px;
+  width: 100%;
+  accent-color: #82c2df;
+}
+.edit-actions select {
+  flex: 1;
+  min-width: 0;
+}
+#event-marker,
+#force-marker {
+  position: fixed;
+  pointer-events: none;
+  z-index: 8;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+#event-marker {
+  border: 1px dashed #ffd79a;
+  background: radial-gradient(circle, transparent 63%, #f6af5224);
+  box-shadow: 0 0 12px #ffb57630;
+}
+#event-marker.active {
+  border: 2px solid #ff9b75;
+  background: radial-gradient(circle, #ff6a702d 1%, #ff726122 60%, #ff8d7640);
+}
+#force-marker {
+  width: 38px;
+  height: 38px;
+  border: 2px solid #9df8e3;
+  color: #e5fff6;
+  display: grid;
+  place-items: center;
+  background: #113b3999;
+  font: 24px/1 monospace;
+}
+#event-flash {
+  position: fixed;
+  z-index: 12;
+  inset: 0;
+  pointer-events: none;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  padding-top: 17vh;
+  background: radial-gradient(ellipse at center, transparent 52%, #b34d542d);
+  animation: event-in 1s ease-out;
+}
+#event-flash span {
+  color: #fff5dd;
+  background: #251c25db;
+  border-block: 1px solid #efa766;
+  padding: 8px 24px;
+  font: italic 750 clamp(22px, 4vw, 54px) / 1.08 system-ui;
+  letter-spacing: -0.04em;
+  text-shadow: 2px 2px #a9473f;
+}
+@keyframes event-in {
+  from {
+    background-color: #f0c28b36;
+    filter: brightness(1.8);
+  }
+  to {
+    background-color: transparent;
+    filter: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #event-flash {
+    animation: none;
+  }
+}
+body:is(
+    [data-temporal='film'],
+    [data-temporal='confirm'],
+    [data-temporal='edit'],
+    [data-temporal='commit'],
+    [data-temporal='result']
+  )
+  :is(#controls, #hoverTooltip, #particleLens) {
+  display: none !important;
+}
+@media (max-width: 700px) {
+  #game-toggle {
+    left: 10px;
+    top: max(9px, env(safe-area-inset-top));
+    font-size: 14px;
+    min-height: 44px;
+  }
+  #githubBtn {
+    top: 62px;
+    width: 28px;
+    height: 28px;
+  }
+  .tp-dfwv {
+    width: min(210px, calc(100vw - 150px)) !important;
+  }
+  #temporal-panel {
+    width: calc(100vw - 16px);
+    bottom: max(7px, env(safe-area-inset-bottom));
+    padding: 10px 12px;
+    max-height: 52dvh;
+  }
+  #game-title {
+    font-size: 18px;
+  }
+  #temporal-panel button,
+  #temporal-panel select {
+    min-height: 40px;
+    padding: 5px 8px;
+  }
+  body[data-temporal='watch'] #controls {
+    bottom: 108px;
+  }
+  .transport {
+    gap: 4px;
+  }
+}
+@media (max-height: 520px) and (min-width: 560px) {
+  #temporal-panel {
+    left: auto;
+    right: 8px;
+    transform: none;
+    width: 320px;
+    max-height: 78dvh;
+  }
+}

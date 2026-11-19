@@ -1,0 +1,168 @@
+export type Point = [number, number, number];
+export type Force = { point: Point; sign: number; stroke: number };
+export type Bloom = {
+  point: Point;
+  startTick: number;
+  endTick: number;
+  radius: number;
+};
+export interface Snapshot {
+  tick: number;
+  frame: number;
+  particles: Float32Array<ArrayBuffer>;
+  life: Float32Array<ArrayBuffer>;
+  episodes: Uint32Array<ArrayBuffer>;
+}
+export interface Colony {
+  members: number[];
+  center: Point;
+}
+
+export const ticksPerSecond = 20;
+export const budgetTicks = 6 * ticksPerSecond;
+export const earlierSecondsPerForceSecond = 2;
+
+export function isAlive(snapshot: Snapshot, index: number) {
+  const phase = Math.round(snapshot.life[index * 4 + 3]) & 3;
+  return phase === 1 || phase === 2;
+}
+
+export function countSurvivors(
+  snapshot: Snapshot,
+  members: number[],
+  baseline: Snapshot,
+) {
+  return members.reduce(
+    (count, index) =>
+      count +
+      Number(
+        isAlive(snapshot, index) &&
+          snapshot.episodes[index] === baseline.episodes[index],
+      ),
+    0,
+  );
+}
+
+// Match by material membership across samples. All surviving fragments count,
+// even when a current carries them outside the original neighborhood.
+export function findColonies(snapshot: Snapshot, radius: number): Colony[] {
+  const buckets = new Map<number, number[]>();
+  const cellsPerAxis = Math.ceil(2 / radius) + 3;
+  const bucketKey = (x: number, y: number, z: number) =>
+    (x * cellsPerAxis + y) * cellsPerAxis + z;
+  const cell = (value: number) => Math.floor((value + 1) / radius) + 1;
+  const particles = snapshot.particles;
+  const particleCount = snapshot.life.length / 4;
+  const visited = new Uint8Array(particleCount);
+  const living: number[] = [];
+  for (let index = 0; index < particleCount; index++) {
+    if (!isAlive(snapshot, index)) continue;
+    living.push(index);
+    const offset = index * 12;
+    const key = bucketKey(
+      cell(particles[offset]),
+      cell(particles[offset + 1]),
+      cell(particles[offset + 2]),
+    );
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(index);
+    else buckets.set(key, [index]);
+  }
+  const colonies: Colony[] = [];
+  for (const seed of living) {
+    if (visited[seed]) continue;
+    visited[seed] = 1;
+    const members = [seed];
+    const center: Point = [0, 0, 0];
+    for (let cursor = 0; cursor < members.length; cursor++) {
+      const index = members[cursor];
+      const offset = index * 12;
+      const x = particles[offset],
+        y = particles[offset + 1],
+        z = particles[offset + 2];
+      center[0] += x;
+      center[1] += y;
+      center[2] += z;
+      const gx = cell(x),
+        gy = cell(y),
+        gz = cell(z);
+      const kin = (Math.round(snapshot.life[index * 4 + 3]) >>> 10) & 511;
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dz = -1; dz <= 1; dz++) {
+            const bucket = buckets.get(bucketKey(gx + dx, gy + dy, gz + dz));
+            if (!bucket) continue;
+            for (const other of bucket) {
+              if (visited[other]) continue;
+              const next = other * 12;
+              const distance2 =
+                (particles[next] - x) ** 2 +
+                (particles[next + 1] - y) ** 2 +
+                (particles[next + 2] - z) ** 2;
+              if (distance2 > radius * radius) continue;
+              const delta = Math.abs(
+                kin - ((Math.round(snapshot.life[other * 4 + 3]) >>> 10) & 511),
+              );
+              if (
+                Math.min(delta, 512 - delta) > 25 &&
+                distance2 > radius * radius * 0.3
+              )
+                continue;
+              visited[other] = 1;
+              members.push(other);
+            }
+          }
+    }
+    if (members.length < 5) continue;
+    const length = Math.hypot(...center) || 1;
+    colonies.push({
+      members,
+      center: [center[0] / length, center[1] / length, center[2] / length],
+    });
+  }
+  return colonies.sort(
+    (left, right) => right.members.length - left.members.length,
+  );
+}
+
+export async function readCheckpoint(
+  device: GPUDevice,
+  particles: GPUBuffer,
+  life: GPUBuffer,
+  episodes: GPUBuffer,
+  tick: number,
+  frame: number,
+): Promise<Snapshot> {
+  const staging = device.createBuffer({
+    size: particles.size + life.size + episodes.size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(particles, 0, staging, 0, particles.size);
+    encoder.copyBufferToBuffer(life, 0, staging, particles.size, life.size);
+    encoder.copyBufferToBuffer(
+      episodes,
+      0,
+      staging,
+      particles.size + life.size,
+      episodes.size,
+    );
+    device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const bytes = staging.getMappedRange().slice(0);
+    return {
+      tick,
+      frame,
+      particles: new Float32Array(bytes, 0, particles.size / 4),
+      life: new Float32Array(bytes, particles.size, life.size / 4),
+      episodes: new Uint32Array(
+        bytes,
+        particles.size + life.size,
+        episodes.size / 4,
+      ),
+    };
+  } finally {
+    staging.destroy();
+  }
+}

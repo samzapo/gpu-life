@@ -1,3 +1,7 @@
+import { TemporalGame } from './temporal/game';
+import { readCheckpoint, type Bloom, type Force, type Point } from './temporal/world';
+import haloShader from './temporal/halo.wgsl?raw';
+import gameFieldShader from './temporal/field.wgsl?raw';
 import {
   bindGlobeInput,
   mouseSphere,
@@ -77,6 +81,7 @@ import {
 } from './utils';
 import {
   bindConfigPersistence,
+  advanced, minimizeDisplay, particlesBinding,
   bindOptions,
   bioLinkBinding,
   bioRateBinding,
@@ -953,7 +958,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   return exportCurrentConfig();
 }
 
-function updateProjectionState() {
+function updateProjectionState(persist = true) {
   d3Proj = buildConfiguredD3Projection(viewState);
   refreshBoundProjection(d3Proj);
   mapDirty = true;
@@ -961,13 +966,13 @@ function updateProjectionState() {
     watermanDirty = true;
   }
   viewSignature = `${viewState.projectionId}:${viewState.rotate.map((v) => v.toFixed(2)).join(',')}:${viewState.scale.toFixed(1)}:${viewState.pan.map((v) => v.toFixed(1)).join(',')}:${viewState.width}x${viewState.height}`;
-  syncUrlStateDebounced();
-  scheduleSaveConfig();
+  if (persist) { syncUrlStateDebounced(); scheduleSaveConfig(); }
 }
 
 bindGlobeInput(viewState, () => d3Proj, updateProjectionState);
 
 function uploadTempToGpu() {
+  if (freezeGameWeather && particleBuffers) return;
   if (!device || !tempTexture) return;
   const texData = buildGlobalTempTexture(
     currentWindGrid,
@@ -985,6 +990,7 @@ function uploadTempToGpu() {
 }
 
 function uploadUvToGpu() {
+  if (freezeGameWeather && particleBuffers) return;
   if (!device || !uvTexture) return;
   const texData = buildGlobalUvTexture(
     currentUvGrid,
@@ -1002,6 +1008,7 @@ function uploadUvToGpu() {
 }
 
 function uploadWindToGpu(grid: WindGrid) {
+  if (freezeGameWeather && particleBuffers) return;
   if (!device || !windTexture) return;
   const texData = buildDivergenceFreeWind(grid, GRID_TEX_W, GRID_TEX_H);
   device.queue.writeTexture(
@@ -1014,6 +1021,7 @@ function uploadWindToGpu(grid: WindGrid) {
 }
 
 function uploadOceanToGpu(grid: OceanGrid) {
+  if (freezeGameWeather && particleBuffers) return;
   if (!device || !oceanTexture) return;
   const texData = buildDivergenceFreeOcean(grid, GRID_TEX_W, GRID_TEX_H);
   device.queue.writeTexture(
@@ -2035,8 +2043,289 @@ function syncStreamCanvasOpacity() {
 }
 syncStreamCanvasOpacity();
 
+let freezeGameWeather = false;
+let frameInFlight = false;
+let deviceLost = false;
+let gamePipeline: GPUComputePipeline | undefined;
+let gameUniform: GPUBuffer | undefined;
+let gameEpisodes: GPUBuffer | undefined;
+let gameGroups: GPUBindGroup[] = [];
+let haloPipeline: GPURenderPipeline | undefined;
+let haloMembers: GPUBuffer | undefined;
+let haloGroup: GPUBindGroup | undefined;
+let savedCamera: GlobeViewState | undefined;
+
+function buildGameGroups() {
+  if (!device || !particleBuffers || !lifeStateBuffers || !freezeGameWeather)
+    return;
+  gamePipeline ??= device.createComputePipeline({
+    layout: 'auto',
+    compute: {
+      module: device.createShaderModule({ code: gameFieldShader }),
+      entryPoint: 'main',
+    },
+  });
+  gameUniform ??= device.createBuffer({
+    size: 32,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  gameEpisodes = device.createBuffer({
+    size: particleAmt * 4,
+    usage:
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.VERTEX |
+      GPUBufferUsage.COPY_SRC |
+      GPUBufferUsage.COPY_DST,
+  });
+  gameGroups = [0, 1].map((index) =>
+    device!.createBindGroup({
+      layout: gamePipeline!.getBindGroupLayout(0),
+      entries: [
+        particleBuffers![index],
+        lifeStateBuffers![index],
+        gameUniform!,
+        lifeStateBuffers![1 - index],
+        gameEpisodes!,
+      ].map((buffer, binding) => ({ binding, resource: { buffer } })),
+    }),
+  );
+}
+
+function stepWorld(
+  force?: Force,
+  bloom?: Bloom,
+  sharedEncoder?: GPUCommandEncoder,
+) {
+  if (!device || !particleBuffers) return;
+  frameCount = (frameCount + 1) % 1000000;
+  frameBuf[0] = frameCount;
+  if (simBuffer) {
+    simData[18] = frameCount;
+    device.queue.writeBuffer(simBuffer, 18 * 4, frameBuf);
+  }
+  if (bioUniformBuffer) {
+    bioUniformData[9] = frameCount;
+    device.queue.writeBuffer(bioUniformBuffer, 9 * 4, frameBuf);
+  }
+
+  writeUniforms();
+  if (freezeGameWeather && uniformBuffer) {
+    // All gameplay forces come from the editable, tick-indexed plan.
+    device.queue.writeBuffer(uniformBuffer, 7 * 4, new Float32Array([0]));
+  }
+  const encoder = sharedEncoder ?? device.createCommandEncoder();
+  tick(encoder);
+  if (
+    freezeGameWeather &&
+    gameUniform &&
+    gamePipeline &&
+    gameGroups[alternate]
+  ) {
+    const field = new Float32Array(8);
+    if (force) {
+      field.set(force.point);
+      field[3] = force.sign;
+    }
+    if (bloom) {
+      field.set(bloom.point, 4);
+      field[7] = bloom.radius;
+    }
+    device.queue.writeBuffer(gameUniform, 0, field);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(gamePipeline);
+    pass.setBindGroup(0, gameGroups[alternate]);
+    pass.dispatchWorkgroups(Math.ceil(particleAmt / (1 << 6)));
+    pass.end();
+  }
+  if (!sharedEncoder) device.queue.submit([encoder.finish()]);
+}
+
+const coordinates = (point: Point): [number, number] => [
+  (Math.atan2(point[1], point[0]) * 180) / Math.PI,
+  (Math.asin(Math.max(-1, Math.min(1, point[2]))) * 180) / Math.PI,
+];
+
+const game = new TemporalGame({
+  ready: () =>
+    Boolean(device && particleBuffers && lifeStateBuffers && gameEpisodes),
+  snapshot(tickNumber) {
+    return readCheckpoint(
+      device!,
+      particleBuffers![alternate],
+      lifeStateBuffers![alternate],
+      gameEpisodes!,
+      tickNumber,
+      frameCount,
+    );
+  },
+  restore(state) {
+    if (!device || !particleBuffers || !lifeStateBuffers || !gameEpisodes)
+      return;
+    device.queue.writeBuffer(particleBuffers[alternate], 0, state.particles);
+    device.queue.writeBuffer(lifeStateBuffers[alternate], 0, state.life);
+    device.queue.writeBuffer(gameEpisodes, 0, state.episodes);
+    frameCount = state.frame;
+  },
+  step: stepWorld,
+  focus(point, fraction) {
+    if (!savedCamera) {
+      savedCamera = {
+        ...viewState,
+        rotate: [...viewState.rotate],
+        pan: [...viewState.pan],
+      };
+      minimizeDisplay();
+    }
+    const [longitude, latitude] = coordinates(point);
+    const ease = fraction * fraction * (3 - 2 * fraction);
+    const delta = ((-longitude - savedCamera.rotate[0] + 540) % 360) - 180;
+    viewState.projectionId = 'orthographic';
+    viewState.rotate = [
+      savedCamera.rotate[0] + delta * ease,
+      savedCamera.rotate[1] + (-latitude - savedCamera.rotate[1]) * ease,
+      savedCamera.rotate[2] * (1 - ease),
+    ];
+    const targetScale = Math.min(viewState.width, viewState.height) * 2.45;
+    viewState.scale =
+      savedCamera.scale * Math.pow(targetScale / savedCamera.scale, ease);
+    viewState.pan = [
+      savedCamera.pan[0] * (1 - ease),
+      savedCamera.pan[1] * (1 - ease) - viewState.height * 0.11 * ease,
+    ];
+    updateProjectionState(false);
+  },
+  highlight(colony, baseline) {
+    if (
+      !device ||
+      !uniformBuffer ||
+      !watermanFwdTexture ||
+      !particleBuffers ||
+      !lifeStateBuffers ||
+      !gameEpisodes
+    )
+      return;
+    if (!haloPipeline) {
+      const module = device.createShaderModule({
+        code: structsShader + '\n' + projectionShader + '\n' + haloShader,
+      });
+      haloPipeline = device.createRenderPipeline({
+        layout: 'auto',
+        vertex: {
+          module,
+          entryPoint: 'vertex',
+          buffers: [
+            {
+              arrayStride: particleStride,
+              stepMode: 'instance',
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: 'float32x3' },
+              ],
+            },
+            {
+              arrayStride: valenceStride,
+              stepMode: 'instance',
+              attributes: [
+                { shaderLocation: 1, offset: 12, format: 'float32' },
+              ],
+            },
+            {
+              arrayStride: 4,
+              stepMode: 'instance',
+              attributes: [{ shaderLocation: 2, offset: 0, format: 'uint32' }],
+            },
+            {
+              arrayStride: 4,
+              stepMode: 'instance',
+              attributes: [{ shaderLocation: 3, offset: 0, format: 'uint32' }],
+            },
+          ],
+        },
+        fragment: {
+          module,
+          entryPoint: 'fragment',
+          targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }],
+        },
+      });
+    }
+    const members = new Uint32Array(particleAmt);
+    for (const index of colony.members)
+      members[index] = baseline.episodes[index] + 1;
+    haloMembers?.destroy();
+    haloMembers = device.createBuffer({
+      size: members.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(haloMembers, 0, members);
+    haloGroup = device.createBindGroup({
+      layout: haloPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: watermanFwdTexture.createView() },
+      ],
+    });
+  },
+  leaveFocus() {
+    haloMembers?.destroy();
+    haloMembers = undefined;
+    haloGroup = undefined;
+    if (!savedCamera) return;
+    const { projectionId, rotate, pan, scale } = savedCamera;
+    Object.assign(viewState, { projectionId, rotate, pan, scale });
+    savedCamera = undefined;
+    updateProjectionState(false);
+  },
+  project(point) {
+    const location = coordinates(point);
+    const screen = d3Proj(location);
+    if (!screen || !d3Proj.invert) return null;
+    const visible = d3Proj.invert(screen);
+    if (
+      !visible ||
+      Math.abs(((visible[0] - location[0] + 540) % 360) - 180) > 0.1 ||
+      Math.abs(visible[1] - location[1]) > 0.1
+    )
+      return null;
+    return { x: screen[0], y: screen[1], scale: viewState.scale };
+  },
+  pointer(x, y) {
+    const location = d3Proj.invert?.([x, y]);
+    if (!location) return null;
+    const check = d3Proj(location);
+    if (!check || Math.hypot(check[0] - x, check[1] - y) > 3) return null;
+    const lon = (location[0] * Math.PI) / 180,
+      lat = (location[1] * Math.PI) / 180;
+    return [
+      Math.cos(lat) * Math.cos(lon),
+      Math.cos(lat) * Math.sin(lon),
+      Math.sin(lat),
+    ];
+  },
+  groupRadius: () =>
+    Math.max(
+      0.02,
+      1.35 /
+        Math.max(0.5, oceanOptionParams.r) /
+        Math.max(0.25, optionParams.worldSize),
+    ),
+  settingsLocked(locked, incident = false) {
+    advanced.disabled = incident;
+    particlesBinding.disabled = incident;
+    if (locked === freezeGameWeather) return;
+    freezeGameWeather = locked;
+    if (locked && !gameGroups.length) buildGameGroups();
+    if (!locked) {
+      gameGroups = [];
+      gameEpisodes?.destroy();
+      gameEpisodes = undefined;
+      if (currentOceanGrid) uploadOceanToGpu(currentOceanGrid);
+      uploadWindToGpu(currentWindGrid);
+      uploadUvToGpu();
+    }
+  },
+});
+
 const tooltipManager = new TooltipManager({
-  isEnabled: () => earthParams.tooltips,
+  isEnabled: () => earthParams.tooltips && (game.mode === 'off' || game.mode === 'watch'),
   getProj: () => d3Proj,
   getViewLayer: () => earthParams.viewLayer,
   isBioLinked: () => earthParams.bioLink && earthParams.bioRate > 0,
@@ -2378,6 +2667,7 @@ function syncCanvasDimensions() {
   viewState.height = h;
 }
 
+const windBootPromise = earthParams.windLevel === 'surface' ? loadFallbackWind().catch(() => null) : Promise.resolve(null);
 const oceanBootPromise = loadOceanCurrents().catch(() => null);
 const uvBootPromise = loadCpcUvBaseline().catch(() => null);
 
@@ -2391,6 +2681,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
       // Non-fatal if coastline JSON fails to load
     });
 
+  if (!navigator.gpu) { game.unavailable('This globe requires a WebGPU-enabled browser.'); return; }
   let adapter = await navigator.gpu.requestAdapter({
     featureLevel: 'compatibility',
   });
@@ -2400,9 +2691,10 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
       featureLevel: 'compatibility',
     });
   }
-  if (!adapter) return;
+  if (!adapter) { game.unavailable('WebGPU is unavailable on this device.'); return; }
 
   device = await requestTimestamps(adapter);
+  device.lost.then(() => { deviceLost = true; game.unavailable('GPU connection lost. Reload to start a new globe.'); });
 
   if (device?.features.has('subgroups')) {
     engines['prefixSum'] = prefixSum;
@@ -2486,9 +2778,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     label: 'watermanInvTexture',
   });
 
-  for (const engineName in engines) {
-    engines[engineName].setup(device);
-  }
+
 
   const bgModule = device.createShaderModule({
     code: `${structsShader}\n${projectionShader}\n${bgRenderShader}`,
@@ -2685,10 +2975,16 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   drawScaleBar(WIND_LEVELS[earthParams.windLevel].scaleMax);
   refreshHudVisibility();
 
-  const [loadedOcean, loadedUv] = await Promise.all([
+  const [loadedOcean, loadedUv, loadedWind] = await Promise.all([
     oceanBootPromise,
     uvBootPromise,
+    windBootPromise,
   ]);
+  if (loadedWind) {
+    currentWindGrid = loadedWind;
+    uploadWindToGpu(loadedWind);
+    refreshHudBadges(loadedWind);
+  }
   if (loadedOcean) {
     currentOceanGrid = loadedOcean;
     uploadOceanToGpu(loadedOcean);
@@ -2737,8 +3033,22 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   loadWindLevel(earthParams.windLevel);
 })();
 
+let activeWorldRefs: UnifiedEngineRefs | undefined;
+const initializedEngines = new Set<string>();
+const boundEngines = new Set<string>();
+function prepareEngine() {
+  if (!device || !activeWorldRefs || boundEngines.has(engine)) return;
+  if (!initializedEngines.has(engine)) {
+    engines[engine].setup(device);
+    initializedEngines.add(engine);
+  }
+  engines[engine].start(device, activeWorldRefs);
+  boundEngines.add(engine);
+}
+
 function tick(commandEncoder: GPUCommandEncoder) {
   if (!device || !particleBuffers) return;
+  prepareEngine();
   engines[engine].tick(device, commandEncoder, alternate, particleAmt);
   alternate = (alternate + 1) % 2;
 }
@@ -2897,6 +3207,15 @@ function render(commandEncoder: GPUCommandEncoder) {
     }
   }
 
+  if (haloPipeline && haloMembers && haloGroup && gameEpisodes && particleBuffers && lifeStateBuffers) {
+    passEncoder.setPipeline(haloPipeline);
+    passEncoder.setBindGroup(0,haloGroup);
+    passEncoder.setVertexBuffer(0,particleBuffers[alternate]);
+    passEncoder.setVertexBuffer(1,lifeStateBuffers[alternate]);
+    passEncoder.setVertexBuffer(2,gameEpisodes);
+    passEncoder.setVertexBuffer(3,haloMembers);
+    passEncoder.draw(6,particleAmt);
+  }
   if (lensOverlayPipeline && lensOverlayBindGroup) {
     passEncoder.setPipeline(lensOverlayPipeline);
     passEncoder.setBindGroup(0, lensOverlayBindGroup);
@@ -2947,6 +3266,9 @@ function startWorld() {
     return;
   }
 
+  game.reset();
+  gameEpisodes?.destroy();
+  gameGroups = [];
   particleBuffers?.[0].destroy();
   particleBuffers?.[1].destroy();
   lifeStateBuffers?.[0].destroy();
@@ -3442,9 +3764,9 @@ function startWorld() {
     particleAmt,
     cellAmt: params.cells,
   };
-  for (const engineName in engines) {
-    engines[engineName].start(device, refs);
-  }
+  activeWorldRefs = refs;
+  boundEngines.clear();
+  prepareEngine();
 
   mineralRenderBindGroup = mineralRenderPipeline
     ? device.createBindGroup({
@@ -3467,6 +3789,7 @@ function startWorld() {
       { binding: 3, resource: { buffer: worldRulesBuffer } },
     ],
   });
+  buildGameGroups();
   rebuildLensTrackBindGroups();
 }
 
@@ -3534,7 +3857,7 @@ function writeUniforms() {
 
 function update() {
   requestAnimationFrame(update);
-  if (!device || !context || !bgContext) return;
+  if (!device || !context || !bgContext || !particleBuffers || deviceLost || frameInFlight) return;
 
   const start = performance.now();
   const frameDtMs = lastTime > 0 ? start - lastTime : 16.67;
@@ -3612,26 +3935,17 @@ function update() {
 
   tooltipManager.tick();
 
-  frameCount = (frameCount + 1) % 1000000;
-  frameBuf[0] = frameCount;
-  if (simBuffer) {
-    simData[18] = frameCount;
-    device.queue.writeBuffer(simBuffer, 18 * 4, frameBuf);
-  }
-  if (bioUniformBuffer) {
-    bioUniformData[9] = frameCount;
-    device.queue.writeBuffer(bioUniformBuffer, 9 * 4, frameBuf);
-  }
-
-  writeUniforms();
-
+  device.pushErrorScope('validation');
   const commandEncoder = device.createCommandEncoder();
-  tick(commandEncoder);
+  if (game.mode === 'off') stepWorld(undefined,undefined,commandEncoder);
+  else { game.frame(start); writeUniforms(); }
   updateGpuLens(commandEncoder, frameDtMs);
   render(commandEncoder);
 
   const commands = commandEncoder.finish();
   device.queue.submit([commands]);
+  frameInFlight = true;
+  void device.queue.onSubmittedWorkDone().then(() => { frameInFlight = false; }, () => { frameInFlight = false; });
 
   if (pendingLensReadbackIdx !== null && lensReadbackBuffers) {
     const slot = pendingLensReadbackIdx;
@@ -3668,7 +3982,7 @@ function update() {
       url.searchParams.set('noTimestamp', '');
       window.location.replace(url.toString());
     }
-  });
+  }).catch(() => { /* device.lost reports disconnection */ });
 
   const cpuTime = performance.now() - start;
   globalPerformanceParams.cpu = cpuTime;
@@ -3691,6 +4005,28 @@ function update() {
 }
 
 requestAnimationFrame(update);
+
+function physicsSettings() {
+  return JSON.stringify([engine, optionParams, oceanOptionParams, earthParams.windLevel,
+    earthParams.vortex, earthParams.windStrength, earthParams.oceanMix, earthParams.oceanStrength,
+    earthParams.localTemp, earthParams.tempStrength, earthParams.localUv, earthParams.uvStrength,
+    earthParams.bioLink, earthParams.bioRate, earthParams.mineralLink, earthParams.mineralRate]);
+}
+let recordedSettings = physicsSettings();
+advanced.on('change', event => {
+  if (!event.last || suppressPaneEvents || game.mode !== 'watch') return;
+  const settings = physicsSettings();
+  if (recordedSettings === settings) return;
+  recordedSettings = settings;
+  game.reset();
+});
+
+particlesBinding.on('change', event => {
+  if (event.last && !suppressPaneEvents && particleAmt !== Math.max(1, Math.floor(params.particles))) {
+    particleAmt = Math.max(1, Math.floor(params.particles));
+    startWorld(); saveConfigNow();
+  }
+});
 
 newSimBtn.on('click', () => {
   colourAmt = Math.max(1, Math.min(62, Math.floor(optionParams.colours)));

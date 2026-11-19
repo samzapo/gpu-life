@@ -373,7 +373,7 @@ const opacitySliderParams: BindingParams = {
 };
 
 const pane = new Pane({
-  title: 'Complex Life · Earth Wind',
+  title: 'Display',
   expanded: window.innerWidth >= 768,
 });
 {
@@ -384,14 +384,17 @@ const pane = new Pane({
   }
 }
 
+export const advanced = pane.addFolder({ title: 'Advanced', expanded: false });
+export function minimizeDisplay() { pane.expanded = false; }
+
 withTooltip(
-  pane.addBinding(params, 'fps', { readonly: true }),
+  advanced.addBinding(params, 'fps', { readonly: true }),
   'FPS (Frames Per Second)',
   'Real-time rendered frames per second across the WebGPU compute and render passes.',
 );
 
 export const engineSelect = withTooltip(
-  pane.addBinding(params, 'engine', {
+  advanced.addBinding(params, 'engine', {
     options: {
       'Prefix Sum': 'prefixSum',
       'Counting Sort': 'countingSort',
@@ -403,39 +406,39 @@ export const engineSelect = withTooltip(
 );
 
 export const particlesBinding = withTooltip(
-  pane.addBinding(params, 'particles', { min: 1, step: 1 }),
+  pane.addBinding(params, 'particles', { min: 1, step: 1, index: 0 }),
   'World Particle Pool (N)',
-  'Total conserved particles cycling across Chemistry (phase 0), Emergent Biomass (phase 1), and Biogenic Lipid Bilayers (phase 2); takes effect on New Sim.',
+  'Total conserved particles cycling across Chemistry (phase 0), Emergent Biomass (phase 1), and Biogenic Lipid Bilayers (phase 2); updates the world when confirmed.',
 );
 export const seedInput = withTooltip(
-  pane.addBinding(params, 'seed', { view: 'text' }),
+  advanced.addBinding(params, 'seed', { view: 'text' }),
   'Simulation Seed',
   'Deterministic PRNG seed controlling initial chemical placement and initial ocean biomass seeding.',
 );
 export const newSimBtn = withTooltip(
-  pane.addButton({ title: 'New Sim' }),
+  advanced.addButton({ title: 'New Sim' }),
   'New Unified World Sim',
   'Respawn the conserved-mass world pool using the current N, seed, and element/species settings.',
 );
 export const randomizeBtn = withTooltip(
-  pane.addButton({ title: 'Randomize' }),
+  advanced.addButton({ title: 'Randomize' }),
   'Randomize Seed',
   'Pick a new random seed and respawn atmospheric chemistry particles.',
 );
 export const copyConfigBtn = withTooltip(
-  pane.addButton({ title: 'Copy Config' }),
+  advanced.addButton({ title: 'Copy Config' }),
   'Copy Configuration JSON',
   'Copy all current simulation, chemistry, ocean, bioChem, opacity, and camera settings to clipboard for prompts or reuse.',
 );
 export const pasteConfigBtn = withTooltip(
-  pane.addButton({ title: 'Paste / Load Config' }),
+  advanced.addButton({ title: 'Paste / Load Config' }),
   'Paste / Load Configuration',
   'Open config box to paste a saved JSON config or URL from another run, or reset defaults & clear browser cache.',
 );
 
 // Earth & Wind / Ocean folder (emulating earth.nullschool.net layers, levels & projections)
 const earthFolder = withTooltip(
-  pane.addFolder({
+  advanced.addFolder({
     title: 'Earth · Wind & Ocean',
     expanded: true,
   }),
@@ -500,7 +503,8 @@ export const windStrengthBinding = withTooltip(
   'Multiplier scaling how strongly wind vectors accelerate atmospheric chemistry atoms.',
 );
 export const windLinesBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'windLines', {
+  pane.addBinding(earthParams, 'windLines', {
+    index: 1,
     label: 'windLines',
     ...opacitySliderParams,
   }),
@@ -508,7 +512,8 @@ export const windLinesBinding = withTooltip(
   'Opacity (0%–100%) of animated atmospheric wind streamlines overlaid across the globe.',
 );
 export const windColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'windColors', {
+  pane.addBinding(earthParams, 'windColors', {
+    index: 2,
     label: 'windColors',
     ...opacitySliderParams,
   }),
@@ -516,7 +521,8 @@ export const windColorsBinding = withTooltip(
   'Opacity (0%–100%) of the sinebow wind-speed color overlay across Earth.',
 );
 export const chemOpacityBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'chemOpacity', {
+  pane.addBinding(earthParams, 'chemOpacity', {
+    index: 3,
     label: 'chemAlpha',
     ...opacitySliderParams,
   }),
@@ -541,7 +547,8 @@ export const oceanStrengthBinding = withTooltip(
   'Multiplier scaling how strongly ocean currents stir marine Particle Life organisms.',
 );
 export const oceanLinesBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'oceanLines', {
+  pane.addBinding(earthParams, 'oceanLines', {
+    index: 4,
     label: 'oceanLines',
     ...opacitySliderParams,
   }),
@@ -549,7 +556,8 @@ export const oceanLinesBinding = withTooltip(
   'Opacity (0%–100%) of animated ocean current streamlines inside marine basins.',
 );
 export const oceanColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'oceanColors', {
+  pane.addBinding(earthParams, 'oceanColors', {
+    index: 5,
     label: 'oceanColors',
     ...opacitySliderParams,
   }),
@@ -557,7 +565,8 @@ export const oceanColorsBinding = withTooltip(
   'Opacity (0%–100%) of ocean current velocity color shading inside marine basins.',
 );
 export const tempColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'tempColors', {
+  pane.addBinding(earthParams, 'tempColors', {
+    index: 6,
     label: 'tempColors',
     ...opacitySliderParams,
   }),
@@ -582,7 +591,8 @@ export const tempStrengthBinding = withTooltip(
   'Multiplier scaling how strongly regional Earth temperature gradients modulate Chemistry, Life, and Minerals.',
 );
 export const uvColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'uvColors', {
+  pane.addBinding(earthParams, 'uvColors', {
+    index: 7,
     label: 'uvColors',
     ...opacitySliderParams,
   }),
@@ -607,7 +617,8 @@ export const uvStrengthBinding = withTooltip(
   'Multiplier scaling how strongly live Earth UV radiation drives fixation, photodamage, mutagenesis, and photochemistry.',
 );
 export const lifeOpacityBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'lifeOpacity', {
+  pane.addBinding(earthParams, 'lifeOpacity', {
+    index: 8,
     label: 'lifeAlpha',
     ...opacitySliderParams,
   }),
@@ -615,7 +626,8 @@ export const lifeOpacityBinding = withTooltip(
   'Opacity (0%–100%) of emergent Life organisms & protocell lipid bilayers across oceans and continents.',
 );
 export const mineralOpacityBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'mineralOpacity', {
+  pane.addBinding(earthParams, 'mineralOpacity', {
+    index: 9,
     label: 'minAlpha',
     ...opacitySliderParams,
   }),
@@ -724,7 +736,7 @@ export const resetViewBtn = withTooltip(
 
 // Classic Particle Life mechanics from the original fork (51bc381) running on Ocean Currents
 const oceanLifeFolder = withTooltip(
-  pane.addFolder({
+  advanced.addFolder({
     title: 'Ocean Life (Original Fork)',
     expanded: false,
   }),
@@ -794,7 +806,7 @@ const constantTips: Record<string, [string, string]> = {
 };
 
 const constantsFolder = withTooltip(
-  pane.addFolder({ title: 'Constants', expanded: false }),
+  advanced.addFolder({ title: 'Constants', expanded: false }),
   'Chemistry Constants',
   'Structural Chemistry settings applied when starting a new simulation.',
 );
@@ -815,7 +827,7 @@ for (const param in optionParams) {
 }
 
 const optionsFolder = withTooltip(
-  pane.addFolder({
+  advanced.addFolder({
     title: 'Chemistry Options',
     expanded: false,
   }),
@@ -994,7 +1006,7 @@ export function bindConfigPersistence(onChange: () => void) {
 
 // 2D Periodic Table legend folder
 const periodicFolder = withTooltip(
-  pane.addFolder({
+  advanced.addFolder({
     title: '2D Periodic Table',
     expanded: false,
   }),
@@ -1068,7 +1080,7 @@ export const globalPerformanceParams = {
 };
 
 const performanceTimes = withTooltip(
-  pane.addFolder({
+  advanced.addFolder({
     title: 'Performance Times',
     expanded: false,
   }),
