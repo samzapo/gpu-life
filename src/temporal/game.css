@@ -94,6 +94,15 @@
   color: #c1d3df;
   font-size: 14px;
 }
+#game-losses p {
+  margin: 6px 0 0;
+  color: #c1d3df;
+  font-size: 13px;
+}
+#game-losses b {
+  color: #edf6fc;
+  margin-right: 4px;
+}
 #game-confirm,
 #game-result {
   display: flex;

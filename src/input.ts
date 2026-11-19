@@ -44,6 +44,7 @@ if (hudHeader && controlsHud) {
 let activeViewState: GlobeViewState | null = null;
 let activeD3Proj: d3Geo.GeoProjection | null = null;
 let onViewMutated: (() => void) | null = null;
+let onWheelZoom: ((factor: number, x: number, y: number) => void) | undefined;
 let cameraLocked = false;
 let currentMouseTool: 'globe' | 'attract' | 'repel' = 'globe';
 
@@ -51,9 +52,11 @@ export function bindGlobeInput(
   viewState: GlobeViewState,
   getProj: () => d3Geo.GeoProjection | null,
   notifyViewChange: () => void,
+  wheelZoom: (factor: number, x: number, y: number) => void,
 ) {
   activeViewState = viewState;
   onViewMutated = notifyViewChange;
+  onWheelZoom = wheelZoom;
   activeD3Proj = getProj();
 }
 
@@ -98,25 +101,25 @@ function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
   onViewMutated?.();
 }
 
-function applyZoomAt(factor: number, anchorX: number, anchorY: number) {
-  if (!activeViewState || cameraLocked || !Number.isFinite(factor) || factor <= 0) return;
-  const oldScale = activeViewState.scale;
+export function zoomViewAt(view: GlobeViewState, factor: number, anchorX: number, anchorY: number) {
+  if (!Number.isFinite(factor) || factor <= 0) return false;
+  const oldScale = view.scale;
   const newScale = Math.max(120, Math.min(30000, oldScale * factor));
-  if (oldScale === newScale) return;
+  if (oldScale === newScale) return false;
   const ratio = newScale / oldScale;
 
   if (
-    !PROJECTIONS[activeViewState.projectionId].sphericalDrag ||
-    Math.abs(activeViewState.pan[0]) > 1 ||
-    Math.abs(activeViewState.pan[1]) > 1
+    !PROJECTIONS[view.projectionId].sphericalDrag ||
+    Math.abs(view.pan[0]) > 1 ||
+    Math.abs(view.pan[1]) > 1
   ) {
-    const cx = activeViewState.width * 0.5 + activeViewState.pan[0];
-    const cy = activeViewState.height * 0.5 + activeViewState.pan[1];
-    activeViewState.pan[0] = anchorX - (anchorX - cx) * ratio - activeViewState.width * 0.5;
-    activeViewState.pan[1] = anchorY - (anchorY - cy) * ratio - activeViewState.height * 0.5;
+    const cx = view.width * 0.5 + view.pan[0];
+    const cy = view.height * 0.5 + view.pan[1];
+    view.pan[0] = anchorX - (anchorX - cx) * ratio - view.width * 0.5;
+    view.pan[1] = anchorY - (anchorY - cy) * ratio - view.height * 0.5;
   }
-  activeViewState.scale = newScale;
-  onViewMutated?.();
+  view.scale = newScale;
+  return true;
 }
 
 interface PointerPt {
@@ -236,7 +239,7 @@ window.addEventListener('pointermove', (event) => {
     }
     if (prevPinchDist > 12 && dist > 12) {
       const factor = Math.max(0.75, Math.min(1.35, dist / prevPinchDist));
-      applyZoomAt(factor, midX, midY);
+      if (!cameraLocked && activeViewState && zoomViewAt(activeViewState, factor, midX, midY)) onViewMutated?.();
     }
 
     prevPinchDist = dist;
@@ -294,7 +297,7 @@ window.addEventListener(
     if (isUiTarget(event.target)) return;
     event.preventDefault();
     const factor = Math.exp(-event.deltaY * 0.0011);
-    applyZoomAt(factor, event.clientX, event.clientY);
+    if (!cameraLocked) onWheelZoom?.(factor, event.clientX, event.clientY);
   },
   { passive: false },
 );

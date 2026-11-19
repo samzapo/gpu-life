@@ -1133,6 +1133,42 @@ fn attemptMineralCrystallize(
     return BioStepResult(vec4f(0.0), vec4f(0.0));
 }
 
+// Dead material remains in the chemistry phase. The temporal pass consumes the
+// one-tick marker. Negative multiples of four decode as phase zero everywhere.
+const DEATH_STARVATION = 1u;
+const DEATH_CROWDING = 2u;
+const DEATH_PREDATION = 3u;
+const DEATH_DECOMPOSITION = 4u;
+const DEATH_POISON = 5u;
+const DEATH_MEMBRANE = 6u;
+const DEATH_TEMPERATURE = 7u;
+const DEATH_UV = 8u;
+const DEATH_DESICCATION = 9u;
+
+fn deadCell(cause: u32) -> vec4f {
+    return vec4f(0.0, 0.0, 0.0, -4.0 * f32(cause));
+}
+
+// For energy-triggered decay, ask whether removing the environmental penalties
+// would have cleared the lethal threshold on this tick. Report the largest
+// contributor in that case. Test crowding next, then ordinary energy depletion.
+fn energyDeath(rawEnergy: f32, energyBeforeStep: f32, threshold: f32, dt: f32, crowd: f32, stress: vec4f) -> u32 {
+    // A cell can persist below the threshold for several ticks before it dies.
+    // In that case also recognize a pressure that kept it from recovering.
+    let cutoff = select(threshold, energyBeforeStep, rawEnergy <= energyBeforeStep && energyBeforeStep < threshold);
+    let largest = max(max(stress.x, stress.y), max(stress.z, stress.w));
+    let crowded = crowd > 0.0 && rawEnergy + crowd * dt > cutoff;
+    if (crowded && crowd >= largest) { return DEATH_CROWDING; }
+    if (largest > 0.0 && rawEnergy + dot(stress, vec4f(1.0)) * dt > cutoff) {
+        if (largest == stress.x) { return DEATH_POISON; }
+        if (largest == stress.y) { return DEATH_TEMPERATURE; }
+        if (largest == stress.z) { return DEATH_UV; }
+        return DEATH_DESICCATION;
+    }
+    if (crowded) { return DEATH_CROWDING; }
+    return DEATH_STARVATION;
+}
+
 fn finalizeBioUnified(
     pi: u32,
     pos: vec3f,
@@ -1464,8 +1500,14 @@ fn finalizeBioUnified(
         if (nextEnergy <= 0.14 || poi >= 0.85 || orphanStress || simpleHostStress) {
             let pDissolve = select(clamp(0.65 * coldLipidStab * dtBio, 0.0, 0.18), clamp(2.4 * dtBio, 0.0, 0.35), simpleHostStress);
             if (hashFloat(pi, frameU, 31u) < pDissolve) {
+                var cause = DEATH_MEMBRANE;
+                if (poi >= 0.85) { cause = DEATH_POISON; }
+                else if (nextEnergy <= 0.14) {
+                    let stress = vec4f(poisonPenalty, heatLipidStress, 0.0, landPenalty);
+                    cause = energyDeath(eDiffused - (upkeep + dot(stress, vec4f(1.0))) * dtVit, eDiffused, 0.14, dtVit, 0.0, stress);
+                }
                 return BioStepResult(
-                    vec4f(0.0),
+                    deadCell(cause),
                     vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.9, -0.7)),
                 );
             }
@@ -1474,7 +1516,7 @@ fn finalizeBioUnified(
             let pBreach = clamp(0.20 * (acc.nearPredThreat - 1.0) * select(1.0, 0.42, hostIsGrad) * dtBio, 0.0, 0.05);
             if (hashFloat(pi, frameU, 32u) < pBreach) {
                 return BioStepResult(
-                    vec4f(0.0),
+                    deadCell(DEATH_PREDATION),
                     vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.85, -0.8)),
                 );
             }
@@ -1616,7 +1658,7 @@ fn finalizeBioUnified(
                 let repelLen = length(acc.predRepelDir);
                 let expel = select(vec3f(0.0), -(acc.predRepelDir / repelLen) * 1.4, repelLen > 1e-4);
                 return BioStepResult(
-                    vec4f(0.0),
+                    deadCell(DEATH_PREDATION),
                     vec4f(expel, packDeltaActGlow(0.8, -0.9)),
                 );
             }
@@ -1639,7 +1681,7 @@ fn finalizeBioUnified(
             let decRoll = hashFloat(pi, frameU, 23u);
             if (decRoll < 0.80) {
                 return BioStepResult(
-                    vec4f(0.0),
+                    deadCell(DEATH_DECOMPOSITION),
                     vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.85, -0.85)),
                 );
             } else {
@@ -1657,8 +1699,10 @@ fn finalizeBioUnified(
     if (nextEnergy <= decayThreshold || poi >= 0.90) {
         let pDecay = clamp(select(0.45, 0.14, isGradNow) * dtBio, 0.0, 0.14);
         if (hashFloat(pi, frameU, 24u) < pDecay) {
+            let depletion = energyDeath(eDiffused + netDE * dtVit, eDiffused, decayThreshold, dtVit, crowdPenalty,
+                vec4f(poisonPenalty, thermStressPenalty, uvStressPenalty, landPenalty));
             return BioStepResult(
-                vec4f(0.0),
+                deadCell(select(depletion, DEATH_POISON, poi >= 0.90)),
                 vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.9, -0.7)),
             );
         }

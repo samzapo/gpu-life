@@ -1,3 +1,5 @@
+import { colonyLosses } from './losses';
+import { modeEnabled, saveMode } from './modes';
 import panel from './panel.html?raw';
 import './game.css';
 import {
@@ -18,7 +20,8 @@ interface Globe {
   snapshot(tick: number): Promise<Snapshot>;
   restore(state: Snapshot): void;
   step(force: Force | undefined, bloom: Bloom | undefined): void;
-  focus(point: Point, fraction: number): void;
+  focus(point: Point): void;
+  focusing(): boolean;
   forceStarted(): void;
   leaveFocus(): void;
   continueRescue(colony: Colony, baseline: Snapshot, outcome: Snapshot): void;
@@ -37,6 +40,8 @@ type Incident = {
   original: Snapshot;
   start: number;
   best: number;
+  originalLosses: string;
+  committedLosses: string;
 };
 const seconds = (ticks: number) => (ticks / ticksPerSecond).toFixed(1) + 's';
 const element = <T extends HTMLElement>(id: string) =>
@@ -99,10 +104,7 @@ export class TemporalGame {
     element('game-toggle').onclick = () => {
       if (this.mode === 'off') this.watch();
       else this.close();
-      const url = new URL(location.href);
-      if (this.mode === 'off') url.searchParams.delete('game');
-      else url.searchParams.set('game', '1');
-      history.replaceState(null, '', url);
+      saveMode('game', this.mode !== 'off');
     };
     this.panel.addEventListener('click', (event) => {
       const action = (event.target as HTMLElement).closest('button')?.dataset
@@ -194,7 +196,8 @@ export class TemporalGame {
       this.release();
       this.nextStepMs = 0;
     });
-    if (new URLSearchParams(location.search).get('game') === '1') this.watch();
+    if (modeEnabled('game')) this.watch();
+    else this.display();
   }
 
   unavailable(message: string) {
@@ -205,7 +208,9 @@ export class TemporalGame {
     if (this.mode !== 'off') this.watch();
   }
   get canInspect() {
-    return this.mode === 'off' || this.mode === 'watch' || this.inspectionPaused;
+    return (
+      this.mode === 'off' || this.mode === 'watch' || this.inspectionPaused
+    );
   }
   get inspectionPaused() {
     return (
@@ -386,6 +391,7 @@ export class TemporalGame {
         state.life.byteLength +
         state.particles.byteLength +
         state.episodes.byteLength +
+        state.deathHistory.byteLength +
         (state.inspection?.valence.byteLength ?? 0) +
         (state.inspection?.bioForce.byteLength ?? 0);
       // Space for both the original recording and an edited branch.
@@ -420,8 +426,7 @@ export class TemporalGame {
         countSurvivors(state, exposed.colony.members, exposed.baseline) <=
         exposed.colony.members.length * 0.42
       ) {
-        this.beginIncident(exposed.colony, exposed.baseline, state);
-        return;
+        if (this.beginIncident(exposed.colony, exposed.baseline, state)) return;
       }
     }
     const previous = this.history.at(-2)!.state;
@@ -434,8 +439,7 @@ export class TemporalGame {
         countSurvivors(previous, colony.members, reference.state) <=
           colony.members.length * 0.7
       ) {
-        this.beginIncident(colony, reference.state, state);
-        return;
+        if (this.beginIncident(colony, reference.state, state)) return;
       }
     }
     // Seed a geographically fixed bloom near a compact, living colony.
@@ -475,6 +479,13 @@ export class TemporalGame {
   }
 
   private beginIncident(colony: Colony, healthy: Snapshot, original: Snapshot) {
+    const losses = colonyLosses(
+      colony.members,
+      healthy,
+      original,
+      this.history.map((row) => row.state),
+    );
+    if (!losses.qualifies) return false;
     const anchor =
       this.history
         .filter((row) => row.state.tick <= healthy.tick - ticksPerSecond)
@@ -485,36 +496,37 @@ export class TemporalGame {
       original,
       start: anchor.state.tick,
       best: 0,
+      originalLosses: losses.summary,
+      committedLosses: '',
     };
     this.lastHealthyCount = countSurvivors(original, colony.members, healthy);
     this.mode = 'film';
-    this.filmStartMs = performance.now();
+    this.filmStartMs = 0;
     this.lastFilmTick = -1;
     this.world.settingsLocked(true, true);
     this.world.highlight(colony, healthy);
-    this.world.focus(colony.center, 0);
+    this.world.focus(colony.center);
     this.display();
+    return true;
   }
 
   private film(nowMs: number) {
     const incident = this.incident!;
+    if (this.world.focusing()) {
+      element('game-message').textContent = 'Locating the colony…';
+      return;
+    }
+    if (!this.filmStartMs) this.filmStartMs = nowMs;
     const elapsed = (nowMs - this.filmStartMs) / 1000;
-    this.world.focus(incident.colony.center, Math.min(1, elapsed / 1.05));
     const caption =
-      elapsed < 1
-        ? 'Locating the colony…'
-        : elapsed < 3
-          ? 'Original timeline · observing the collapse'
-          : 'Rewinding to the intervention window…';
+      elapsed < 2
+        ? 'Original timeline · observing the collapse'
+        : 'Rewinding to the intervention window…';
     const message = element('game-message');
     if (message.textContent !== caption) message.textContent = caption;
     const span = incident.original.tick - incident.start;
     const phase =
-      elapsed < 1
-        ? 0
-        : elapsed < 3
-          ? (elapsed - 1) / 2
-          : Math.max(0, 1 - (elapsed - 3) / 1.7);
+      elapsed < 2 ? elapsed / 2 : Math.max(0, 1 - (elapsed - 2) / 1.7);
     const target = Math.round(incident.start + phase * span);
     this.tick = target;
     if (target !== this.lastFilmTick) {
@@ -539,7 +551,7 @@ export class TemporalGame {
       } else this.world.restore(before);
       this.lastFilmTick = target;
     }
-    if (elapsed >= 4.7) {
+    if (elapsed >= 3.7) {
       this.mode = 'confirm';
       this.seek(incident.start);
       this.display();
@@ -606,6 +618,17 @@ export class TemporalGame {
     this.release();
     if (this.mode !== 'commit') return;
     this.mode = 'result';
+    const incident = this.incident!;
+    const outcome = this.saved(this.endTick())!;
+    const checkpoints = this.history
+      .map((row) => this.saved(row.state.tick))
+      .filter((state): state is Snapshot => !!state);
+    incident.committedLosses = colonyLosses(
+      incident.colony.members,
+      incident.healthy,
+      outcome,
+      checkpoints,
+    ).summary;
     const score = this.runScore();
     const gain = Math.max(0, score - this.incident!.best);
     this.incident!.best = Math.max(this.incident!.best, score);
@@ -708,6 +731,14 @@ export class TemporalGame {
       committed = mode === 'commit';
     const incident = this.incident;
     this.panel.hidden = mode === 'off';
+    const report = element('game-losses');
+    report.hidden = mode !== 'confirm' && mode !== 'result';
+    if (!report.hidden && incident) {
+      element('original-losses').textContent = incident.originalLosses;
+      element('committed-report').hidden = mode !== 'result';
+      if (mode === 'result')
+        element('committed-losses').textContent = incident.committedLosses;
+    }
     document.body.dataset.temporal = mode;
     element('game-toggle').setAttribute('aria-pressed', String(mode !== 'off'));
     element('event-flash').hidden = mode !== 'film';

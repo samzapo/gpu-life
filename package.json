@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test:temporal": "node --experimental-strip-types --test tests/temporal.test.mjs",
     "format": "prettier --write \"./src/**/*.{ts,tsx,json,css,md}\"",
     "lint": "eslint \"./src/**/*.{ts,tsx}\"",
     "lint:fix": "eslint \"./src/**/*.{ts,tsx}\" --fix"

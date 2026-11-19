@@ -50,6 +50,15 @@ canvas {
   user-select: none;
 }
 
+#projection-fade {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+  background: #000005;
+  opacity: 0;
+}
+
 #githubBtn {
   position: absolute;
   z-index: 10;

@@ -41,8 +41,6 @@ export class GlobeTour {
   private episodes = new Uint32Array();
   private members: Membership = new Map();
   private lastColony: Membership = new Map();
-  private rescueScaleRatio = 1;
-  private rescuePanRatio = 0;
 
   get caption() {
     if (this.visit === 'rescue') return 'Rescue site';
@@ -79,11 +77,10 @@ export class GlobeTour {
     this.resetWorld();
   }
 
-  rescue(view: GlobeViewState) {
+  rescue() {
     this.startOrbit();
     this.visit = 'rescue';
-    this.rescueScaleRatio = view.scale / Math.min(view.width, view.height);
-    this.rescuePanRatio = view.pan[1] / view.height;
+
     this.pauseClock();
   }
 
@@ -152,20 +149,11 @@ export class GlobeTour {
         ? 0
         : Math.max(0, (nowMs - this.lastFrameMs) / 1000);
     this.lastFrameMs = nowMs;
-    const previousSeconds = this.elapsedSeconds;
     this.elapsedSeconds += deltaSeconds;
-    const stepSeconds = Math.min(0.25, deltaSeconds);
+    const stepSeconds = Math.min(0.06, deltaSeconds);
     const dimension = Math.min(view.width, view.height);
 
     if (this.visit === 'rescue') {
-      const pullbackSeconds = 1.8;
-      if (previousSeconds < pullbackSeconds) {
-        const fraction = Math.min(1, this.elapsedSeconds / pullbackSeconds);
-        const eased = fraction * fraction * (3 - 2 * fraction);
-        view.scale = dimension * this.rescueScaleRatio * Math.pow(0.7, eased);
-        view.pan = [0, this.rescuePanRatio * view.height * (1 - eased)];
-        return true;
-      }
       if (this.enabled && this.elapsedSeconds >= followSeconds)
         this.startOrbit();
       return false;
@@ -205,7 +193,6 @@ export class GlobeTour {
       Math.hypot(...view.pan) < 0.1
     )
       return false;
-    view.projectionId = 'orthographic';
     view.rotate = [
       wrapDegrees(view.rotate[0] + longitudeDelta * blend),
       view.rotate[1] + latitudeDelta * blend,

@@ -12,6 +12,8 @@ export interface Snapshot {
   particles: Float32Array<ArrayBuffer>;
   life: Float32Array<ArrayBuffer>;
   episodes: Uint32Array<ArrayBuffer>;
+  /** Eight four-bit cause codes per particle, indexed by birth episode. */
+  deathHistory: Uint32Array<ArrayBuffer>;
   inspection?: {
     valence: Float32Array<ArrayBuffer>;
     bioForce: Float32Array<ArrayBuffer>;
@@ -133,12 +135,12 @@ export async function readCheckpoint(
   device: GPUDevice,
   particles: GPUBuffer,
   life: GPUBuffer,
-  episodes: GPUBuffer,
+  tracking: GPUBuffer,
   tick: number,
   frame: number,
   inspection?: { valence: GPUBuffer; bioForce: GPUBuffer },
 ): Promise<Snapshot> {
-  const valenceOffset = particles.size + life.size + episodes.size;
+  const valenceOffset = particles.size + life.size + tracking.size;
   const bioForceOffset = valenceOffset + (inspection?.valence.size ?? 0);
   const staging = device.createBuffer({
     size: bioForceOffset + (inspection?.bioForce.size ?? 0),
@@ -149,11 +151,11 @@ export async function readCheckpoint(
     encoder.copyBufferToBuffer(particles, 0, staging, 0, particles.size);
     encoder.copyBufferToBuffer(life, 0, staging, particles.size, life.size);
     encoder.copyBufferToBuffer(
-      episodes,
+      tracking,
       0,
       staging,
       particles.size + life.size,
-      episodes.size,
+      tracking.size,
     );
     if (inspection) {
       encoder.copyBufferToBuffer(
@@ -174,6 +176,7 @@ export async function readCheckpoint(
     device.queue.submit([encoder.finish()]);
     await staging.mapAsync(GPUMapMode.READ);
     const bytes = staging.getMappedRange().slice(0);
+    const particleCount = life.size / (4 * Float32Array.BYTES_PER_ELEMENT);
     return {
       tick,
       frame,
@@ -194,7 +197,14 @@ export async function readCheckpoint(
       episodes: new Uint32Array(
         bytes,
         particles.size + life.size,
-        episodes.size / 4,
+        particleCount,
+      ),
+      deathHistory: new Uint32Array(
+        bytes,
+        particles.size +
+          life.size +
+          particleCount * Uint32Array.BYTES_PER_ELEMENT,
+        particleCount,
       ),
     };
   } finally {

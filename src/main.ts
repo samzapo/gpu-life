@@ -1,3 +1,5 @@
+import { CameraFlight, copyView } from './earth/cameraFlight';
+import { modeEnabled, saveMode } from './temporal/modes';
 import { GlobeTour, coordinates } from './earth/globeTour';
 import { TemporalGame } from './temporal/game';
 import { findColonies, isAlive, readCheckpoint, type Bloom, type Force } from './temporal/world';
@@ -5,6 +7,7 @@ import haloShader from './temporal/halo.wgsl?raw';
 import gameFieldShader from './temporal/field.wgsl?raw';
 import {
   bindGlobeInput,
+  zoomViewAt,
   lockGlobeInput,
   mouseSphere,
   refreshBoundProjection,
@@ -401,6 +404,10 @@ const viewState: GlobeViewState = {
   height: window.innerHeight,
 };
 
+const camera = new CameraFlight();
+const projectionFade = document.getElementById('projection-fade')!;
+let persistDestination = false;
+let wheelZooming = false;
 let d3Proj = buildConfiguredD3Projection(viewState);
 let earthFeatures: EarthTopoFeatures | null = null;
 let currentWindGrid: WindGrid = createEmptyWindGrid();
@@ -654,6 +661,7 @@ function syncUrlStateDebounced() {
 }
 
 function exportCurrentConfig(): SimConfigV1 {
+  const view = persistDestination && camera.target ? camera.target : viewState;
   return {
     v: 1,
     engine,
@@ -693,7 +701,7 @@ function exportCurrentConfig(): SimConfigV1 {
     },
     earth: {
       viewLayer: earthParams.viewLayer,
-      projection: earthParams.projection,
+      projection: view.projectionId,
       windLevel: earthParams.windLevel,
       vortex: earthParams.vortex,
       windStrength: earthParams.windStrength,
@@ -721,9 +729,9 @@ function exportCurrentConfig(): SimConfigV1 {
       mouseTool: earthParams.mouseTool,
     },
     view: {
-      rotate: [...viewState.rotate],
-      pan: [...viewState.pan],
-      scale: viewState.scale,
+      rotate: [...view.rotate],
+      pan: [...view.pan],
+      scale: view.scale,
     },
   };
 }
@@ -779,6 +787,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   let nextWindLevel: WindLevelId | null = null;
   let nextViewLayer: ViewLayerMode | null = null;
   let projUpdated = false;
+  const importedView = copyView(viewState);
 
   if (cfg.engine && cfg.engine in engines) {
     engine = cfg.engine;
@@ -861,8 +870,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
       nextViewLayer = e.viewLayer;
     }
     if (!incidentCameraLocked && e.projection && e.projection !== earthParams.projection) {
-      earthParams.projection = e.projection;
-      viewState.projectionId = e.projection;
+      importedView.projectionId = e.projection;
       projUpdated = true;
     }
     if (e.windLevel && e.windLevel !== earthParams.windLevel) {
@@ -903,15 +911,15 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
 
   if (!incidentCameraLocked && cfg.view) {
     if (cfg.view.rotate) {
-      viewState.rotate = [...cfg.view.rotate];
+      importedView.rotate = [...cfg.view.rotate];
       projUpdated = true;
     }
     if (cfg.view.pan) {
-      viewState.pan = [...cfg.view.pan];
+      importedView.pan = [...cfg.view.pan];
       projUpdated = true;
     }
     if (cfg.view.scale !== undefined) {
-      viewState.scale = Math.max(120, Math.min(30000, cfg.view.scale));
+      importedView.scale = Math.max(120, Math.min(30000, cfg.view.scale));
       projUpdated = true;
     }
   }
@@ -936,7 +944,7 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   syncBioUniformState();
 
   if (projUpdated) {
-    manualProjectionChange();
+    moveCamera(importedView, 1200, true);
   }
 
   updatePeriodicLegend(colourAmt);
@@ -975,7 +983,16 @@ function updateProjectionState(persist = true) {
   if (persist) { syncUrlStateDebounced(); scheduleSaveConfig(); }
 }
 
-bindGlobeInput(viewState, () => d3Proj, manualProjectionChange);
+bindGlobeInput(viewState, () => d3Proj, () => {
+  takeCameraControl();
+  camera.cancel();
+  updateProjectionState();
+}, (factor, x, y) => {
+  const destination = copyView(wheelZooming && camera.target ? camera.target : viewState);
+  if (!zoomViewAt(destination, factor, x, y)) return;
+  moveCamera(destination, 185, true);
+  wheelZooming = true;
+});
 
 function uploadTempToGpu() {
   if (freezeGameWeather && particleBuffers) return;
@@ -2026,19 +2043,12 @@ function setViewLayerChoice(layer: ViewLayerMode) {
 
 function setProjectionChoice(projId: ProjectionId) {
   if (incidentCameraLocked) return;
-  earthParams.projection = projId;
-  projectionSelect.refresh();
-  const spec = PROJECTIONS[projId];
-  viewState.projectionId = projId;
-  viewState.rotate = [...spec.defaultRotate];
-  viewState.pan = [0, 0];
-  viewState.scale = fitScaleForProjection(
-    projId,
-    viewState.rotate,
-    viewState.width,
-    viewState.height,
-  );
-  manualProjectionChange();
+  const destination = copyView(viewState);
+  destination.projectionId = projId;
+  destination.rotate = [...PROJECTIONS[projId].defaultRotate];
+  destination.pan = [0, 0];
+  destination.scale = fitScaleForProjection(projId, destination.rotate, destination.width, destination.height);
+  moveCamera(destination, 1200, true);
 }
 
 const clampOpacity = (val: boolean | number) =>
@@ -2055,7 +2065,7 @@ let frameInFlight = false;
 let deviceLost = false;
 let gamePipeline: GPUComputePipeline | undefined;
 let gameUniform: GPUBuffer | undefined;
-let gameEpisodes: GPUBuffer | undefined;
+let gameTracking: GPUBuffer | undefined;
 let gameGroups: GPUBindGroup[] = [];
 let haloPipeline: GPURenderPipeline | undefined;
 let haloMembers: GPUBuffer | undefined;
@@ -2063,6 +2073,7 @@ let haloGroup: GPUBindGroup | undefined;
 let savedCamera: GlobeViewState | undefined;
 let incidentCameraLocked = false;
 const tour = new GlobeTour();
+tour.setEnabled(modeEnabled('tour'));
 const rescuedEpisodes = new Map<number, number>();
 let incidentEpisodes = new Map<number, number>();
 let nextTourSampleMs = 0;
@@ -2074,14 +2085,16 @@ function syncEpisodeTracking() {
     if (!gameGroups.length) buildGameGroups();
   } else {
     gameGroups = [];
-    gameEpisodes?.destroy();
-    gameEpisodes = undefined;
+    gameTracking?.destroy();
+    gameTracking = undefined;
   }
 }
 
-function manualProjectionChange() {
-  if (incidentCameraLocked) return;
+function takeCameraControl() {
+  persistDestination = false;
+  wheelZooming = false;
   if (tour.enabled || rescuedEpisodes.size || tour.caption) {
+    if (tour.enabled) saveMode('tour', false);
     tour.manualMove();
     tourGeneration++;
     rescuedEpisodes.clear();
@@ -2089,7 +2102,15 @@ function manualProjectionChange() {
     syncEpisodeTracking();
     displayCamera();
   }
-  updateProjectionState();
+}
+
+function moveCamera(destination: GlobeViewState, durationMs: number, manual = false) {
+  if (manual) takeCameraControl();
+  persistDestination = manual;
+  wheelZooming = false;
+  camera.move(viewState, destination, durationMs);
+  tour.pauseClock();
+  if (manual) scheduleSaveConfig();
 }
 
 function displayCamera() {
@@ -2127,8 +2148,8 @@ function buildGameGroups() {
     size: 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  gameEpisodes = device.createBuffer({
-    size: particleAmt * 4,
+  gameTracking = device.createBuffer({
+    size: particleAmt * Uint32Array.BYTES_PER_ELEMENT * 2,
     usage:
       GPUBufferUsage.STORAGE |
       GPUBufferUsage.VERTEX |
@@ -2143,7 +2164,7 @@ function buildGameGroups() {
         lifeStateBuffers![index],
         gameUniform!,
         lifeStateBuffers![1 - index],
-        gameEpisodes!,
+        gameTracking!,
       ].map((buffer, binding) => ({ binding, resource: { buffer } })),
     }),
   );
@@ -2203,7 +2224,7 @@ function observeSandbox(nowMs: number) {
     !device ||
     !particleBuffers ||
     !lifeStateBuffers ||
-    !gameEpisodes
+    !gameTracking
   )
     return;
   const intervalMs = 2000;
@@ -2215,7 +2236,7 @@ function observeSandbox(nowMs: number) {
     device,
     particleBuffers[alternate],
     lifeStateBuffers[alternate],
-    gameEpisodes,
+    gameTracking,
     0,
     frameCount,
   )
@@ -2244,7 +2265,7 @@ function refreshHalo() {
     !watermanFwdTexture ||
     !particleBuffers ||
     !lifeStateBuffers ||
-    !gameEpisodes
+    !gameTracking
   )
     return;
   if (!haloPipeline) {
@@ -2307,25 +2328,26 @@ function refreshHalo() {
 
 const game = new TemporalGame({
   ready: () =>
-    Boolean(device && particleBuffers && lifeStateBuffers && gameEpisodes),
+    Boolean(device && particleBuffers && lifeStateBuffers && gameTracking),
   snapshot(tickNumber) {
     return readCheckpoint(
       device!,
       particleBuffers![alternate],
       lifeStateBuffers![alternate],
-      gameEpisodes!,
+      gameTracking!,
       tickNumber,
       frameCount,
       { valence: valenceBuffer!, bioForce: bioForceBuffer! },
     );
   },
   restore(state) {
-    if (!device || !particleBuffers || !lifeStateBuffers || !gameEpisodes)
+    if (!device || !particleBuffers || !lifeStateBuffers || !gameTracking)
       return;
     tooltipManager.invalidateInspectionFrame();
     device.queue.writeBuffer(particleBuffers[alternate], 0, state.particles);
     device.queue.writeBuffer(lifeStateBuffers[alternate], 0, state.life);
-    device.queue.writeBuffer(gameEpisodes, 0, state.episodes);
+    device.queue.writeBuffer(gameTracking, 0, state.episodes);
+    device.queue.writeBuffer(gameTracking, state.episodes.byteLength, state.deathHistory);
     if (state.inspection && valenceBuffer && bioForceBuffer) {
       device.queue.writeBuffer(valenceBuffer, 0, state.inspection.valence);
       device.queue.writeBuffer(bioForceBuffer, 0, state.inspection.bioForce);
@@ -2334,33 +2356,14 @@ const game = new TemporalGame({
   },
   step: stepWorld,
   forceStarted: () => tooltipManager.cancelInspection(),
-  focus(point, fraction) {
-    if (!savedCamera) {
-      savedCamera = {
-        ...viewState,
-        rotate: [...viewState.rotate],
-        pan: [...viewState.pan],
-      };
-      minimizeDisplay();
-    }
+  focus(point) {
+    savedCamera = copyView(viewState);
     const [longitude, latitude] = coordinates(point);
-    const ease = fraction * fraction * (3 - 2 * fraction);
-    const delta = ((-longitude - savedCamera.rotate[0] + 540) % 360) - 180;
-    viewState.projectionId = 'orthographic';
-    viewState.rotate = [
-      savedCamera.rotate[0] + delta * ease,
-      savedCamera.rotate[1] + (-latitude - savedCamera.rotate[1]) * ease,
-      savedCamera.rotate[2] * (1 - ease),
-    ];
-    const targetScale = Math.min(viewState.width, viewState.height) * 2.45;
-    viewState.scale =
-      savedCamera.scale * Math.pow(targetScale / savedCamera.scale, ease);
-    viewState.pan = [
-      savedCamera.pan[0] * (1 - ease),
-      savedCamera.pan[1] * (1 - ease) - viewState.height * 0.11 * ease,
-    ];
-    updateProjectionState(false);
+    minimizeDisplay();
+    moveCamera({ ...viewState, projectionId: 'orthographic', rotate: [-longitude, -latitude, 0],
+      scale: Math.min(viewState.width, viewState.height) * 2.45, pan: [0, -viewState.height * 0.11] }, 1450);
   },
+  focusing: () => camera.active,
   highlight(colony, baseline) {
     incidentEpisodes = new Map(
       colony.members.map((index) => [index, baseline.episodes[index]]),
@@ -2376,7 +2379,8 @@ const game = new TemporalGame({
         rescuedEpisodes.set(index, outcome.episodes[index]);
     }
     savedCamera = undefined;
-    tour.rescue(viewState);
+    tour.rescue();
+    moveCamera({ ...viewState, scale: viewState.scale * 0.7, pan: [0, 0] }, 1800);
     displayCamera();
   },
   observeColonies(colonies, state) {
@@ -2388,10 +2392,8 @@ const game = new TemporalGame({
       refreshHalo();
     }
     if (!savedCamera) return;
-    const { projectionId, rotate, pan, scale } = savedCamera;
-    Object.assign(viewState, { projectionId, rotate, pan, scale });
+    moveCamera(savedCamera, 2100);
     savedCamera = undefined;
-    updateProjectionState(false);
   },
   project(point) {
     const location = coordinates(point);
@@ -2443,12 +2445,17 @@ const game = new TemporalGame({
 document.getElementById('tour-toggle')!.onclick = () => {
   if (incidentCameraLocked) return;
   tour.setEnabled(!tour.enabled);
+  saveMode('tour', tour.enabled);
   tourGeneration++;
   nextTourSampleMs = 0;
   syncEpisodeTracking();
   displayCamera();
 };
-document.addEventListener('visibilitychange', () => tour.pauseClock());
+displayCamera();
+document.addEventListener('visibilitychange', () => {
+  camera.pauseClock();
+  tour.pauseClock();
+});
 
 const tooltipManager = new TooltipManager({
   isEnabled: () => earthParams.tooltips && game.canInspect,
@@ -2756,13 +2763,12 @@ window.complexLife = {
   }),
   setViewState: (patch: Partial<GlobeViewState>) => {
     if (incidentCameraLocked) return;
-    if (patch.projectionId) viewState.projectionId = patch.projectionId;
-    if (patch.rotate) viewState.rotate = [...patch.rotate];
-    if (patch.pan) viewState.pan = [...patch.pan];
-    if (typeof patch.scale === 'number') viewState.scale = patch.scale;
-    earthParams.projection = viewState.projectionId;
-    projectionSelect.refresh();
-    manualProjectionChange();
+    const destination = copyView(viewState);
+    if (patch.projectionId) destination.projectionId = patch.projectionId;
+    if (patch.rotate) destination.rotate = [...patch.rotate];
+    if (patch.pan) destination.pan = [...patch.pan];
+    if (patch.scale && patch.scale > 0) destination.scale = patch.scale;
+    moveCamera(destination, 1000, true);
   },
   readParticles: (count: number = 16) =>
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
@@ -3348,12 +3354,12 @@ function render(commandEncoder: GPUCommandEncoder) {
     }
   }
 
-  if (haloPipeline && haloMembers && haloGroup && gameEpisodes && particleBuffers && lifeStateBuffers) {
+  if (haloPipeline && haloMembers && haloGroup && gameTracking && particleBuffers && lifeStateBuffers) {
     passEncoder.setPipeline(haloPipeline);
     passEncoder.setBindGroup(0,haloGroup);
     passEncoder.setVertexBuffer(0,particleBuffers[alternate]);
     passEncoder.setVertexBuffer(1,lifeStateBuffers[alternate]);
-    passEncoder.setVertexBuffer(2,gameEpisodes);
+    passEncoder.setVertexBuffer(2,gameTracking);
     passEncoder.setVertexBuffer(3,haloMembers);
     passEncoder.draw(6,particleAmt);
   }
@@ -3415,8 +3421,8 @@ function startWorld() {
   incidentEpisodes.clear();
   refreshHalo();
   displayCamera();
-  gameEpisodes?.destroy();
-  gameEpisodes = undefined;
+  gameTracking?.destroy();
+  gameTracking = undefined;
   gameGroups = [];
   particleBuffers?.[0].destroy();
   particleBuffers?.[1].destroy();
@@ -4017,12 +4023,18 @@ function update() {
   lastTime = start;
 
   syncCanvasDimensions();
-  let cameraMoving = false;
-  if (!document.hidden && (game.mode === 'watch' || game.mode === 'off')) {
-    cameraMoving = tour.frame(start, viewState);
-    if (cameraMoving) updateProjectionState(false);
+  const ambient = game.mode === 'watch' || game.mode === 'off';
+  if (ambient && tour.enabled && !camera.active && viewState.projectionId !== 'orthographic')
+    moveCamera({ ...viewState, projectionId: 'orthographic' }, 750);
+  let cameraMoving = !document.hidden && camera.frame(start, viewState);
+  if (!document.hidden && ambient) {
+    if (!cameraMoving) cameraMoving = tour.frame(start, viewState);
     observeSandbox(start);
     if (tour.enabled || rescuedEpisodes.size) displayCamera();
+  }
+  if (cameraMoving) {
+    projectionFade.style.opacity = String(camera.opacity);
+    updateProjectionState(false);
   }
 
   if (
@@ -4475,18 +4487,9 @@ coastlinesBinding.on('change', () => {
 
 resetViewBtn.on('click', () => {
   if (incidentCameraLocked) return;
-  earthParams.projection = 'orthographic';
-  suppressPaneEvents = true;
-  projectionSelect.refresh();
-  suppressPaneEvents = false;
-  viewState.projectionId = 'orthographic';
-  viewState.rotate = [...PROJECTIONS.orthographic.defaultRotate];
-  viewState.pan = [0, 0];
-  viewState.scale = Math.max(
-    140,
-    Math.round(423 * Math.min(viewState.width / 1280, viewState.height / 800) || 423),
-  );
-  manualProjectionChange();
+  moveCamera({ ...viewState, projectionId: 'orthographic',
+    rotate: [...PROJECTIONS.orthographic.defaultRotate], pan: [0, 0],
+    scale: Math.max(140, Math.round(423 * Math.min(viewState.width / 1280, viewState.height / 800))) }, 1200, true);
 });
 
 setInterval(() => {
