@@ -67,9 +67,19 @@
   top: max(12px, env(safe-area-inset-top));
   left: 66px;
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: auto auto auto;
   align-items: start;
   gap: 6px;
+}
+
+#music-toggle[aria-pressed='true'] {
+  color: #f3c8ff;
+  border-color: rgba(255, 42, 133, 0.72);
+  background: rgba(26, 6, 32, 0.9);
+  box-shadow:
+    0 0 calc(10px + var(--rms, 0) * 18px) rgba(255, 42, 133, 0.42),
+    inset 0 0 12px rgba(0, 240, 255, 0.14);
+  text-shadow: 0 0 8px rgba(255, 42, 133, 0.65);
 }
 
 #tour-caption {
@@ -538,7 +548,7 @@ body:is(
     padding: 6px 11px;
   }
   #githubBtn {
-    top: 108px;
+    top: 148px;
     width: 28px;
     height: 28px;
   }

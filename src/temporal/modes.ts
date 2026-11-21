@@ -1,4 +1,4 @@
-type ModeSwitch = 'game' | 'tour';
+type ModeSwitch = 'game' | 'tour' | 'music';
 
 export function modeEnabled(key: ModeSwitch) {
   const value = new URL(location.href).searchParams.get(key);

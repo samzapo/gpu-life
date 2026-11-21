@@ -2,6 +2,12 @@ import { CameraFlight, copyView } from './earth/cameraFlight';
 import { modeEnabled, saveMode } from './temporal/modes';
 import { GlobeTour, coordinates } from './earth/globeTour';
 import { TemporalGame } from './temporal/game';
+import { GlobeCyberSynth } from './audio/engine';
+import {
+  observeScreenAudioState,
+  type ScreenAudioObservation,
+  type ScreenEnvObservation,
+} from './audio/observer';
 import { findColonies, isAlive, readCheckpoint, type Bloom, type Force } from './temporal/world';
 import haloShader from './temporal/halo.wgsl?raw';
 import gameFieldShader from './temporal/field.wgsl?raw';
@@ -56,6 +62,7 @@ import {
 import {
   buildGlobalTerrainTexture,
   sampleElevationKmLonLat,
+  sampleRidgeMaskLonLat,
 } from './earth/terrainData';
 import {
   buildDivergenceFreeOcean,
@@ -147,6 +154,7 @@ import {
   resetViewBtn,
   seedInput,
   setBioLink,
+  synthVolBinding,
   setEngineDisplay,
   setOceanSim,
   setSim,
@@ -1506,6 +1514,13 @@ declare global {
       };
       getViewState: () => GlobeViewState;
       setViewState: (patch: Partial<GlobeViewState>) => void;
+      setAudioEnabled: (on: boolean) => void;
+      getAudioStatus: () => {
+        enabled: boolean;
+        state: string;
+        volume: number;
+        lastObservation: ScreenAudioObservation | null;
+      };
       readParticles: (count?: number) => Promise<number[][]>;
       readOceanParticles: (count?: number) => Promise<number[][]>;
       readValence: (count?: number) => Promise<number[][]>;
@@ -2620,9 +2635,174 @@ document.getElementById('tour-toggle')!.onclick = () => {
   displayCamera();
 };
 displayCamera();
+
+const cyberSynth = new GlobeCyberSynth();
+cyberSynth.setVolume(params.synthVol);
+cyberSynth.setEnabled(modeEnabled('music'), false);
+const musicToggleBtn = document.getElementById('music-toggle') as HTMLButtonElement | null;
+let lastAudioObserveMs = 0;
+let audioObserveInFlight = false;
+let lastAudioObservation: ScreenAudioObservation | null = null;
+let audioParticleStage: GPUBuffer | undefined;
+let audioLifeStage: GPUBuffer | undefined;
+let audioStageCount = 0;
+
+function syncMusicButtonUi(rms = 0) {
+  if (!musicToggleBtn) return;
+  musicToggleBtn.setAttribute('aria-pressed', String(cyberSynth.isEnabled()));
+  musicToggleBtn.style.setProperty('--rms', Math.min(1, rms * 3.5).toFixed(3));
+}
+syncMusicButtonUi(0);
+
+function setCyberSynthEnabled(on: boolean, fromGesture = false) {
+  cyberSynth.setEnabled(on, fromGesture);
+  saveMode('music', on);
+  syncMusicButtonUi(0);
+}
+
+if (musicToggleBtn) {
+  musicToggleBtn.onclick = () => {
+    setCyberSynthEnabled(!cyberSynth.isEnabled(), true);
+  };
+}
+
+for (const evType of ['pointerdown', 'click', 'keydown'] as const) {
+  window.addEventListener(
+    evType,
+    () => {
+      if (cyberSynth.isEnabled() && cyberSynth.getState() !== 'running') {
+        void cyberSynth.unlock();
+      }
+    },
+    { capture: true, passive: true },
+  );
+}
+
+function sampleCenterEnvForAudio(): ScreenEnvObservation {
+  const ll = d3Proj.invert?.([viewState.width * 0.5, viewState.height * 0.5]);
+  const lonDeg = ll && Number.isFinite(ll[0]) ? ll[0] : 0;
+  const latDeg = ll && Number.isFinite(ll[1]) ? ll[1] : 0;
+
+  const [, , windMag] = sampleWindLonLat(currentWindGrid, lonDeg, latDeg);
+  const [, airSfcK] = sampleWindTempLonLat(currentWindGrid, lonDeg, latDeg);
+  const windSpec = WIND_LEVELS.surface;
+  const windSpeedNorm = Math.max(0, Math.min(1, windMag / Math.max(windSpec.streamMax, 8)));
+
+  let oceanFraction = 0.5;
+  let oceanSpeedNorm = 0.15;
+  let habTempK = airSfcK;
+  if (currentOceanGrid) {
+    const [, , curMag, curMask] = sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg);
+    oceanFraction = Math.max(0, Math.min(1, curMask));
+    oceanSpeedNorm = Math.max(0, Math.min(1, curMag / Math.max(OCEAN_CURRENTS_SPEC.streamMax, 0.4)));
+    const [sstK, sstMask] = sampleOceanSstLonLat(currentOceanGrid, lonDeg, latDeg);
+    if (sstMask > 0.35 && oceanFraction > 0.35) {
+      habTempK = habTempK * (1 - oceanFraction * 0.7) + sstK * (oceanFraction * 0.7);
+    }
+  }
+  const tempNorm = Math.max(0, Math.min(1, (habTempK - 245) / 68));
+
+  const uvSample = sampleLocalUvAtLonLat(lonDeg, latDeg, uvUtcOverrideMs ?? Date.now());
+  const nightFactor = Math.max(0, Math.min(1, 1 - uvSample.uviNow / 0.85));
+
+  const hydroSample = sampleHydroLonLat(currentHydroGrid, lonDeg, latDeg);
+  const rhNorm = Math.max(0, Math.min(1, hydroSample.rhPct / 100));
+  const precipNorm = Math.max(0, Math.min(1, hydroSample.precip3hMm / 8));
+
+  const elevKm = sampleElevationKmLonLat(currentUvGrid, lonDeg, latDeg);
+  const elevKmNorm = Math.max(0, Math.min(1, Math.max(0, elevKm) / 4.5));
+  const ridgeMask = Math.max(0, Math.min(1, sampleRidgeMaskLonLat(lonDeg, latDeg, GRID_TEX_W, GRID_TEX_H)));
+
+  return {
+    windSpeedNorm,
+    oceanFraction,
+    oceanSpeedNorm,
+    tempNorm,
+    nightFactor,
+    rhNorm,
+    precipNorm,
+    elevKmNorm,
+    ridgeMask,
+  };
+}
+
+function observeGlobeAudioCenter(nowMs: number) {
+  if (
+    audioObserveInFlight ||
+    !cyberSynth.isEnabled() ||
+    cyberSynth.getState() !== 'running' ||
+    !device ||
+    !particleBuffers ||
+    !lifeStateBuffers ||
+    nowMs - lastAudioObserveMs < 260
+  ) {
+    return;
+  }
+  lastAudioObserveMs = nowMs;
+  const n = particleAmt;
+  if (n <= 0) return;
+
+  if (audioStageCount !== n || !audioParticleStage || !audioLifeStage) {
+    audioParticleStage?.destroy();
+    audioLifeStage?.destroy();
+    audioParticleStage = device.createBuffer({
+      size: n * particleStride,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'audioParticleStage',
+    });
+    audioLifeStage = device.createBuffer({
+      size: n * valenceStride,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'audioLifeStage',
+    });
+    audioStageCount = n;
+  }
+
+  const pStage = audioParticleStage;
+  const lStage = audioLifeStage;
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(particleBuffers[alternate], 0, pStage, 0, n * particleStride);
+  enc.copyBufferToBuffer(lifeStateBuffers[alternate], 0, lStage, 0, n * valenceStride);
+  device.queue.submit([enc.finish()]);
+
+  audioObserveInFlight = true;
+  const viewCopy = copyView(viewState);
+  const envCopy = sampleCenterEnvForAudio();
+  const seedHash = computeBioSeedHash(params.seed, oceanSeed);
+  const paused = document.hidden;
+
+  void Promise.all([pStage.mapAsync(GPUMapMode.READ), lStage.mapAsync(GPUMapMode.READ)])
+    .then(() => {
+      const pF32 = new Float32Array(pStage.getMappedRange());
+      const lF32 = new Float32Array(lStage.getMappedRange());
+      const obs = observeScreenAudioState(
+        pF32,
+        lF32,
+        n,
+        elements,
+        viewCopy,
+        d3Proj,
+        envCopy,
+        seedHash,
+        paused,
+      );
+      lastAudioObservation = obs;
+      cyberSynth.setObservation(obs);
+    })
+    .catch(() => {
+      // Ignore transient device loss or reset overlaps
+    })
+    .finally(() => {
+      try { pStage.unmap(); } catch { /* ignore */ }
+      try { lStage.unmap(); } catch { /* ignore */ }
+      audioObserveInFlight = false;
+    });
+}
+
 document.addEventListener('visibilitychange', () => {
   camera.pauseClock();
   tour.pauseClock();
+  if (!document.hidden) cyberSynth.resetClock();
 });
 
 const tooltipManager = new TooltipManager({
@@ -2933,6 +3113,13 @@ window.complexLife = {
     if (patch.scale && patch.scale > 0) destination.scale = patch.scale;
     moveCamera(destination, 1000, true);
   },
+  setAudioEnabled: (on: boolean) => setCyberSynthEnabled(on, true),
+  getAudioStatus: () => ({
+    enabled: cyberSynth.isEnabled(),
+    state: cyberSynth.getState(),
+    volume: cyberSynth.getVolume(),
+    lastObservation: lastAudioObservation,
+  }),
   readParticles: (count: number = 16) =>
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readOceanParticles: (count: number = 16) =>
@@ -4400,6 +4587,9 @@ function update() {
   }
 
   tooltipManager.tick();
+  observeGlobeAudioCenter(start);
+  const rmsAudio = cyberSynth.tick(start);
+  if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
 
   const checkValidation = frameCount <= 120 || (frameCount % 60 === 0);
   if (checkValidation) {
@@ -4703,6 +4893,10 @@ bioLinkBinding.on('change', () => {
 bioRateBinding.on('change', () => {
   if (suppressPaneEvents) return;
   syncBioUniformState();
+});
+
+synthVolBinding.on('change', (ev) => {
+  cyberSynth.setVolume(ev.value);
 });
 
 mineralLinkBinding.on('change', () => {

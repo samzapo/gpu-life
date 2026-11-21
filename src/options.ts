@@ -142,6 +142,7 @@ export const params = {
   colours: colourAmt,
   cells: cellAmt,
   seed: defaultSeed,
+  synthVol: 0.65,
 };
 
 function parseOpacityParam(key: string, cachedVal: number | undefined, defaultValue: number): number {
@@ -405,6 +406,17 @@ export const particlesBinding = withTooltip(
   pane.addBinding(params, 'particles', { min: 1, step: 1, index: 0 }),
   'World Particle Pool (N)',
   'Total conserved particles cycling across Chemistry (phase 0), Emergent Biomass (phase 1), and Biogenic Lipid Bilayers (phase 2); updates the world when confirmed.',
+);
+export const synthVolBinding = withTooltip(
+  advanced.addBinding(params, 'synthVol', {
+    label: 'synthVol',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    format: (v: number) => `${Math.round(v * 100)}%`,
+  }),
+  'Cyberpunk Synth Volume',
+  'Master volume (0%–100%) for the dark cyberpunk Web Audio synthesizer driven by the center of the globe.',
 );
 export const seedInput = withTooltip(
   advanced.addBinding(params, 'seed', { view: 'text' }),

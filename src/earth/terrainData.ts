@@ -141,6 +141,20 @@ function getStaticRidgeVentMask(outW: number, outH: number): Float32Array {
   return data;
 }
 
+export function sampleRidgeMaskLonLat(
+  lonDeg: number,
+  latDeg: number,
+  w: number = 360,
+  h: number = 181,
+): number {
+  const data = getStaticRidgeVentMask(w, h);
+  const wrappedLon = ((lonDeg % 360) + 360) % 360;
+  const clampedLat = Math.max(-90, Math.min(90, latDeg));
+  const col = Math.floor((wrappedLon / 360) * w) % w;
+  const row = Math.min(h - 1, Math.max(0, Math.round(((90 - clampedLat) / 180) * (h - 1))));
+  return data[row * w + col] ?? 0;
+}
+
 export function sampleElevationKmLonLat(
   uvGrid: UvGrid | null,
   lonDeg: number,
