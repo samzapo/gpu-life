@@ -18,83 +18,43 @@
   </button>
   <output id="tour-caption" hidden></output>
 </div>
+
+<canvas id="swipe-canvas" aria-hidden="true"></canvas>
 <div id="event-marker" hidden aria-hidden="true"><i></i></div>
-<div id="force-marker" hidden aria-hidden="true"></div>
-<div id="event-flash" aria-hidden="true" hidden>
-  <span>Temporal intervention!</span>
+
+<div id="cyber-hud" hidden aria-live="polite">
+  <div id="cyber-kicker"></div>
+  <div id="cyber-main"></div>
+  <div id="cyber-sub"></div>
 </div>
-<section id="temporal-panel" hidden aria-label="Temporal intervention">
-  <header>
-    <div>
-      <p id="game-mode-name">Temporal intervention</p>
-      <h2 id="game-title">Observing colonies</h2>
-    </div>
-    <strong id="game-score" title="Points earned">0 pts</strong>
-  </header>
-  <p id="game-message" role="status"></p>
-  <div id="game-losses" hidden>
-    <p><b>Original losses</b> <span id="original-losses"></span></p>
-    <p id="committed-report" hidden><b>Committed losses</b> <span id="committed-losses"></span></p>
-  </div>
-  <div id="game-stats" hidden>
-    <span>Survivors <b id="survivors"></b></span
-    ><span>Force left <b id="remaining"></b></span
-    ><span>Event time <b id="event-time"></b></span>
-  </div>
-  <div id="game-confirm" hidden>
-    <button data-action="intervene" class="primary">Intervene</button
-    ><button data-action="skip">Let it pass</button>
-  </div>
-  <div id="game-editor" hidden>
-    <div class="timeline-head">
-      <label for="game-timeline">Timeline</label
-      ><output id="range-label"></output>
-    </div>
-    <div class="timeline-wrap">
-      <div id="plan-track"></div>
-      <input
-        type="range"
-        id="game-timeline"
-        step="1"
-        aria-label="Scrub event timeline"
-      />
-    </div>
-    <div class="game-row transport">
-      <button data-action="play" aria-label="Play or pause">Play</button>
-      <label
-        >Speed
-        <select id="game-speed" aria-label="Playback speed">
-          <option value=".25">¼×</option>
-          <option value=".5">½×</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-        </select></label
-      >
-      <span id="game-tools"
-        ><button data-action="attract" aria-pressed="true">Attract</button
-        ><button data-action="repel" aria-pressed="false">Repel</button></span
-      >
-    </div>
-    <div id="game-planning">
-      <label class="arrival"
-        >Arrive earlier
-        <input
-          id="game-arrival"
-          type="range"
-          min="0"
-          value="0"
-          step="1" /><output id="arrival-label"></output
-      ></label>
-      <div class="game-row edit-actions">
-        <select id="game-strokes" aria-label="Recorded force to remove"></select
-        ><button data-action="delete">Delete</button
-        ><button data-action="commit" class="primary">Commit plan</button>
+
+<section id="temporal-panel" hidden aria-label="Event progress">
+  <div class="cyber-bar-meta">
+    <div class="cyber-left">
+      <div id="attempt-pips" aria-label="Attempts">
+        <i></i><i></i><i></i>
       </div>
+      <span id="game-status-tag">SCANNING</span>
+    </div>
+    <div class="cyber-right">
+      <span id="survivor-readout" hidden></span>
+      <span id="event-clock">0.0s</span>
+      <strong id="game-score" title="Points earned">0 PTS</strong>
     </div>
   </div>
-  <div id="game-result" hidden>
-    <button data-action="retry">Replay &amp; edit</button
-    ><button data-action="continue" class="primary">Continue globe</button>
+  <div class="timeline-wrap">
+    <div id="plan-track"></div>
+    <div id="progress-fill"></div>
+    <input
+      type="range"
+      id="game-timeline"
+      min="0"
+      max="100"
+      value="0"
+      step="1"
+      disabled
+      tabindex="-1"
+      aria-label="Progress through event"
+    />
   </div>
 </section>

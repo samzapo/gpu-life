@@ -2145,7 +2145,7 @@ function buildGameGroups() {
     },
   });
   gameUniform ??= device.createBuffer({
-    size: 32,
+    size: 48,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   gameTracking = device.createBuffer({
@@ -2196,14 +2196,16 @@ function stepWorld(
   const encoder = sharedEncoder ?? device.createCommandEncoder();
   tick(encoder);
   if (gameUniform && gamePipeline && gameGroups[alternate]) {
-    const field = new Float32Array(8);
+    const field = new Float32Array(12);
     if (force) {
-      field.set(force.point);
-      field[3] = force.sign;
+      field.set(force.point, 0);
+      field[3] = force.radius;
+      field.set(force.direction, 4);
+      field[7] = force.strength;
     }
     if (bloom) {
-      field.set(bloom.point, 4);
-      field[7] = bloom.radius;
+      field.set(bloom.point, 8);
+      field[11] = bloom.radius;
     }
     device.queue.writeBuffer(gameUniform, 0, field);
     const pass = encoder.beginComputePass();
@@ -2227,7 +2229,7 @@ function observeSandbox(nowMs: number) {
     !gameTracking
   )
     return;
-  const intervalMs = 2000;
+  const intervalMs = 1000;
   nextTourSampleMs +=
     (1 + Math.floor((nowMs - nextTourSampleMs) / intervalMs)) * intervalMs;
   const generation = tourGeneration;
@@ -2361,7 +2363,7 @@ const game = new TemporalGame({
     const [longitude, latitude] = coordinates(point);
     minimizeDisplay();
     moveCamera({ ...viewState, projectionId: 'orthographic', rotate: [-longitude, -latitude, 0],
-      scale: Math.min(viewState.width, viewState.height) * 2.45, pan: [0, -viewState.height * 0.11] }, 1450);
+      scale: Math.min(viewState.width, viewState.height) * 2.65, pan: [0, -viewState.height * 0.06] }, 1450);
   },
   focusing: () => camera.active,
   highlight(colony, baseline) {

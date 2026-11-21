@@ -1,5 +1,10 @@
 export type Point = [number, number, number];
-export type Force = { point: Point; sign: number; stroke: number };
+export type Force = {
+  point: Point;
+  direction: Point;
+  strength: number;
+  radius: number;
+};
 export type Bloom = {
   point: Point;
   startTick: number;
@@ -22,11 +27,10 @@ export interface Snapshot {
 export interface Colony {
   members: number[];
   center: Point;
+  radius?: number;
 }
 
 export const ticksPerSecond = 20;
-export const budgetTicks = 6 * ticksPerSecond;
-export const earlierSecondsPerForceSecond = 2;
 
 export function isAlive(snapshot: Snapshot, index: number) {
   const phase = Math.round(snapshot.life[index * 4 + 3]) & 3;
@@ -121,9 +125,26 @@ export function findColonies(snapshot: Snapshot, radius: number): Colony[] {
     }
     if (members.length < 5) continue;
     const length = Math.hypot(...center) || 1;
+    const unitCenter: Point = [
+      center[0] / length,
+      center[1] / length,
+      center[2] / length,
+    ];
+    const distances = members
+      .map((memberIndex) => {
+        const offset = memberIndex * 12;
+        return Math.hypot(
+          particles[offset] - unitCenter[0],
+          particles[offset + 1] - unitCenter[1],
+          particles[offset + 2] - unitCenter[2],
+        );
+      })
+      .sort((a, b) => a - b);
+    const colonyRadius = distances[Math.floor(distances.length * 0.85)] ?? 0.06;
     colonies.push({
       members,
-      center: [center[0] / length, center[1] / length, center[2] / length],
+      center: unitCenter,
+      radius: colonyRadius,
     });
   }
   return colonies.sort(
