@@ -47,17 +47,20 @@ struct WindSample {
     refSpeed: f32,
 }
 
-fn sampleWind3D(windTex: texture_2d<f32>, dir: vec3f) -> vec3f {
+fn sampleWind3D(windArr: texture_2d_array<f32>, dir: vec3f, alt01: f32) -> vec3f {
     let n = normalize(dir);
-    let uv = sampleWindTexture(windTex, n);
+    let dims = textureDimensions(windArr, 0);
+    let eq = makeEquirectCoord(n, dims);
+    let uv = sampleWindArrayAtAltCoord(windArr, eq, alt01);
     let eEast = sphereEastBasis(n);
     let eNorth = normalize(cross(n, eEast));
     return uv.x * eEast + uv.y * eNorth;
 }
 
 fn evalWindAndShear(
-    windTex: texture_2d<f32>,
+    windArr: texture_2d_array<f32>,
     pos: vec3f,
+    alt01: f32,
     windStreamMax: f32,
 ) -> WindSample {
     if (sim.vortex <= 0.0 || sim.windStrength <= 0.0) {
@@ -68,23 +71,18 @@ fn evalWindAndShear(
     let eNorth = normalize(cross(pos, eEast));
     let eps = clamp((sim.rMax / R) * 0.55, 0.008, 0.045);
 
-    let w0 = sampleWind3D(windTex, pos);
-    var wE = sampleWind3D(windTex, pos + eps * eEast);
-    var wW = sampleWind3D(windTex, pos - eps * eEast);
-    var wN = sampleWind3D(windTex, pos + eps * eNorth);
-    var wS = sampleWind3D(windTex, pos - eps * eNorth);
+    let w0 = sampleWind3D(windArr, pos, alt01);
+    var wE = sampleWind3D(windArr, pos + eps * eEast, alt01);
+    var wN = sampleWind3D(windArr, pos + eps * eNorth, alt01);
 
     wE -= dot(wE, pos) * pos;
-    wW -= dot(wW, pos) * pos;
     wN -= dot(wN, pos) * pos;
-    wS -= dot(wS, pos) * pos;
 
-    let avgWind = (w0 + 0.5 * (wE + wW + wN + wS)) / 3.0;
-    let dE = wE - wW;
-    let dN = wN - wS;
+    let avgWind = (w0 + 0.5 * (wE + wN)) * 0.5;
+    let dE = (wE - w0) * 2.0;
+    let dN = (wN - w0) * 2.0;
     let shearMs = 0.5 * sqrt(dot(dE, dE) + dot(dN, dN));
     let refSpeed = max(windStreamMax, 10.0);
-    // Physical shear rate scaled against a fixed 22 m/s storm shear scale so higher-altitude jet shear genuinely exceeds gentle surface breeze shear
     let shearRel = (shearMs / 22.0) * sim.windStrength;
     var shearVec = (dE * 0.5 + dN * 0.5);
     shearVec -= dot(shearVec, pos) * pos;
@@ -427,6 +425,10 @@ fn integrateParticle(
     mySlots: vec4f,
     res: ForceResult,
     windSample: WindSample,
+    oc: vec4f,
+    terrainSample: vec4f,
+    chemLife: vec4f,
+    oceanStrength: f32,
     shearStress: f32,
     mouseSphere: vec4f,
     bioReact: vec4f,
@@ -443,6 +445,10 @@ fn integrateParticle(
     let uBody = orthoBasis(p.pos, p.orient);
     let bBody = cross(p.pos, uBody);
 
+    let comp = chemLife.y;
+    let isSeaIce = comp >= 1.5;
+    let isLiquid = comp >= 0.5 && comp < 1.5;
+
     let sP = getSpeciesInfo(u32(p.colour));
     let bondLoad = mySlots.x + mySlots.y + mySlots.z;
     let bondFrac = select(0.0, clamp(bondLoad / max(sP.valence, 1.0), 0.0, 1.0), u32(sP.valence) > 0u);
@@ -452,7 +458,8 @@ fn integrateParticle(
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
     let catAgitation = clamp(bioCleave * 0.85 + length(bioReact.xyz) * 0.12 + shearStress, 0.0, 1.0);
     let tempScale = mix(0.28, 1.0, actGlow.x);
-    let calmFactor = mix(1.0, max(0.04, 1.0 - 0.92 * stab), bondFrac * (1.0 - catAgitation));
+    let phaseCalm = select(1.0, select(0.55, 0.22, isSeaIce), isLiquid);
+    let calmFactor = mix(1.0, max(0.04, 1.0 - 0.92 * stab), bondFrac * (1.0 - catAgitation)) * phaseCalm;
 
     if (sim.temperature > 0.0) {
         let frame = u32(sim.frame);
@@ -464,8 +471,34 @@ fn integrateParticle(
         p.omega += sim.temperature * tempScale * calmFactor * h3 * sqrtDt * 12.0;
     }
 
-    // Live global atmospheric wind force field with coherent low-wind drift & high-shear tearing
-    if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
+    // Mixed fluid advection: Gases ride global winds; liquid & dissolved chemistry ride NOAA ocean currents + terrain runoff; sea ice drifts slowly
+    if (isSeaIce || isLiquid) {
+        let eEast = sphereEastBasis(p.pos);
+        let eNorth = normalize(cross(p.pos, eEast));
+        if (oc.w >= 0.40) {
+            let cur3D = oc.x * eEast + oc.y * eNorth;
+            var cTarget = (cur3D / 0.7) * (0.30 * max(oceanStrength, 0.0)) * smoothstep(0.35, 0.55, oc.w);
+            if (isSeaIce) {
+                cTarget *= 0.22;
+            } else if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
+                cTarget += (windSample.pointWind / windSample.refSpeed) * (0.055 * sim.windStrength);
+            }
+            let cLen = length(cTarget);
+            if (cLen > 1.15) {
+                cTarget *= 1.15 / cLen;
+            }
+            p.vel += (cTarget - p.vel) * clamp(10.0 * sim.dt, 0.0, 0.35);
+        } else {
+            // Continental surface water & wet runoff flow downhill along -∇elevKm toward ocean basins
+            let grad3D = terrainSample.y * eEast + terrainSample.z * eNorth;
+            var rTarget = -grad3D * 0.24;
+            let rLen = length(rTarget);
+            if (rLen > 0.38) {
+                rTarget *= 0.38 / rLen;
+            }
+            p.vel += (rTarget - p.vel) * clamp(8.0 * sim.dt, 0.0, 0.28);
+        }
+    } else if (sim.vortex > 0.0 && sim.windStrength > 0.0) {
         let calmWind = bondFrac * stab * (1.0 - shearStress);
         let windEff = mix(windSample.pointWind, windSample.avgWind, calmWind);
         var wTarget = (windEff / windSample.refSpeed) * (0.45 * sim.windStrength);

@@ -17,12 +17,14 @@ struct VertexOutput {
     @location(5) phaseF: f32,
     @location(6) bioSpeciesF: f32,
     @location(7) lifeState: vec4f,
+    @location(8) nightFactor: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var watermanFwdTex: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> colours: array<f32>;
 @group(0) @binding(3) var<storage, read> matrix: array<f32>;
+@group(0) @binding(4) var uvTex: texture_2d<f32>;
 
 fn safeOrthoStepDiff(
     u: Uniforms,
@@ -91,6 +93,7 @@ fn vertexCommon(
     vertexIndex: u32,
     filterMinerals: bool,
     matchMinerals: bool,
+    shadowPass: bool,
 ) -> VertexOutput {
     var positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
@@ -99,6 +102,7 @@ fn vertexCommon(
 
     let phase = unpackPhase(particle.lifeState.w);
     let bioSp = unpackBioSpecies(particle.lifeState.w);
+    let flightMode = unpackFlightMode(particle.lifeState.w);
     let encapGene = unpackEncapGene(particle.lifeState.w);
     let graduated = unpackGraduated(particle.lifeState.w);
     let phaseF = f32(phase);
@@ -111,7 +115,8 @@ fn vertexCommon(
     }
 
     var output: VertexOutput;
-    let passMismatch = filterMinerals && ((phase == 3u) != matchMinerals);
+    let isShadowBird = (phase == 1u && flightMode == 1u && clamp(particle.chemGlow, 0.0, 1.0) > 0.06);
+    let passMismatch = (shadowPass && !isShadowBird) || (!shadowPass && filterMinerals && ((phase == 3u) != matchMinerals));
     if (passMismatch || layerOpacity <= 0.001) {
         output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
         output.uv = vec2f(0.0);
@@ -122,11 +127,35 @@ fn vertexCommon(
         output.phaseF = phaseF;
         output.bioSpeciesF = bioSpeciesF;
         output.lifeState = particle.lifeState;
+        output.nightFactor = 0.0;
         return output;
     }
 
     let n = normalize(particle.pos);
-    let p0 = projectUnitPos(uniforms, watermanFwdTex, n);
+    let pType = u32(uniforms.viewParams.w + 0.5);
+    let vView = rotateToView(uniforms, n);
+    let altScale = clamp(uniforms.terrainParams.z, 0.0, 0.25);
+    var altExag = 0.0;
+    if (!shadowPass && altScale > 0.0005) {
+        if (phase == 1u && flightMode == 1u) {
+            altExag = clamp(particle.chemGlow, 0.0, 1.0) * altScale;
+        } else if (phase == 0u && particle.lifeState.y < 0.5 && particle.lifeState.z > 0.04) {
+            altExag = clamp(particle.lifeState.z, 0.0, 1.0) * altScale * 0.45;
+        }
+    }
+
+    var p0 = vec3f(0.0);
+    if (pType == 0u && altExag > 0.0005) {
+        let rScale = 1.0 + altExag;
+        let elevR2D = length(vec2f(vView.y, vView.z)) * rScale;
+        let visible = (vView.x >= 0.0) || (elevR2D >= 1.0);
+        p0 = vec3f(vView.y * rScale, -vView.z * rScale, select(0.0, 1.0, visible));
+    } else {
+        p0 = projectUnitPos(uniforms, watermanFwdTex, n);
+        if (pType != 0u && altExag > 0.0005 && p0.z > 0.5) {
+            p0.y -= altExag * 0.35;
+        }
+    }
 
     if (p0.z < 0.5) {
         output.pos = vec4f(2.0, 2.0, 2.0, 1.0);
@@ -138,20 +167,19 @@ fn vertexCommon(
         output.phaseF = phaseF;
         output.bioSpeciesF = bioSpeciesF;
         output.lifeState = particle.lifeState;
+        output.nightFactor = 0.0;
         return output;
     }
 
     let uHat = orthoBasis(n, particle.orient);
     let bHat = normalize(cross(n, uHat));
-    let pType = u32(uniforms.viewParams.w + 0.5);
-    let vView = rotateToView(uniforms, n);
 
     var limbFade = 1.0;
     var dU = vec2f(1.0, 0.0);
     var dB = vec2f(0.0, -1.0);
 
     if (pType == 0u) {
-        limbFade = smoothstep(0.005, 0.16, vView.x);
+        limbFade = select(smoothstep(0.005, 0.16, vView.x), smoothstep(-0.18, 0.12, vView.x), altExag > 0.0005);
         let uView = rotateToView(uniforms, uHat);
         let bView = rotateToView(uniforms, bHat);
         let rLimb = sqrt(max(0.0, vView.y * vView.y + vView.z * vView.z));
@@ -164,7 +192,7 @@ fn vertexCommon(
             let r3 = vec3f(-rLimb, vView.x * vView.y * invR, vView.x * vView.z * invR);
             let eRad2D = vec2f(vView.y * invR, -vView.z * invR);
             let eTan2D = vec2f(-vView.z * invR, -vView.y * invR);
-            let kRad = mix(0.48, 1.0, vView.x);
+            let kRad = mix(0.48, 1.0, max(vView.x, 0.0));
             dU = dot(uView, r3) * kRad * eRad2D + dot(uView, t3) * eTan2D;
             dB = dot(bView, r3) * kRad * eRad2D + dot(bView, t3) * eTan2D;
         }
@@ -227,6 +255,7 @@ fn vertexCommon(
     let ndcX = (pScreen.x / max(uniforms.viewSize.x, 1.0)) * 2.0 - 1.0;
     let ndcY = 1.0 - (pScreen.y / max(uniforms.viewSize.y, 1.0)) * 2.0;
 
+    let nightFactor = select(0.0, smoothstep(0.85, 0.0, sampleUvTexture(uvTex, n).x) * clamp(uniforms.terrainParams.y, 0.0, 1.0), phase == 1u && !shadowPass);
     output.pos = vec4f(ndcX, ndcY, 0.0, 1.0);
     output.uv = corner;
     output.chemSpecies = particle.colour;
@@ -236,6 +265,7 @@ fn vertexCommon(
     output.phaseF = phaseF;
     output.bioSpeciesF = bioSpeciesF;
     output.lifeState = particle.lifeState;
+    output.nightFactor = nightFactor;
     return output;
 }
 
@@ -244,7 +274,7 @@ fn vertexMinerals(
     particle: ParticleVert,
     @builtin(vertex_index) vertexIndex: u32,
 ) -> VertexOutput {
-    return vertexCommon(particle, vertexIndex, true, true);
+    return vertexCommon(particle, vertexIndex, true, true, false);
 }
 
 @vertex
@@ -252,7 +282,15 @@ fn vertexForeground(
     particle: ParticleVert,
     @builtin(vertex_index) vertexIndex: u32,
 ) -> VertexOutput {
-    return vertexCommon(particle, vertexIndex, true, false);
+    return vertexCommon(particle, vertexIndex, true, false, false);
+}
+
+@vertex
+fn vertexBirdShadows(
+    particle: ParticleVert,
+    @builtin(vertex_index) vertexIndex: u32,
+) -> VertexOutput {
+    return vertexCommon(particle, vertexIndex, false, false, true);
 }
 
 @vertex
@@ -260,7 +298,28 @@ fn vertex(
     particle: ParticleVert,
     @builtin(vertex_index) vertexIndex: u32,
 ) -> VertexOutput {
-    return vertexCommon(particle, vertexIndex, false, false);
+    return vertexCommon(particle, vertexIndex, false, false, false);
+}
+
+@fragment
+fn fragmentShadow(
+    @location(0) uv: vec2f,
+    @location(1) chemSpecies: f32,
+    @location(2) slots: vec4f,
+    @location(3) chemGlow: f32,
+    @location(4) limbFade: f32,
+    @location(5) phaseF: f32,
+    @location(6) bioSpeciesF: f32,
+    @location(7) lifeState: vec4f,
+    @location(8) nightFactor: f32,
+) -> @location(0) vec4f {
+    let d = length(uv);
+    let op = clamp(uniforms.renderParams.y, 0.0, 1.0) * clamp(limbFade, 0.0, 1.0);
+    if (d > 1.0 || op <= 0.001) {
+        discard;
+    }
+    let a = (1.0 - smoothstep(0.15, 0.98, d)) * 0.28 * op;
+    return vec4f(0.0, 0.0, 0.0, a);
 }
 
 @fragment
@@ -273,6 +332,7 @@ fn fragment(
     @location(5) phaseF: f32,
     @location(6) bioSpeciesF: f32,
     @location(7) lifeState: vec4f,
+    @location(8) nightFactor: f32,
 ) -> @location(0) vec4f {
     let uvStep = length(fwidth(uv));
     let px = clamp(uvStep * 0.70710678, 0.0005, 0.22);
@@ -500,8 +560,9 @@ fn fragment(
             let rim = smoothstep(0.62, 0.92, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
             lifeCol = mix(lifeCol, vec3f(0.88, 0.25, 0.96), rim);
         }
-        if (vit > 0.25 || graduated == 1u) {
-            let glowStrength = max(clamp((vit - 0.25) * 0.6, 0.0, 0.45), select(0.0, 0.34, graduated == 1u));
+        if (vit > 0.25 || graduated == 1u || nightFactor > 0.15) {
+            let bioLum = nightFactor * 0.38 * clamp(energy, 0.3, 1.2);
+            let glowStrength = max(max(clamp((vit - 0.25) * 0.6, 0.0, 0.45), select(0.0, 0.34, graduated == 1u)), bioLum);
             let glowRim = smoothstep(0.68, 0.95, d) * glowStrength;
             let glowCol = mix(vec3f(0.32, 0.98, 0.78), vec3f(1.0, 0.86, 0.42), select(0.0, 0.65, graduated == 1u));
             lifeCol = mix(lifeCol, glowCol, glowRim);

@@ -177,21 +177,25 @@ export function sampleOceanLonLat(
   const j1 = Math.min(ny - 1, j0 + 1);
   const fy = gy - j0;
 
-  const ws = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy];
-  const ks = [j0 * nx + i0, j0 * nx + i1, j1 * nx + i0, j1 * nx + i1];
+  const w00 = (1 - fx) * (1 - fy);
+  const w10 = fx * (1 - fy);
+  const w01 = (1 - fx) * fy;
+  const w11 = fx * fy;
+
+  const r0 = j0 * nx;
+  const r1 = j1 * nx;
+  const k00 = r0 + i0;
+  const k10 = r0 + i1;
+  const k01 = r1 + i0;
+  const k11 = r1 + i1;
 
   let mSum = 0;
   let uSum = 0;
   let vSum = 0;
-  for (let q = 0; q < 4; q++) {
-    const k = ks[q];
-    if (mask[k]) {
-      const w = ws[q];
-      mSum += w;
-      uSum += u[k] * w;
-      vSum += v[k] * w;
-    }
-  }
+  if (mask[k00]) { mSum += w00; uSum += u[k00] * w00; vSum += v[k00] * w00; }
+  if (mask[k10]) { mSum += w10; uSum += u[k10] * w10; vSum += v[k10] * w10; }
+  if (mask[k01]) { mSum += w01; uSum += u[k01] * w01; vSum += v[k01] * w01; }
+  if (mask[k11]) { mSum += w11; uSum += u[k11] * w11; vSum += v[k11] * w11; }
 
   if (mSum <= 1e-4) {
     return [0, 0, 0, 0];

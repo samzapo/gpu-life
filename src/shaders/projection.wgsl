@@ -23,83 +23,92 @@ fn safeAcos(x: f32) -> f32 {
     return acos(clamp(x, -1.0, 1.0));
 }
 
-// Samples wind (uEast, vNorth, speed) in m/s at unit sphere normal `n`
+struct EquirectCoord {
+    i0: u32,
+    i1: u32,
+    j0: u32,
+    j1: u32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+}
+
+// Computes equirectangular grid indices & bilinear weights ONCE for a `(nx x ny)` globe texture.
+fn makeEquirectCoord(n: vec3f, dims: vec2u) -> EquirectCoord {
+    let nx = f32(max(dims.x, 2u));
+    let ny = f32(max(dims.y, 2u));
+    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
+    if (lonDeg < 0.0) {
+        lonDeg += 360.0;
+    }
+    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+    let gx = (lonDeg / 360.0) * nx;
+    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
+    let i0 = u32(floor(gx)) % max(dims.x, 1u);
+    let i1 = (i0 + 1u) % max(dims.x, 1u);
+    let fx = gx - floor(gx);
+    let j0 = min(max(dims.y, 1u) - 1u, u32(max(0.0, floor(gy))));
+    let j1 = min(max(dims.y, 1u) - 1u, j0 + 1u);
+    let fy = clamp(gy - f32(j0), 0.0, 1.0);
+    return EquirectCoord(
+        i0,
+        i1,
+        j0,
+        j1,
+        (1.0 - fx) * (1.0 - fy),
+        fx * (1.0 - fy),
+        (1.0 - fx) * fy,
+        fx * fy,
+    );
+}
+
+fn sampleWindArrayLayerCoord(windArr: texture_2d_array<f32>, layerIdx: u32, eq: EquirectCoord) -> vec3f {
+    let c00 = textureLoad(windArr, vec2u(eq.i0, eq.j0), layerIdx, 0).xyz;
+    let c10 = textureLoad(windArr, vec2u(eq.i1, eq.j0), layerIdx, 0).xyz;
+    let c01 = textureLoad(windArr, vec2u(eq.i0, eq.j1), layerIdx, 0).xyz;
+    let c11 = textureLoad(windArr, vec2u(eq.i1, eq.j1), layerIdx, 0).xyz;
+    return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
+}
+
+// Samples altitude-blended wind `(uEast, vNorth, speed)` across `[surface, 850hPa, 500hPa, 250hPa]` (`alt01` in `[0, 1]`).
+fn sampleWindArrayAtAltCoord(windArr: texture_2d_array<f32>, eq: EquirectCoord, alt01: f32) -> vec3f {
+    let a = clamp(alt01, 0.0, 1.0) * 3.0;
+    let l0 = min(3u, u32(floor(a)));
+    let l1 = min(3u, l0 + 1u);
+    let f = a - f32(l0);
+    let v0 = sampleWindArrayLayerCoord(windArr, l0, eq);
+    if (l0 == l1 || f <= 0.001) {
+        return v0;
+    }
+    let v1 = sampleWindArrayLayerCoord(windArr, l1, eq);
+    return mix(v0, v1, f);
+}
+
+// Samples wind `(uEast, vNorth, speed)` in m/s at unit sphere normal `n`
 fn sampleWindTexture(windTex: texture_2d<f32>, n: vec3f) -> vec3f {
     let dims = textureDimensions(windTex, 0);
-    let nx = f32(dims.x);
-    let ny = f32(dims.y);
     if (dims.x < 2u || dims.y < 2u) {
         return vec3f(0.0);
     }
-
-    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
-    if (lonDeg < 0.0) {
-        lonDeg += 360.0;
-    }
-    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
-
-    let gx = (lonDeg / 360.0) * nx;
-    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
-
-    let i0 = u32(floor(gx)) % dims.x;
-    let i1 = (i0 + 1u) % dims.x;
-    let fx = gx - floor(gx);
-
-    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
-    let j1 = min(dims.y - 1u, j0 + 1u);
-    let fy = clamp(gy - f32(j0), 0.0, 1.0);
-
-    let c00 = textureLoad(windTex, vec2u(i0, j0), 0).xyz;
-    let c10 = textureLoad(windTex, vec2u(i1, j0), 0).xyz;
-    let c01 = textureLoad(windTex, vec2u(i0, j1), 0).xyz;
-    let c11 = textureLoad(windTex, vec2u(i1, j1), 0).xyz;
-
-    let top = mix(c00, c10, fx);
-    let bot = mix(c01, c11, fx);
-    return mix(top, bot, fy);
+    let eq = makeEquirectCoord(n, dims);
+    let c00 = textureLoad(windTex, vec2u(eq.i0, eq.j0), 0).xyz;
+    let c10 = textureLoad(windTex, vec2u(eq.i1, eq.j0), 0).xyz;
+    let c01 = textureLoad(windTex, vec2u(eq.i0, eq.j1), 0).xyz;
+    let c11 = textureLoad(windTex, vec2u(eq.i1, eq.j1), 0).xyz;
+    return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
 }
 
-// Samples ocean currents `(uEastDf, vNorthDf, rawSpeed, oceanMask)` in m/s at unit normal `n`.
-// Velocity and raw speed are normalized over ocean texels so coastal currents stay crisp right to shore.
-fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
-    let dims = textureDimensions(oceanTex, 0);
-    let nx = f32(dims.x);
-    let ny = f32(dims.y);
-    if (dims.x < 2u || dims.y < 2u) {
-        return vec4f(0.0);
-    }
+fn sampleOceanTextureCoord(oceanTex: texture_2d<f32>, eq: EquirectCoord) -> vec4f {
+    let c00 = textureLoad(oceanTex, vec2u(eq.i0, eq.j0), 0);
+    let c10 = textureLoad(oceanTex, vec2u(eq.i1, eq.j0), 0);
+    let c01 = textureLoad(oceanTex, vec2u(eq.i0, eq.j1), 0);
+    let c11 = textureLoad(oceanTex, vec2u(eq.i1, eq.j1), 0);
 
-    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
-    if (lonDeg < 0.0) {
-        lonDeg += 360.0;
-    }
-    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
-
-    let gx = (lonDeg / 360.0) * nx;
-    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
-
-    let i0 = u32(floor(gx)) % dims.x;
-    let i1 = (i0 + 1u) % dims.x;
-    let fx = gx - floor(gx);
-
-    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
-    let j1 = min(dims.y - 1u, j0 + 1u);
-    let fy = clamp(gy - f32(j0), 0.0, 1.0);
-
-    let c00 = textureLoad(oceanTex, vec2u(i0, j0), 0);
-    let c10 = textureLoad(oceanTex, vec2u(i1, j0), 0);
-    let c01 = textureLoad(oceanTex, vec2u(i0, j1), 0);
-    let c11 = textureLoad(oceanTex, vec2u(i1, j1), 0);
-
-    let w00 = (1.0 - fx) * (1.0 - fy);
-    let w10 = fx * (1.0 - fy);
-    let w01 = (1.0 - fx) * fy;
-    let w11 = fx * fy;
-
-    let k00 = w00 * select(0.0, 1.0, c00.w > 0.45);
-    let k10 = w10 * select(0.0, 1.0, c10.w > 0.45);
-    let k01 = w01 * select(0.0, 1.0, c01.w > 0.45);
-    let k11 = w11 * select(0.0, 1.0, c11.w > 0.45);
+    let k00 = eq.w00 * select(0.0, 1.0, c00.w > 0.45);
+    let k10 = eq.w10 * select(0.0, 1.0, c10.w > 0.45);
+    let k01 = eq.w01 * select(0.0, 1.0, c01.w > 0.45);
+    let k11 = eq.w11 * select(0.0, 1.0, c11.w > 0.45);
 
     let maskSum = k00 + k10 + k01 + k11;
     if (maskSum <= 1e-4) {
@@ -109,50 +118,68 @@ fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
     return vec4f(uvMag, maskSum);
 }
 
+// Samples ocean currents `(uEastDf, vNorthDf, rawSpeed, oceanMask)` in m/s at unit normal `n`.
+fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(oceanTex, 0);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(0.0);
+    }
+    return sampleOceanTextureCoord(oceanTex, makeEquirectCoord(n, dims));
+}
+
+fn sampleTempArrayLayerCoord(tempArr: texture_2d_array<f32>, layerIdx: u32, eq: EquirectCoord) -> vec4f {
+    let c00 = textureLoad(tempArr, vec2u(eq.i0, eq.j0), layerIdx, 0);
+    let c10 = textureLoad(tempArr, vec2u(eq.i1, eq.j0), layerIdx, 0);
+    let c01 = textureLoad(tempArr, vec2u(eq.i0, eq.j1), layerIdx, 0);
+    let c11 = textureLoad(tempArr, vec2u(eq.i1, eq.j1), layerIdx, 0);
+
+    let airK = c00.x * eq.w00 + c10.x * eq.w10 + c01.x * eq.w01 + c11.x * eq.w11;
+    let sfcK = c00.w * eq.w00 + c10.w * eq.w10 + c01.w * eq.w01 + c11.w * eq.w11;
+    let k00 = eq.w00 * select(0.0, 1.0, c00.z > 0.45);
+    let k10 = eq.w10 * select(0.0, 1.0, c10.z > 0.45);
+    let k01 = eq.w01 * select(0.0, 1.0, c01.z > 0.45);
+    let k11 = eq.w11 * select(0.0, 1.0, c11.z > 0.45);
+    let maskSum = k00 + k10 + k01 + k11;
+    let sstK = select(
+        sfcK,
+        (c00.y * k00 + c10.y * k10 + c01.y * k01 + c11.y * k11) / max(maskSum, 1e-4),
+        maskSum > 1e-4,
+    );
+    return vec4f(airK, sstK, maskSum, sfcK);
+}
+
+fn sampleTempArrayAtAltCoord(tempArr: texture_2d_array<f32>, eq: EquirectCoord, alt01: f32) -> vec4f {
+    let a = clamp(alt01, 0.0, 1.0) * 3.0;
+    let l0 = min(3u, u32(floor(a)));
+    let l1 = min(3u, l0 + 1u);
+    let f = a - f32(l0);
+    let t0 = sampleTempArrayLayerCoord(tempArr, l0, eq);
+    if (l0 == l1 || f <= 0.001) {
+        return t0;
+    }
+    let t1 = sampleTempArrayLayerCoord(tempArr, l1, eq);
+    return vec4f(mix(t0.x, t1.x, f), t0.y, t0.z, t0.w);
+}
+
 // Samples live global temperatures: `(airTempK, sstK, sstMask, sfcAirTempK)` at sphere normal `n`.
-// Over coastlines/land where `sstMask == 0`, `.y` safely falls back to `sfcAirTempK`.
 fn sampleTempTexture(tempTex: texture_2d<f32>, n: vec3f) -> vec4f {
     let dims = textureDimensions(tempTex, 0);
-    let nx = f32(dims.x);
-    let ny = f32(dims.y);
     if (dims.x < 2u || dims.y < 2u) {
         return vec4f(288.15, 288.15, 0.0, 288.15);
     }
+    let eq = makeEquirectCoord(n, dims);
+    let c00 = textureLoad(tempTex, vec2u(eq.i0, eq.j0), 0);
+    let c10 = textureLoad(tempTex, vec2u(eq.i1, eq.j0), 0);
+    let c01 = textureLoad(tempTex, vec2u(eq.i0, eq.j1), 0);
+    let c11 = textureLoad(tempTex, vec2u(eq.i1, eq.j1), 0);
 
-    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
-    if (lonDeg < 0.0) {
-        lonDeg += 360.0;
-    }
-    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+    let airK = c00.x * eq.w00 + c10.x * eq.w10 + c01.x * eq.w01 + c11.x * eq.w11;
+    let sfcK = c00.w * eq.w00 + c10.w * eq.w10 + c01.w * eq.w01 + c11.w * eq.w11;
 
-    let gx = (lonDeg / 360.0) * nx;
-    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
-
-    let i0 = u32(floor(gx)) % dims.x;
-    let i1 = (i0 + 1u) % dims.x;
-    let fx = gx - floor(gx);
-
-    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
-    let j1 = min(dims.y - 1u, j0 + 1u);
-    let fy = clamp(gy - f32(j0), 0.0, 1.0);
-
-    let c00 = textureLoad(tempTex, vec2u(i0, j0), 0);
-    let c10 = textureLoad(tempTex, vec2u(i1, j0), 0);
-    let c01 = textureLoad(tempTex, vec2u(i0, j1), 0);
-    let c11 = textureLoad(tempTex, vec2u(i1, j1), 0);
-
-    let w00 = (1.0 - fx) * (1.0 - fy);
-    let w10 = fx * (1.0 - fy);
-    let w01 = (1.0 - fx) * fy;
-    let w11 = fx * fy;
-
-    let airK = c00.x * w00 + c10.x * w10 + c01.x * w01 + c11.x * w11;
-    let sfcK = c00.w * w00 + c10.w * w10 + c01.w * w01 + c11.w * w11;
-
-    let k00 = w00 * select(0.0, 1.0, c00.z > 0.45);
-    let k10 = w10 * select(0.0, 1.0, c10.z > 0.45);
-    let k01 = w01 * select(0.0, 1.0, c01.z > 0.45);
-    let k11 = w11 * select(0.0, 1.0, c11.z > 0.45);
+    let k00 = eq.w00 * select(0.0, 1.0, c00.z > 0.45);
+    let k10 = eq.w10 * select(0.0, 1.0, c10.z > 0.45);
+    let k01 = eq.w01 * select(0.0, 1.0, c01.z > 0.45);
+    let k11 = eq.w11 * select(0.0, 1.0, c11.z > 0.45);
     let maskSum = k00 + k10 + k01 + k11;
     let sstK = select(
         sfcK,
@@ -168,73 +195,56 @@ fn effectiveSurfaceTempK(tSample: vec4f, oceanMask: f32) -> f32 {
     return mix(tSample.w, tSample.y, seaBlend);
 }
 
+fn sampleUvTextureCoord(uvTex: texture_2d<f32>, eq: EquirectCoord) -> vec4f {
+    let c00 = textureLoad(uvTex, vec2u(eq.i0, eq.j0), 0);
+    let c10 = textureLoad(uvTex, vec2u(eq.i1, eq.j0), 0);
+    let c01 = textureLoad(uvTex, vec2u(eq.i0, eq.j1), 0);
+    let c11 = textureLoad(uvTex, vec2u(eq.i1, eq.j1), 0);
+    return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
+}
+
 // Samples live global UV index fields: `(uviNow, uviNoon, ozoneDU, cloudFrac)` at unit sphere normal `n`.
 fn sampleUvTexture(uvTex: texture_2d<f32>, n: vec3f) -> vec4f {
     let dims = textureDimensions(uvTex, 0);
-    let nx = f32(dims.x);
-    let ny = f32(dims.y);
     if (dims.x < 2u || dims.y < 2u) {
         return vec4f(4.0, 7.0, 300.0, 0.25);
     }
+    return sampleUvTextureCoord(uvTex, makeEquirectCoord(n, dims));
+}
 
-    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
-    if (lonDeg < 0.0) {
-        lonDeg += 360.0;
-    }
-    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
-
-    let gx = (lonDeg / 360.0) * nx;
-    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
-
-    let i0 = u32(floor(gx)) % dims.x;
-    let i1 = (i0 + 1u) % dims.x;
-    let fx = gx - floor(gx);
-
-    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
-    let j1 = min(dims.y - 1u, j0 + 1u);
-    let fy = clamp(gy - f32(j0), 0.0, 1.0);
-
-    let c00 = textureLoad(uvTex, vec2u(i0, j0), 0);
-    let c10 = textureLoad(uvTex, vec2u(i1, j0), 0);
-    let c01 = textureLoad(uvTex, vec2u(i0, j1), 0);
-    let c11 = textureLoad(uvTex, vec2u(i1, j1), 0);
-
-    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+fn sampleHydroTextureCoord(hydroTex: texture_2d<f32>, eq: EquirectCoord) -> vec2f {
+    let c00 = textureLoad(hydroTex, vec2u(eq.i0, eq.j0), 0).xy;
+    let c10 = textureLoad(hydroTex, vec2u(eq.i1, eq.j0), 0).xy;
+    let c01 = textureLoad(hydroTex, vec2u(eq.i0, eq.j1), 0).xy;
+    let c11 = textureLoad(hydroTex, vec2u(eq.i1, eq.j1), 0).xy;
+    let h = c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
+    return vec2f(clamp(h.x, 0.0, 1.0), max(h.y, 0.0));
 }
 
 // Samples live global surface hydrology `(rh01, precip3hMm)` at unit sphere normal `n`.
 fn sampleHydroTexture(hydroTex: texture_2d<f32>, n: vec3f) -> vec2f {
     let dims = textureDimensions(hydroTex, 0);
-    let nx = f32(dims.x);
-    let ny = f32(dims.y);
     if (dims.x < 2u || dims.y < 2u) {
         return vec2f(0.65, 0.0);
     }
+    return sampleHydroTextureCoord(hydroTex, makeEquirectCoord(n, dims));
+}
 
-    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
-    if (lonDeg < 0.0) {
-        lonDeg += 360.0;
+// Samples terrain `(elevKm, dElevEast, dElevNorth, ridgeVentMask)` via shared equirectangular coords.
+fn sampleTerrainTextureCoord(terrainTex: texture_2d<f32>, eq: EquirectCoord) -> vec4f {
+    let c00 = textureLoad(terrainTex, vec2u(eq.i0, eq.j0), 0);
+    let c10 = textureLoad(terrainTex, vec2u(eq.i1, eq.j0), 0);
+    let c01 = textureLoad(terrainTex, vec2u(eq.i0, eq.j1), 0);
+    let c11 = textureLoad(terrainTex, vec2u(eq.i1, eq.j1), 0);
+    return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
+}
+
+fn sampleTerrainTexture(terrainTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(terrainTex, 0);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(0.0);
     }
-    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
-
-    let gx = (lonDeg / 360.0) * nx;
-    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
-
-    let i0 = u32(floor(gx)) % dims.x;
-    let i1 = (i0 + 1u) % dims.x;
-    let fx = gx - floor(gx);
-
-    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
-    let j1 = min(dims.y - 1u, j0 + 1u);
-    let fy = clamp(gy - f32(j0), 0.0, 1.0);
-
-    let c00 = textureLoad(hydroTex, vec2u(i0, j0), 0).xy;
-    let c10 = textureLoad(hydroTex, vec2u(i1, j0), 0).xy;
-    let c01 = textureLoad(hydroTex, vec2u(i0, j1), 0).xy;
-    let c11 = textureLoad(hydroTex, vec2u(i1, j1), 0).xy;
-
-    let h = mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
-    return vec2f(clamp(h.x, 0.0, 1.0), max(h.y, 0.0));
+    return sampleTerrainTextureCoord(terrainTex, makeEquirectCoord(n, dims));
 }
 
 // Magnus-Tetens saturation vapor pressure (kPa) from temperature in Kelvin.

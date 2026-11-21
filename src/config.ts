@@ -68,6 +68,9 @@ export const FACTORY_DEFAULTS = {
     hydroStrength: 1.0,
     lifeOpacity: 1.0,
     mineralOpacity: 1.0,
+    terrainOpacity: 0.85,
+    nightShading: 0.35,
+    birdExaggeration: 0.075,
     coastlines: true,
     bioLink: true,
     bioRate: 1.0,
@@ -137,6 +140,9 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'hydroStrength',
   'lifeOpacity',
   'mineralOpacity',
+  'terrainOpacity',
+  'nightShading',
+  'birdExaggeration',
   'coastlines',
   'bioLink',
   'bioRate',
@@ -232,6 +238,9 @@ export interface SimConfigV1 {
     hydroStrength?: number;
     lifeOpacity?: number;
     mineralOpacity?: number;
+    terrainOpacity?: number;
+    nightShading?: number;
+    birdExaggeration?: number;
     coastlines?: boolean;
     bioLink?: boolean;
     bioRate?: number;
@@ -399,6 +408,9 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.chemOpacity = opParam('chemOpacity') ?? FACTORY_DEFAULTS.earth.chemOpacity;
     cfg.earth!.lifeOpacity = opParam('lifeOpacity') ?? FACTORY_DEFAULTS.earth.lifeOpacity;
     cfg.earth!.mineralOpacity = opParam('mineralOpacity') ?? FACTORY_DEFAULTS.earth.mineralOpacity;
+    cfg.earth!.terrainOpacity = opParam('terrainOpacity') ?? FACTORY_DEFAULTS.earth.terrainOpacity;
+    cfg.earth!.nightShading = opParam('nightShading') ?? FACTORY_DEFAULTS.earth.nightShading;
+    cfg.earth!.birdExaggeration = numParam('birdExaggeration') ?? FACTORY_DEFAULTS.earth.birdExaggeration;
     if (sp.has('oceanMix')) cfg.earth!.oceanMix = sp.get('oceanMix') !== 'false';
     if (sp.has('coastlines')) cfg.earth!.coastlines = sp.get('coastlines') !== 'false';
     if (sp.has('bioLink')) cfg.earth!.bioLink = sp.get('bioLink') !== 'false';
@@ -538,6 +550,9 @@ export function buildUrlPartsFromConfig(
     setNum('hydroStrength', e.hydroStrength, FACTORY_DEFAULTS.earth.hydroStrength);
     setNum('lifeOpacity', e.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity);
     setNum('mineralOpacity', e.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity);
+    setNum('terrainOpacity', e.terrainOpacity, FACTORY_DEFAULTS.earth.terrainOpacity);
+    setNum('nightShading', e.nightShading, FACTORY_DEFAULTS.earth.nightShading);
+    setNum('birdExaggeration', e.birdExaggeration, FACTORY_DEFAULTS.earth.birdExaggeration);
     setBool('coastlines', e.coastlines, FACTORY_DEFAULTS.earth.coastlines);
     setBool('bioLink', e.bioLink, FACTORY_DEFAULTS.earth.bioLink);
     setNum('bioRate', e.bioRate, FACTORY_DEFAULTS.earth.bioRate);
@@ -660,6 +675,9 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     hydroStrength: finiteNum(earthRaw.hydroStrength),
     lifeOpacity: unitOpacity(earthRaw.lifeOpacity),
     mineralOpacity: unitOpacity(earthRaw.mineralOpacity),
+    terrainOpacity: unitOpacity(earthRaw.terrainOpacity),
+    nightShading: unitOpacity(earthRaw.nightShading),
+    birdExaggeration: finiteNum(earthRaw.birdExaggeration),
     coastlines: boolVal(earthRaw.coastlines),
     bioLink: boolVal(earthRaw.bioLink),
     bioRate: finiteNum(earthRaw.bioRate),

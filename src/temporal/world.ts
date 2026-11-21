@@ -97,7 +97,7 @@ export function findColonies(snapshot: Snapshot, radius: number): Colony[] {
       const gx = cell(x),
         gy = cell(y),
         gz = cell(z);
-      const kin = (Math.round(snapshot.life[index * 4 + 3]) >>> 10) & 511;
+      const kin = (Math.round(snapshot.life[index * 4 + 3]) >>> 10) & 255;
       for (let dx = -1; dx <= 1; dx++)
         for (let dy = -1; dy <= 1; dy++)
           for (let dz = -1; dz <= 1; dz++) {
@@ -112,10 +112,10 @@ export function findColonies(snapshot: Snapshot, radius: number): Colony[] {
                 (particles[next + 2] - z) ** 2;
               if (distance2 > radius * radius) continue;
               const delta = Math.abs(
-                kin - ((Math.round(snapshot.life[other * 4 + 3]) >>> 10) & 511),
+                kin - ((Math.round(snapshot.life[other * 4 + 3]) >>> 10) & 255),
               );
               if (
-                Math.min(delta, 512 - delta) > 25 &&
+                Math.min(delta, 256 - delta) > 13 &&
                 distance2 > radius * radius * 0.3
               )
                 continue;

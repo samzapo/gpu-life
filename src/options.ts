@@ -202,6 +202,9 @@ export const earthParams = {
   chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
   lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
   mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
+  terrainOpacity: parseOpacityParam('terrainOpacity', effectiveCachedConfig?.earth?.terrainOpacity, FACTORY_DEFAULTS.earth.terrainOpacity),
+  nightShading: parseOpacityParam('nightShading', effectiveCachedConfig?.earth?.nightShading, FACTORY_DEFAULTS.earth.nightShading),
+  birdExaggeration: resolveNumber('birdExaggeration', effectiveCachedConfig?.earth?.birdExaggeration, FACTORY_DEFAULTS.earth.birdExaggeration),
   coastlines: resolveBool('coastlines', effectiveCachedConfig?.earth?.coastlines, FACTORY_DEFAULTS.earth.coastlines),
   bioLink: resolveBool('bioLink', effectiveCachedConfig?.earth?.bioLink, FACTORY_DEFAULTS.earth.bioLink),
   bioRate: resolveNumber('bioRate', effectiveCachedConfig?.earth?.bioRate, FACTORY_DEFAULTS.earth.bioRate),
@@ -674,6 +677,34 @@ export const mineralOpacityBinding = withTooltip(
   'Mineral Crust Opacity',
   'Opacity (0%–100%) of crust-affixed Silicate, Evaporite, Carbonate, Sulfide, and Hydrated Clay crystals.',
 );
+export const terrainOpacityBinding = withTooltip(
+  pane.addBinding(earthParams, 'terrainOpacity', {
+    index: 12,
+    label: 'terrain',
+    ...opacitySliderParams,
+  }),
+  'Terrain Relief Opacity',
+  'Opacity (0%–100%) of hillshaded continental elevation, mountain snowlines, and coastal shelf bathymetry.',
+);
+export const nightShadingBinding = withTooltip(
+  pane.addBinding(earthParams, 'nightShading', {
+    index: 13,
+    label: 'nightShade',
+    ...opacitySliderParams,
+  }),
+  'Day/Night Terminator Shading',
+  'Strength (0%–100%) of planetary night-hemisphere shadow across unlit longitudes.',
+);
+export const birdExaggerationBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'birdExaggeration', {
+    label: 'birdAlt',
+    min: 0,
+    max: 0.2,
+    step: 0.005,
+  }),
+  'Aerial Altitude Exaggeration',
+  'Visual radial altitude offset above Earth for elevated clouds, vapors, and soaring birds.',
+);
 export const coastlinesBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'coastlines'),
   'Vector Coastlines',
@@ -1040,6 +1071,9 @@ export function bindConfigPersistence(onChange: () => void) {
     hydroStrengthBinding,
     lifeOpacityBinding,
     mineralOpacityBinding,
+    terrainOpacityBinding,
+    nightShadingBinding,
+    birdExaggerationBinding,
     coastlinesBinding,
     bioLinkBinding,
     bioRateBinding,

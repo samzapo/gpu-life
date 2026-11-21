@@ -470,6 +470,73 @@ export function sampleWindTempLonLat(
   return [tLvl, tSfc];
 }
 
+export const AIR_STACK_LEVELS: readonly WindLevelId[] = [
+  'surface',
+  '850hPa',
+  '500hPa',
+  '250hPa',
+];
+
+/**
+ * Synthesizes an instantaneous initial upper-air wind & temperature grid from the cached
+ * surface grid using standard tropospheric lapse rates (~6.5 K/km), Ekman veering, and
+ * subtropical/polar jet-stream profiles until live GFS upper-air fetches hydrate each slice.
+ */
+export function synthesizeUpperAirGrid(
+  base: WindGrid,
+  levelId: '850hPa' | '500hPa' | '250hPa',
+): WindGrid {
+  const { nx, ny, u, v, tempK, sfcTempK } = base;
+  const n = nx * ny;
+  const uOut = new Float32Array(n);
+  const vOut = new Float32Array(n);
+  const tOut = new Float32Array(n);
+  const sfcOut = new Float32Array(sfcTempK);
+
+  const scaleSpeed = levelId === '850hPa' ? 1.35 : levelId === '500hPa' ? 2.15 : 2.95;
+  const jetAmp = levelId === '850hPa' ? 3.5 : levelId === '500hPa' ? 14.0 : 28.0;
+  const lapseDropK = levelId === '850hPa' ? 9.5 : levelId === '500hPa' ? 34.0 : 58.0;
+
+  for (let row = 0; row < ny; row++) {
+    const latDeg = 90 - (row / Math.max(1, ny - 1)) * 180;
+    const absLat = Math.abs(latDeg);
+    const hemi = latDeg >= 0 ? 1 : -1;
+    // Subtropical (~32°) + Polar (~55°) jet bands vs equatorial trade easterlies
+    const subJet = Math.exp(-((absLat - 32) * (absLat - 32)) / 130);
+    const polJet = Math.exp(-((absLat - 55) * (absLat - 55)) / 150);
+    const eqTrade = -Math.exp(-(absLat * absLat) / 140) * 0.28;
+    const zonalJet = jetAmp * (0.95 * subJet + 0.72 * polJet + eqTrade);
+    // Slight Ekman turning (~15-25 deg right in NH, left in SH) above boundary layer
+    const veerRad = (levelId === '850hPa' ? 0.24 : 0.35) * hemi;
+    const cv = Math.cos(veerRad);
+    const sv = Math.sin(veerRad);
+
+    for (let col = 0; col < nx; col++) {
+      const idx = row * nx + col;
+      const bu = u[idx];
+      const bv = v[idx];
+      uOut[idx] = (bu * cv + bv * sv) * scaleSpeed + zonalJet;
+      vOut[idx] = (-bu * sv + bv * cv) * scaleSpeed;
+      tOut[idx] = Math.max(193.15, (tempK[idx] || sfcTempK[idx] || 288.15) - lapseDropK);
+    }
+  }
+
+  return {
+    nx,
+    ny,
+    u: uOut,
+    v: vOut,
+    tempK: tOut,
+    sfcTempK: sfcOut,
+    tempLabel: WIND_LEVELS[levelId].tempGribLevel,
+    level: levelId,
+    refTime: base.refTime,
+    validTime: base.validTime,
+    source: `${base.source} (synth ${levelId})`,
+    isLive: false,
+  };
+}
+
 export function interpolateColorStops(
   val: number,
   stops: readonly [number, [number, number, number]][],

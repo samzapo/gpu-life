@@ -42,6 +42,7 @@ import {
   type EarthTopoFeatures,
 } from './earth/mapOverlay';
 import {
+  AIR_STACK_LEVELS,
   airTempColorRgb,
   buildDivergenceFreeWind,
   extendedSinebowColor,
@@ -49,10 +50,15 @@ import {
   loadFallbackWind,
   sampleWindLonLat,
   sampleWindTempLonLat,
+  synthesizeUpperAirGrid,
   WIND_LEVELS,
   type WindGrid,
   type WindLevelId,
 } from './earth/windData';
+import {
+  buildGlobalTerrainTexture,
+  sampleElevationKmLonLat,
+} from './earth/terrainData';
 import {
   buildDivergenceFreeOcean,
   buildGlobalTempTexture,
@@ -214,12 +220,22 @@ const precipTimeBadge = document.getElementById('precipTimeBadge') as HTMLElemen
 const precipScaleBar = document.getElementById('precipScaleBar') as HTMLElement;
 const scaleMaxLabel = document.getElementById('scaleMaxLabel') as HTMLElement;
 
-const oceanCtx = oceanCanvas.getContext('2d', { willReadFrequently: true });
-const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
+const oceanCtx = oceanCanvas.getContext('2d');
+const windCtx = windCanvas.getContext('2d');
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
+let cachedOceanStreamSampler: { grid: OceanGrid | null; tintKey: string; sampler: ReturnType<typeof oceanGridToSampler> } | null = null;
+function getCachedOceanSampler(grid: OceanGrid, tint: [number, number, number]) {
+  const key = `${tint[0]},${tint[1]},${tint[2]}`;
+  if (cachedOceanStreamSampler && cachedOceanStreamSampler.grid === grid && cachedOceanStreamSampler.tintKey === key) {
+    return cachedOceanStreamSampler.sampler;
+  }
+  const sampler = oceanGridToSampler(grid, tint);
+  cachedOceanStreamSampler = { grid, tintKey: key, sampler };
+  return sampler;
+}
 
-const uniformsFloats = 52; // 208 bytes
+const uniformsFloats = 56; // 224 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
 const simData = new Float32Array(simSize);
@@ -333,6 +349,7 @@ let simBuffer: GPUBuffer | undefined;
 let oceanSimBuffer: GPUBuffer | undefined;
 let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
+let birdShadowPipeline: GPURenderPipeline | undefined;
 let mineralRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
 
@@ -345,14 +362,21 @@ let lifeStateBuffers: [GPUBuffer, GPUBuffer] | undefined;
 let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
+let windStackTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
 let tempTexture: GPUTexture | undefined;
+let tempStackTexture: GPUTexture | undefined;
 let uvTexture: GPUTexture | undefined;
 let hydroTexture: GPUTexture | undefined;
+let terrainTexture: GPUTexture | undefined;
 let watermanFwdTexture: GPUTexture | undefined;
 let watermanInvTexture: GPUTexture | undefined;
+let bgCacheTexture: GPUTexture | undefined;
+let bgCacheKey = '';
+let bgDataVersion = 0;
 
 let bgBindGroup: GPUBindGroup | undefined;
+let birdShadowBindGroup: GPUBindGroup | undefined;
 let mineralRenderBindGroup: GPUBindGroup | undefined;
 let renderBindGroup: GPUBindGroup | undefined;
 
@@ -1063,6 +1087,78 @@ bindGlobeInput(viewState, () => d3Proj, () => {
   wheelZooming = true;
 });
 
+const airStackGrids: (WindGrid | null)[] = [null, null, null, null];
+let upperStackHydrateStarted = false;
+
+function uploadTerrainToGpu() {
+  if (!device || !terrainTexture) return;
+  const texData = buildGlobalTerrainTexture(
+    currentUvGrid,
+    currentOceanGrid,
+    GRID_TEX_W,
+    GRID_TEX_H,
+  );
+  device.queue.writeTexture(
+    { texture: terrainTexture },
+    texData,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+  bgDataVersion++;
+}
+
+function uploadAirStackLayer(sliceIdx: number, grid: WindGrid) {
+  if (!device || !windStackTexture || !tempStackTexture) return;
+  airStackGrids[sliceIdx] = grid;
+  const windSlice = buildDivergenceFreeWind(grid, GRID_TEX_W, GRID_TEX_H);
+  device.queue.writeTexture(
+    { texture: windStackTexture, origin: { x: 0, y: 0, z: sliceIdx } },
+    windSlice,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+  const tempSlice = buildGlobalTempTexture(
+    grid,
+    currentOceanGrid,
+    GRID_TEX_W,
+    GRID_TEX_H,
+  );
+  device.queue.writeTexture(
+    { texture: tempStackTexture, origin: { x: 0, y: 0, z: sliceIdx } },
+    tempSlice,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+}
+
+function seedUpperAirStackFromSurface(surfaceGrid: WindGrid) {
+  uploadAirStackLayer(0, surfaceGrid);
+  if (!airStackGrids[1] || !airStackGrids[1].isLive) {
+    uploadAirStackLayer(1, synthesizeUpperAirGrid(surfaceGrid, '850hPa'));
+  }
+  if (!airStackGrids[2] || !airStackGrids[2].isLive) {
+    uploadAirStackLayer(2, synthesizeUpperAirGrid(surfaceGrid, '500hPa'));
+  }
+  if (!airStackGrids[3] || !airStackGrids[3].isLive) {
+    uploadAirStackLayer(3, synthesizeUpperAirGrid(surfaceGrid, '250hPa'));
+  }
+}
+
+function hydrateLiveUpperAirStack() {
+  if (upperStackHydrateStarted) return;
+  upperStackHydrateStarted = true;
+  for (let s = 1; s < AIR_STACK_LEVELS.length; s++) {
+    const lvl = AIR_STACK_LEVELS[s];
+    void fetchLiveGfsWind(lvl)
+      .then((live) => {
+        uploadAirStackLayer(s, live);
+      })
+      .catch(() => {
+        // Synthetic profile already active in this slice
+      });
+  }
+}
+
 function uploadTempToGpu() {
   if (freezeGameWeather && particleBuffers) return;
   if (!device || !tempTexture) return;
@@ -1078,6 +1174,24 @@ function uploadTempToGpu() {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  for (let s = 0; s < airStackGrids.length; s++) {
+    const g = airStackGrids[s];
+    if (g && tempStackTexture) {
+      const sliceTemp = buildGlobalTempTexture(
+        g,
+        currentOceanGrid,
+        GRID_TEX_W,
+        GRID_TEX_H,
+      );
+      device.queue.writeTexture(
+        { texture: tempStackTexture, origin: { x: 0, y: 0, z: s } },
+        sliceTemp,
+        { bytesPerRow: GRID_TEX_W * 16 },
+        { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+      );
+    }
+  }
+  bgDataVersion++;
   refreshTempHudBadges();
 }
 
@@ -1096,6 +1210,7 @@ function uploadUvToGpu() {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  bgDataVersion++;
   refreshUvHudBadges();
 }
 
@@ -1109,6 +1224,7 @@ function uploadHydroToGpu() {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  bgDataVersion++;
   refreshHydroHudBadges();
 }
 
@@ -1122,6 +1238,14 @@ function uploadWindToGpu(grid: WindGrid) {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  if (grid.level === 'surface') {
+    seedUpperAirStackFromSurface(grid);
+  } else {
+    const stackIdx = AIR_STACK_LEVELS.indexOf(grid.level);
+    if (stackIdx >= 0) {
+      uploadAirStackLayer(stackIdx, grid);
+    }
+  }
   uploadTempToGpu();
 }
 
@@ -1135,6 +1259,7 @@ function uploadOceanToGpu(grid: OceanGrid) {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
+  uploadTerrainToGpu();
   uploadTempToGpu();
 }
 
@@ -1699,11 +1824,13 @@ async function computeWorldStats() {
     mixotrophBlobs: 0,
     decomposerBlobs: 0,
     halophileBlobs: 0,
+    aerialBlobs: 0,
     producerParticles: 0,
     consumerParticles: 0,
     mixotrophParticles: 0,
     decomposerParticles: 0,
     halophileParticles: 0,
+    aerialParticles: 0,
   };
   const emptyStrategies = {
     earlyArmorBlobs: 0,
@@ -1714,6 +1841,9 @@ async function computeWorldStats() {
     return {
       total: 0,
       chemCount: 0,
+      chemGasCount: 0,
+      chemLiquidCount: 0,
+      chemIceCount: 0,
       bioCount: 0,
       cytoplasmCount: 0,
       lipidCount: 0,
@@ -1758,6 +1888,9 @@ async function computeWorldStats() {
 
   const total = data.particles.length;
   let chemCount = 0;
+  let chemGasCount = 0;
+  let chemLiquidCount = 0;
+  let chemIceCount = 0;
   let bioCount = 0;
   let cytoplasmCount = 0;
   let lipidCount = 0;
@@ -1837,6 +1970,10 @@ async function computeWorldStats() {
       }
     } else {
       chemCount++;
+      const comp = ls[1] ?? 0;
+      if (comp >= 1.5) chemIceCount++;
+      else if (comp >= 0.5) chemLiquidCount++;
+      else chemGasCount++;
       chemElementCounts[sym] = (chemElementCounts[sym] ?? 0) + 1;
       if (el.atomicNumber === 7 || el.atomicNumber === 13) {
         halogenIndices.push(i);
@@ -2015,7 +2152,10 @@ async function computeWorldStats() {
       }
     }
 
-    if (summary.role === 'producer') {
+    if (summary.role === 'aerial') {
+      emergentRoles.aerialBlobs++;
+      emergentRoles.aerialParticles += comp.length;
+    } else if (summary.role === 'producer') {
       emergentRoles.producerBlobs++;
       emergentRoles.producerParticles += comp.length;
     } else if (summary.role === 'consumer') {
@@ -2036,6 +2176,9 @@ async function computeWorldStats() {
   return {
     total,
     chemCount,
+    chemGasCount,
+    chemLiquidCount,
+    chemIceCount,
     bioCount,
     cytoplasmCount,
     lipidCount,
@@ -2166,7 +2309,6 @@ function syncStreamCanvasOpacity() {
 syncStreamCanvasOpacity();
 
 let freezeGameWeather = false;
-let frameInFlight = false;
 let deviceLost = false;
 let gamePipeline: GPUComputePipeline | undefined;
 let gameUniform: GPUBuffer | undefined;
@@ -2912,8 +3054,8 @@ function syncCanvasDimensions() {
       c.height = h;
     }
   }
-  mapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   if (viewState.width !== w || viewState.height !== h) {
+    mapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
     if (incidentCameraLocked) {
       viewState.scale *= Math.min(w, h) / Math.min(viewState.width, viewState.height);
       viewState.pan = [viewState.pan[0] * w / viewState.width, viewState.pan[1] * h / viewState.height];
@@ -2971,7 +3113,12 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   if (!bgContext || !context) return;
 
   const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-  bgContext.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
+  bgContext.configure({
+    device,
+    format: presentationFormat,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+    alphaMode: 'opaque',
+  });
   context.configure({ device, format: presentationFormat, alphaMode: 'premultiplied' });
 
   uniformBuffer = device.createBuffer({
@@ -3002,6 +3149,12 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'windTexture',
   });
+  windStackTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 4 },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'windStackTexture',
+  });
   oceanTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -3014,6 +3167,13 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'tempTexture',
   });
+  tempStackTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 4 },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'tempStackTexture',
+  });
+  seedUpperAirStackFromSurface(currentWindGrid);
   uploadTempToGpu();
   uvTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
@@ -3029,6 +3189,13 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     label: 'hydroTexture',
   });
   uploadHydroToGpu();
+  terrainTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'terrainTexture',
+  });
+  uploadTerrainToGpu();
   watermanFwdTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -3072,6 +3239,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
       { binding: 4, resource: tempTexture.createView() },
       { binding: 5, resource: uvTexture.createView() },
       { binding: 6, resource: hydroTexture.createView() },
+      { binding: 7, resource: terrainTexture.createView() },
     ],
   });
 
@@ -3134,6 +3302,21 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     fragment: {
       module: renderModule,
       entryPoint: 'fragment',
+      targets: renderTargets,
+    },
+    primitive: { topology: 'triangle-strip' },
+  });
+
+  birdShadowPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: renderModule,
+      entryPoint: 'vertexBirdShadows',
+      buffers: particleVertexBuffers,
+    },
+    fragment: {
+      module: renderModule,
+      entryPoint: 'fragmentShadow',
       targets: renderTargets,
     },
     primitive: { topology: 'triangle-strip' },
@@ -3261,9 +3444,11 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   if (loadedUv) {
     currentUvGrid = loadedUv;
     uploadUvToGpu();
+    uploadTerrainToGpu();
   }
 
   startWorld();
+  hydrateLiveUpperAirStack();
   window.setInterval(() => {
     if (uvUtcOverrideMs === null) {
       uploadUvToGpu();
@@ -3420,20 +3605,63 @@ function render(commandEncoder: GPUCommandEncoder) {
     return;
   }
 
-  const bgPass = commandEncoder.beginRenderPass({
-    colorAttachments: [
-      {
-        view: bgContext.getCurrentTexture().createView(),
-        clearValue: [0, 0, 0.0196, 1],
-        loadOp: 'clear',
-        storeOp: 'store',
-      },
-    ],
-  });
-  bgPass.setPipeline(bgRenderPipeline);
-  bgPass.setBindGroup(0, bgBindGroup);
-  bgPass.draw(3, 1, 0, 0);
-  bgPass.end();
+  const bgTargetTex = bgContext.getCurrentTexture();
+  if (
+    !bgCacheTexture ||
+    bgCacheTexture.width !== bgTargetTex.width ||
+    bgCacheTexture.height !== bgTargetTex.height
+  ) {
+    bgCacheTexture?.destroy();
+    bgCacheTexture = device.createTexture({
+      size: { width: bgTargetTex.width, height: bgTargetTex.height },
+      format: navigator.gpu.getPreferredCanvasFormat(),
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      label: 'bgCacheTexture',
+    });
+    bgCacheKey = '';
+  }
+
+  const lens = tooltipManager.getLensState();
+  const nextBgKey = [
+    bgTargetTex.width,
+    bgTargetTex.height,
+    viewSignature,
+    bgDataVersion,
+    earthParams.viewLayer,
+    earthParams.terrainOpacity.toFixed(3),
+    earthParams.nightShading.toFixed(3),
+    earthParams.oceanColors.toFixed(3),
+    earthParams.windColors.toFixed(3),
+    earthParams.tempColors.toFixed(3),
+    earthParams.uvColors.toFixed(3),
+    earthParams.rhColors.toFixed(3),
+    earthParams.precipColors.toFixed(3),
+    lens.active ? `${Math.round(lens.x)},${Math.round(lens.y)},${lens.mag.toFixed(2)}` : '0',
+  ].join('|');
+
+  if (nextBgKey !== bgCacheKey) {
+    const bgPass = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: bgCacheTexture.createView(),
+          clearValue: [0, 0, 0.0196, 1],
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    });
+    bgPass.setPipeline(bgRenderPipeline);
+    bgPass.setBindGroup(0, bgBindGroup);
+    bgPass.draw(3, 1, 0, 0);
+    bgPass.end();
+    bgCacheKey = nextBgKey;
+  }
+
+  commandEncoder.copyTextureToTexture(
+    { texture: bgCacheTexture },
+    { texture: bgTargetTex },
+    { width: bgTargetTex.width, height: bgTargetTex.height, depthOrArrayLayers: 1 },
+  );
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     colorAttachments: [
@@ -3446,8 +3674,9 @@ function render(commandEncoder: GPUCommandEncoder) {
     ],
   };
 
+  const profileRender = (frameCount % 12) === 0;
   const passEncoder = commandEncoder.beginRenderPass(
-    linkRenderTimestamp(device, renderPassDescriptor, 'render'),
+    profileRender ? linkRenderTimestamp(device, renderPassDescriptor, 'render') : renderPassDescriptor,
   );
 
   const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
@@ -3460,6 +3689,14 @@ function render(commandEncoder: GPUCommandEncoder) {
       passEncoder.setVertexBuffer(1, valenceBuffer);
       passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
       passEncoder.setBindGroup(0, mineralRenderBindGroup);
+      passEncoder.draw(6, particleAmt, 0, 0);
+    }
+    if (showLife && earthParams.birdExaggeration > 0.001 && birdShadowPipeline && birdShadowBindGroup) {
+      passEncoder.setPipeline(birdShadowPipeline);
+      passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
+      passEncoder.setVertexBuffer(1, valenceBuffer);
+      passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
+      passEncoder.setBindGroup(0, birdShadowBindGroup);
       passEncoder.draw(6, particleAmt, 0, 0);
     }
     if ((showChem || showLife) && renderPipeline && renderBindGroup) {
@@ -3488,7 +3725,7 @@ function render(commandEncoder: GPUCommandEncoder) {
   }
 
   passEncoder.end();
-  resolveTimestamp(commandEncoder, 'render');
+  if (profileRender) resolveTimestamp(commandEncoder, 'render');
 }
 
 function packLifeMetaJs(
@@ -3497,18 +3734,21 @@ function packLifeMetaJs(
   kinAngle: number,
   encapGene: number = 7,
   graduated: number = 0,
+  flightMode: number = 0,
 ): number {
   if (phase === 0) return 0;
   const twoPi = Math.PI * 2;
   let a = kinAngle % twoPi;
   if (a < 0) a += twoPi;
-  const k = Math.floor((a / twoPi) * 512) & 511;
+  const k = Math.floor((a / twoPi) * 256) & 255;
+  const fl = flightMode ? 1 : 0;
   const g = Math.max(0, Math.min(15, Math.floor(encapGene)));
   const gr = graduated ? 1 : 0;
   return (
     (phase & 3) |
     ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) |
     (k << 10) |
+    (fl << 18) |
     (g << 19) |
     (gr << 23)
   ) >>> 0;
@@ -3523,10 +3763,13 @@ function startWorld() {
     !oceanSimBuffer ||
     !bioUniformBuffer ||
     !windTexture ||
+    !windStackTexture ||
     !oceanTexture ||
     !tempTexture ||
+    !tempStackTexture ||
     !uvTexture ||
     !hydroTexture ||
+    !terrainTexture ||
     !watermanFwdTexture
   ) {
     return;
@@ -3740,20 +3983,46 @@ function startWorld() {
     return [cLat * Math.cos(lonR), cLat * Math.sin(lonR), Math.sin(latR)];
   };
 
+  const sampleLandHumidCenter = (): [number, number, number] => {
+    let lonDeg = (rng() - 0.5) * 360;
+    let latDeg = (rng() - 0.5) * 60;
+    for (let t = 0; t < 110; t++) {
+      const candLon = (rng() - 0.5) * 360;
+      const candLat = Math.asin(rng() * 1.35 - 0.675) * (180 / Math.PI);
+      const isLand = !currentOceanGrid || sampleOceanLonLat(currentOceanGrid, candLon, candLat)[3] < 0.38;
+      if (!isLand) continue;
+      const elev = sampleElevationKmLonLat(currentUvGrid, candLon, candLat);
+      if (elev >= 3.2) continue;
+      const hydro = currentHydroGrid ? sampleHydroLonLat(currentHydroGrid, candLon, candLat) : { rhPct: 68, precip3hMm: 0.4 };
+      const tempK = sampleWindTempLonLat(currentWindGrid, candLon, candLat)[1];
+      if ((hydro.precip3hMm >= 0.25 || hydro.rhPct >= 56) && tempK >= 281.0) {
+        lonDeg = candLon;
+        latDeg = candLat;
+        break;
+      }
+    }
+    const lonR = lonDeg * DEG2RAD;
+    const latR = latDeg * DEG2RAD;
+    const cLat = Math.cos(latR);
+    return [cLat * Math.cos(lonR), cLat * Math.sin(lonR), Math.sin(latR)];
+  };
+
   let bioCursor = 0;
+  const numLandProducers = Math.round(numBlobs * 0.35);
   if (numBlobs > 0) {
     for (let bi = 0; bi < numBlobs; bi++) {
       const endCursor =
         bi === numBlobs - 1
           ? targetBio
           : Math.min(targetBio, Math.round(((bi + 1) * targetBio) / numBlobs));
-      const [cx, cy, cz] = sampleOceanCenter();
+      const seedOnLand = bi < numLandProducers;
+      const [cx, cy, cz] = seedOnLand ? sampleLandHumidCenter() : sampleOceanCenter();
       const [e1x, e1y, e1z] = unitTangentFromSphere(cx, cy, cz, rng() * Math.PI * 2);
       const e2x = cy * e1z - cz * e1y;
       const e2y = cz * e1x - cx * e1z;
       const e2z = cx * e1y - cy * e1x;
       const kinPhase = rng() * Math.PI * 2;
-      const blobSpecies = pickHeterogeneousSpeciesSet(bi % 2 === 1);
+      const blobSpecies = pickHeterogeneousSpeciesSet(!seedOnLand && bi % 2 === 1);
       const patchGene =
         bi % 3 === 0
           ? 1 + Math.floor(rng() * 4)
@@ -3816,6 +4085,31 @@ function startWorld() {
     particleData[b + 8] = ux;
     particleData[b + 9] = uy;
     particleData[b + 10] = uz;
+
+    const el = elements[elemChoice[pi]];
+    const lonDeg = Math.atan2(ny, nx) * (180 / Math.PI);
+    const latDeg = Math.asin(Math.max(-1, Math.min(1, nz))) * (180 / Math.PI);
+    const inSea = currentOceanGrid ? sampleOceanLonLat(currentOceanGrid, lonDeg, latDeg)[3] >= 0.45 : true;
+    let initComp = 0;
+    let initAlt = 0.08 + 0.48 * rng();
+    if (el && el.valence > 0) {
+      if (el.atomicNumber === 1) {
+        initComp = inSea ? 1 : rng() < 0.25 ? 1 : 0;
+      } else if (el.atomicNumber === 6) {
+        initComp = inSea && rng() < 0.72 ? 1 : 0;
+      } else if (el.atomicNumber === 5) {
+        const seaT = currentOceanGrid ? sampleOceanSstLonLat(currentOceanGrid, lonDeg, latDeg)[0] : 288.15;
+        initComp = inSea && seaT < 290.0 ? 1 : 0;
+      } else if (inSea && el.atomicNumber !== 2 && el.atomicNumber !== 8 && el.atomicNumber !== 14) {
+        initComp = 1;
+      }
+      if (initComp >= 1) initAlt = 0;
+    }
+    const lBase = pi * 4;
+    lifeData[lBase + 0] = 0;
+    lifeData[lBase + 1] = initComp;
+    lifeData[lBase + 2] = initAlt;
+    lifeData[lBase + 3] = 0;
   };
 
   const freePool = [...biogenicPool.slice(bioCursor), ...abioticPool];
@@ -3997,7 +4291,7 @@ function startWorld() {
           const lBase = pi * 4;
           const oldPacked = Math.round(lifeData[lBase + 3]);
           const trap = (oldPacked >>> 23) & 1;
-          const ang = (((oldPacked >>> 10) & 511) / 512) * Math.PI * 2;
+          const ang = (((oldPacked >>> 10) & 255) / 256) * Math.PI * 2;
           lifeData[lBase + 3] = packLifeMetaJs(3, mType, ang, veinGrade, trap);
         }
       }
@@ -4032,10 +4326,13 @@ function startWorld() {
     valenceBuffer,
     bioForceBuffer,
     windTexView: windTexture.createView(),
+    windStackTexView: windStackTexture.createView({ dimension: '2d-array' }),
     oceanTexView: oceanTexture.createView(),
     tempTexView: tempTexture.createView(),
+    tempStackTexView: tempStackTexture.createView({ dimension: '2d-array' }),
     uvTexView: uvTexture.createView(),
     hydroTexView: hydroTexture.createView(),
+    terrainTexView: terrainTexture.createView(),
     particleAmt,
     cellAmt: params.cells,
   };
@@ -4051,6 +4348,18 @@ function startWorld() {
           { binding: 1, resource: watermanFwdTexture.createView() },
           { binding: 2, resource: { buffer: worldColoursBuffer } },
           { binding: 3, resource: { buffer: worldRulesBuffer } },
+          { binding: 4, resource: uvTexture.createView() },
+        ],
+      })
+    : undefined;
+
+  birdShadowBindGroup = birdShadowPipeline
+    ? device.createBindGroup({
+        layout: birdShadowPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: watermanFwdTexture.createView() },
+          { binding: 4, resource: uvTexture.createView() },
         ],
       })
     : undefined;
@@ -4062,6 +4371,7 @@ function startWorld() {
       { binding: 1, resource: watermanFwdTexture.createView() },
       { binding: 2, resource: { buffer: worldColoursBuffer } },
       { binding: 3, resource: { buffer: worldRulesBuffer } },
+      { binding: 4, resource: uvTexture.createView() },
     ],
   });
   syncEpisodeTracking();
@@ -4130,13 +4440,17 @@ function writeUniforms() {
   uniformData[49] = earthParams.precipColors;
   uniformData[50] = earthParams.localHydro ? earthParams.hydroStrength : 0;
   uniformData[51] = 0;
+  uniformData[52] = earthParams.terrainOpacity;
+  uniformData[53] = earthParams.nightShading;
+  uniformData[54] = earthParams.birdExaggeration;
+  uniformData[55] = 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
 
 function update() {
   requestAnimationFrame(update);
-  if (!device || !context || !bgContext || !particleBuffers || deviceLost || frameInFlight) return;
+  if (!device || !context || !bgContext || !particleBuffers || deviceLost) return;
 
   const start = performance.now();
   const frameDtMs = lastTime > 0 ? start - lastTime : 16.67;
@@ -4181,6 +4495,7 @@ function update() {
       { bytesPerRow: luts.invW * 16 },
       { width: luts.invW, height: luts.invH, depthOrArrayLayers: 1 },
     );
+    bgDataVersion++;
   }
 
   if (mapDirty) {
@@ -4207,7 +4522,7 @@ function update() {
       viewState.width,
       viewState.height,
       d3Proj,
-      oceanGridToSampler(currentOceanGrid, oceanTint),
+      getCachedOceanSampler(currentOceanGrid, oceanTint),
       viewSignature,
       showOcean && earthParams.oceanLines > 0.001,
       cameraMoving,
@@ -4229,7 +4544,10 @@ function update() {
 
   tooltipManager.tick();
 
-  device.pushErrorScope('validation');
+  const checkValidation = frameCount <= 120 || (frameCount % 60 === 0);
+  if (checkValidation) {
+    device.pushErrorScope('validation');
+  }
   const commandEncoder = device.createCommandEncoder();
   if (game.mode === 'off') stepWorld(undefined,undefined,commandEncoder);
   else { game.frame(start); writeUniforms(); }
@@ -4238,8 +4556,6 @@ function update() {
 
   const commands = commandEncoder.finish();
   device.queue.submit([commands]);
-  frameInFlight = true;
-  void device.queue.onSubmittedWorkDone().then(() => { frameInFlight = false; }, () => { frameInFlight = false; });
 
   if (pendingLensReadbackIdx !== null && lensReadbackBuffers) {
     const slot = pendingLensReadbackIdx;
@@ -4270,33 +4586,37 @@ function update() {
       });
   }
 
-  device.popErrorScope().then((error) => {
-    if (error) {
-      console.error('WebGPU validation error:', error.message);
-      if (!window.location.search.includes('noTimestamp')) {
-        const url = new URL(window.location.href);
-        url.searchParams.set('noTimestamp', '');
-        window.location.replace(url.toString());
+  if (checkValidation) {
+    device.popErrorScope().then((error) => {
+      if (error) {
+        console.error('WebGPU validation error:', error.message);
+        if (!window.location.search.includes('noTimestamp')) {
+          const url = new URL(window.location.href);
+          url.searchParams.set('noTimestamp', '');
+          window.location.replace(url.toString());
+        }
       }
-    }
-  }).catch(() => { /* device.lost reports disconnection */ });
+    }).catch(() => { /* device.lost reports disconnection */ });
+  }
 
   const cpuTime = performance.now() - start;
   globalPerformanceParams.cpu = cpuTime;
   updateTotal();
 
-  for (const engine2 in engines) {
-    if (engine == engine2) {
-      engines[engine2].updateDisplays(
-        performanceParams[engine2 as keyof typeof performanceParams],
-      );
+  if (frameCount % 12 === 0) {
+    for (const engine2 in engines) {
+      if (engine == engine2) {
+        engines[engine2].updateDisplays(
+          performanceParams[engine2 as keyof typeof performanceParams],
+        );
+      }
     }
-  }
 
-  readTimestamp('render').then((time) => {
-    globalPerformanceParams.render = time;
-    updateTotal();
-  });
+    readTimestamp('render').then((time) => {
+      globalPerformanceParams.render = time;
+      updateTotal();
+    });
+  }
 
   fpsc++;
 }

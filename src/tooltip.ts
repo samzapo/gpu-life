@@ -1,9 +1,9 @@
 import type * as d3Geo from 'd3-geo';
-import { lonLatToUnitVec } from './earth/projections';
-import type { LocalUvSample } from './earth/uvData';
-import type { LocalHydroSample } from './earth/hydroData';
-import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D';
-import type { ViewLayerMode } from './options';
+import { lonLatToUnitVec } from './earth/projections.ts';
+import type { LocalUvSample } from './earth/uvData.ts';
+import type { LocalHydroSample } from './earth/hydroData.ts';
+import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D.ts';
+import type { ViewLayerMode } from './options.ts';
 
 export interface HoverSimSnapshot {
   elements: Element2D[];
@@ -197,13 +197,15 @@ export type EmergentBlobRole =
   | 'consumer'
   | 'mixotroph'
   | 'decomposer'
-  | 'halophile';
+  | 'halophile'
+  | 'aerial';
 
 export interface EmergentBlobSummary {
   size: number;
   cytoplasmCount: number;
   lipidCount: number;
   graduatedCount: number;
+  flightCount: number;
   graduated: boolean;
   encapsulated: boolean;
   distinctSpecies: number;
@@ -259,6 +261,7 @@ export function summarizeAndClassifyBlob(
   let cytoplasmCount = 0;
   let lipidCount = 0;
   let graduatedCount = 0;
+  let flightCount = 0;
   let eSum = 0;
   let vitSum = 0;
   let poiSum = 0;
@@ -274,6 +277,7 @@ export function summarizeAndClassifyBlob(
     const ls = lifeState[id] ?? [0.65, 0, 0, 1];
     const meta = unpackLifeMeta(ls);
     if (meta.graduated) graduatedCount++;
+    if (meta.flightMode) flightCount++;
     const el = elements[Math.max(0, Math.min(elements.length - 1, Math.floor(p?.[6] ?? 0)))];
     if (el) {
       const s = getElementSymbol(el.atomicNumber);
@@ -318,11 +322,11 @@ export function summarizeAndClassifyBlob(
   const avgSolarFrac = cytoplasmCount > 0 ? solarSum / bioN : 0.65;
   const avgRedoxFrac = cytoplasmCount > 0 ? redoxSum / bioN : 0.35;
   const avgMotility = cytoplasmCount > 0 ? Math.max(0, Math.min(1.5, speedSum / bioN / 0.45)) : 0;
-  const lightExposure = Math.max(0.45, Math.min(1.0, 1.12 - 0.015 * Math.min(cytoplasmCount, 45)));
+  const lightExposure = Math.max(0.64, Math.min(1.0, 1.16 - 0.008 * Math.min(cytoplasmCount, 65)));
 
   const autoCap = Math.max(
-    0.08,
-    Math.min(1.35, ((0.35 + 0.85 * avgCoh) * (0.45 + 0.85 * avgSolarFrac) * lightExposure) / (1 + 0.65 * avgMotility)),
+    0.12,
+    Math.min(1.55, ((0.42 + 0.9 * avgCoh) * (0.5 + 0.85 * avgSolarFrac) * lightExposure) / (1 + 0.45 * avgMotility)),
   );
   const predCap = Math.max(
     0.05,
@@ -335,18 +339,18 @@ export function summarizeAndClassifyBlob(
   const haloTol = Math.max(0, Math.min(1, 0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh));
 
   let role: EmergentBlobRole = 'producer';
-  if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
+  if (flightCount > 0 && flightCount >= Math.ceil(bioN * 0.35)) {
+    role = 'aerial';
+  } else if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
     role = 'halophile';
   } else if (
     (avgEnergy < 0.36 && decompCap >= 0.45) ||
     (decompCap > autoCap * 1.12 && decompCap > predCap * 1.05 && avgRedoxFrac >= 0.42)
   ) {
     role = 'decomposer';
-  } else if (autoCap >= 0.46 && predCap >= 0.46 && avgAsym >= 0.35) {
+  } else if (autoCap >= 0.48 && predCap >= 0.48 && avgAsym >= 0.4 && avgMotility >= 0.35) {
     role = 'mixotroph';
-  } else if (predCap > autoCap * 1.02 && avgAsym >= 0.32) {
-    role = 'consumer';
-  } else if (avgAsym > avgCoh * 1.15 && avgAsym >= 0.46) {
+  } else if (predCap > autoCap * 1.08 && avgMotility >= 0.32 && avgAsym >= 0.36) {
     role = 'consumer';
   }
 
@@ -355,7 +359,8 @@ export function summarizeAndClassifyBlob(
     cytoplasmCount,
     lipidCount,
     graduatedCount,
-    graduated: graduatedCount >= 4 && cytoplasmCount >= 40,
+    flightCount,
+    graduated: graduatedCount >= 4 && cytoplasmCount >= 28,
     encapsulated: lipidCount >= 4,
     distinctSpecies: spSet.size,
     formula: formatFormula(formulaCounts),
@@ -404,18 +409,20 @@ export function unpackLifeMeta(ls: number[] | undefined): {
   phase: number;
   bioSpecies: number;
   kinPhase: number;
+  flightMode: boolean;
   encapGene: number;
   graduated: boolean;
 } {
   const packed = ls?.[3] ?? 0;
   if (packed < 0.5) {
-    return { phase: 0, bioSpecies: 0, kinPhase: 0, encapGene: 7, graduated: false };
+    return { phase: 0, bioSpecies: 0, kinPhase: 0, flightMode: false, encapGene: 7, graduated: false };
   }
   const u = Math.round(packed);
   return {
     phase: u & 3,
     bioSpecies: (u >>> 2) & 255,
-    kinPhase: (((u >>> 10) & 511) / 512) * Math.PI * 2,
+    kinPhase: (((u >>> 10) & 255) / 256) * Math.PI * 2,
+    flightMode: ((u >>> 18) & 1) === 1,
     encapGene: (u >>> 19) & 15,
     graduated: ((u >>> 23) & 1) === 1,
   };
@@ -823,15 +830,27 @@ export function analyzeReactionAt(
 
     if (includeSingletons) {
       const inert = el0.valence === 0;
+      const ls0 = snap.lifeState[bestIdx] ?? [0, 0, 0, 0];
+      const comp = ls0[1] ?? 0;
+      const alt01 = ls0[2] ?? 0;
+      const ocMaskChem = cfg.getOceanMask ? cfg.getOceanMask([p0[0], p0[1], p0[2]]) : 1;
+      const mediumLabel =
+        comp >= 1.5
+          ? 'Polar Sea Ice'
+          : comp >= 0.5
+            ? ocMaskChem >= 0.42
+              ? 'Ocean / Aqueous Water'
+              : 'Continental Runoff / Soil'
+            : `Atmospheric Gas (${Math.round(1000 - alt01 * 750)} hPa)`;
       return {
-        theme: 'chem',
-        badge: inert ? 'NOBLE GAS' : 'FREE ATOM',
+        theme: comp >= 0.5 ? 'ocean' : 'chem',
+        badge: inert ? 'NOBLE GAS' : comp >= 1.5 ? 'CRYOSPHERE ICE' : comp >= 0.5 ? 'AQUEOUS / HYDROSPHERE' : 'ATMOSPHERIC GAS',
         tempTag: airTempChip,
         title: `${selectedElement.name} (${sym0}) Atom`,
         body: inert
-          ? `Inert ${sym0} (${el0.subshellLabel}) drifting on atmospheric wind currents; permanently abiotic (filled outer shell).`
-          : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'}, drifting in Chemistry phase.`,
-        meta: `Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localChemIdx.length - 1)}`,
+          ? `Inert ${sym0} (${el0.subshellLabel}) drifting across upper and surface wind layers (${mediumLabel}); permanently abiotic.`
+          : `Unbonded ${sym0} (${el0.subshellLabel}) monomer with ${el0.valence} open valence slot${el0.valence === 1 ? '' : 's'} cycling through ${mediumLabel}.`,
+        meta: `${mediumLabel} · Valence [${el0.outerElectrons}/${el0.outerCapacity}] · Nearby atoms: ${Math.max(0, localChemIdx.length - 1)}`,
         element: selectedElement,
         targetPhase: 0,
         targetIdx: bestIdx,
@@ -1141,6 +1160,13 @@ export function analyzeReactionAt(
           : 'MIXOTROPH BLOB';
       title = `${blob.graduated ? 'Complex Mixotroph Organism' : `Mixotroph ${blob.encapsulated ? 'Protocell' : 'Swimmer'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
       statusDesc = `Hybrid ${blob.formula} anatomy (${encapTag}, ${strategyGeneStr}) pairing a cohesive C/O photosynthetic core (coh=${blob.avgCoh.toFixed(2)}) with a motile tail (asym=${blob.avgAsym.toFixed(2)}).`;
+    } else if (blob.role === 'aerial') {
+      theme = 'complex';
+      badge = 'AERIAL FLOCKER · BIRD LIFE';
+      const birdAlt = Math.max(0, Math.min(1, p0[11] ?? 0.45));
+      const hpa = Math.round(1000 - birdAlt * 750);
+      title = `Aerial Flocker / Bird (${blob.cytoplasmCount} ${cellWord} · ${hpa} hPa)`;
+      statusDesc = `Soaring graduated ${blob.formula} flyer gliding on ${hpa} hPa upper winds (asym=${blob.avgAsym.toFixed(2)}, motility=${blob.avgMotility.toFixed(2)}) and diving to forage over productive coasts & canopies.`;
     } else if (blob.role === 'consumer') {
       theme = blob.graduated ? 'complex' : 'catabolic';
       badge = blob.graduated

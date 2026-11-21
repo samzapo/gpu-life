@@ -202,7 +202,11 @@ fn integrateOceanParticle(
     accTorque: f32,
     myPhase: u32,
     sim: OceanSim,
-    oceanTex: texture_2d<f32>,
+    oc: vec4f,
+    windRaw: vec3f,
+    windStrength: f32,
+    windRefSpeed: f32,
+    terrainSample: vec4f,
     tSample: vec4f,
     localTempScale: f32,
     mouseSphere: vec4f,
@@ -214,14 +218,27 @@ fn integrateOceanParticle(
 
     let eEast = sphereEastBasis(p.pos);
     let eNorth = normalize(cross(p.pos, eEast));
-    let oc = sampleOceanTexture(oceanTex, p.pos);
+    let myFlight = unpackFlightMode(oceanState.w);
     let tHabK = effectiveSurfaceTempK(tSample, oc.w);
     let tBlend = clamp(localTempScale, 0.0, 1.5);
+    let elevKm = max(0.0, terrainSample.x);
 
     var cTarget = vec3f(0.0);
-    if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
+    if (myFlight == 1u && myPhase == 1u) {
+        // Aerial / Bird life rides upper-tropospheric winds across both oceans and continents
+        let wind3D = windRaw.x * eEast + windRaw.y * eNorth;
+        cTarget = (wind3D / max(windRefSpeed, 4.0)) * (0.48 * max(windStrength, 0.25));
+        let wLen = length(cTarget);
+        if (wLen > 1.25) {
+            cTarget *= 1.25 / wLen;
+        }
+    } else if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
         let cur3D = oc.x * eEast + oc.y * eNorth;
         cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * smoothstep(0.35, 0.55, oc.w);
+        // Buoyant marine producers experience light surface windage/Stokes drift
+        if (bioSteer.w < -0.05) {
+            cTarget += ((windRaw.x * eEast + windRaw.y * eNorth) / max(windRefSpeed, 6.0)) * (0.045 * max(windStrength, 0.0));
+        }
         let cLen = length(cTarget);
         if (cLen > 1.15) {
             cTarget *= 1.15 / cLen;
@@ -243,12 +260,15 @@ fn integrateOceanParticle(
     let vitality = baseVitality * select(thermFluid, mix(0.90, thermFluid, 0.65), myPhase == 2u);
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
-    // Zero ocean-current sweep over land (cTarget == 0), with gentle substrate surface grip
-    let substrateDrag = mix(1.0, 0.94, landFrac) * frostDrag;
+    // Terrestrial producers anchor firmly into wet soil; mobile land consumers face gentle steep-slope drag
+    let isLandSessile = (myFlight == 0u) && (landFrac > 0.45) && (bioSteer.w < -0.04);
+    let soilGrip = select(0.94, 0.72, isLandSessile);
+    let substrateDrag = mix(1.0, soilGrip, landFrac) * frostDrag;
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
+    let slopeResist = select(vec3f(0.0), -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.06 * smoothstep(0.4, 3.0, elevKm)), landFrac > 0.40 && myFlight == 0u);
     let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
     let vRel = vTang - cTarget;
-    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + (netForce * vitality + linBioSteer) * sim.dt;
+    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + ((netForce * vitality + linBioSteer) + slopeResist) * sim.dt;
 
     p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 
@@ -277,7 +297,12 @@ fn integrateOceanParticle(
     p.pos = stepRes.pos;
     p.vel = stepRes.vel;
     p.orient = stepRes.orient;
-    p._pad = clamp(bioSteer.w, -1.0, 1.0);
+    if (myFlight == 1u && myPhase == 1u && bioSteer.w > 1.05) {
+        let targetAlt = clamp(bioSteer.w - 1.15, 0.08, 0.95);
+        p._pad = mix(clamp(pIn._pad, 0.0, 1.0), targetAlt, clamp(3.0 * sim.dt, 0.0, 0.25));
+    } else {
+        p._pad = clamp(bioSteer.w, -1.0, 1.0);
+    }
     return p;
 }
 

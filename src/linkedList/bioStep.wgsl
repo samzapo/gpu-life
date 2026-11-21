@@ -17,10 +17,11 @@ struct LinkedList {
 @group(0) @binding(7) var<storage, read_write> bioForceOut: array<vec4f>;
 @group(0) @binding(8) var<storage, read> heads: HeadsRead;
 @group(0) @binding(9) var<storage, read> linkedList: LinkedList;
-@group(0) @binding(10) var windTex: texture_2d<f32>;
-@group(0) @binding(11) var tempTex: texture_2d<f32>;
+@group(0) @binding(10) var windStackTex: texture_2d_array<f32>;
+@group(0) @binding(11) var tempStackTex: texture_2d_array<f32>;
 @group(0) @binding(12) var uvTex: texture_2d<f32>;
 @group(0) @binding(13) var hydroTex: texture_2d<f32>;
+@group(0) @binding(14) var terrainTex: texture_2d<f32>;
 
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -39,15 +40,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let myAtomicNum = u32(matrix[mySBase + 7u]);
     let myV = valence[pi];
     let myAtomLoad = select(0.0, myV.x + myV.y + myV.z, myPhase == 0u);
-    let windRaw = sampleWindTexture(windTex, p.pos);
-    let oc = sampleOceanTexture(oceanTex, p.pos);
-    let tSample = sampleTempTexture(tempTex, p.pos);
-    let uvSample = sampleUvTexture(uvTex, p.pos);
-    let hydroSample = sampleHydroTexture(hydroTex, p.pos);
+    let myFlight = unpackFlightMode(curLife.w);
+    let alt01 = select(0.0, select(clamp(p._pad, 0.0, 1.0), clamp(curLife.z, 0.0, 1.0), myPhase == 0u), (myPhase == 0u && curLife.y < 0.5) || (myPhase == 1u && myFlight == 1u));
+    let eq = makeEquirectCoord(p.pos, textureDimensions(oceanTex, 0));
+    let windRaw = sampleWindArrayAtAltCoord(windStackTex, eq, alt01);
+    let oc = sampleOceanTextureCoord(oceanTex, eq);
+    let tSample = sampleTempArrayAtAltCoord(tempStackTex, eq, alt01);
+    let uvSample = sampleUvTextureCoord(uvTex, eq);
+    let hydroSample = sampleHydroTextureCoord(hydroTex, eq);
+    let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);
 
     if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, tSample, uvSample, hydroSample, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, initBioUnifiedAccum(), bio,
         );
         lifeStateOut[pi] = resOff.nextLifeState;
         bioForceOut[pi] = resOff.bioForce;
@@ -59,6 +64,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cmin = vec3i(floor((worldP - bio.catRadius) / bio.cellSize));
     let cmax = vec3i(floor((worldP + bio.catRadius) / bio.cellSize));
     let numCells = arrayLength(&heads.data);
+    let maxAng = bio.catRadius / max(bio.worldSize, 0.25);
+    let maxChord2 = maxAng * maxAng;
 
     for (var cx = cmin.x; cx <= cmax.x; cx++) {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
@@ -68,35 +75,39 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 while (elementIndex != 0xffffffffu && elementIndex < arrayLength(&linkedList.data)) {
                     let ip = linkedList.data[elementIndex];
                     if (ip.idx != pi) {
-                        let nbSc = min(u32(ip.colour), nChem - 1u);
-                        let nbSBase = nbSc * SPECIES_STRIDE;
-                        let nbValence = u32(matrix[nbSBase + 0u]);
-                        let nbAtomicNum = u32(matrix[nbSBase + 7u]);
-                        let nbV = valence[ip.idx];
-                        let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
-                        let nbLife = lifeStateIn[ip.idx];
-                        let nbVel = input[ip.idx].vel;
-                        accumulateBioUnifiedNeighbor(
-                            p.pos,
-                            p.vel,
-                            myPhase,
-                            myAtomicNum,
-                            myValence,
-                            myAtomLoad,
-                            curLife,
-                            ip.pos,
-                            nbVel,
-                            ip.colour,
-                            ip.phase,
-                            ip.bioSpecies,
-                            nbLife,
-                            nbAtomLoad,
-                            nbAtomicNum,
-                            nbValence,
-                            oc,
-                            bio,
-                            &acc,
-                        );
+                        let dVec = ip.pos - p.pos;
+                        let chord2 = dot(dVec, dVec);
+                        if (chord2 > 1e-12 && chord2 < maxChord2) {
+                            let nbSc = min(u32(ip.colour), nChem - 1u);
+                            let nbSBase = nbSc * SPECIES_STRIDE;
+                            let nbValence = u32(matrix[nbSBase + 0u]);
+                            let nbAtomicNum = u32(matrix[nbSBase + 7u]);
+                            let nbV = valence[ip.idx];
+                            let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
+                            let nbLife = lifeStateIn[ip.idx];
+                            let nbVel = input[ip.idx].vel;
+                            accumulateBioUnifiedNeighbor(
+                                p.pos,
+                                p.vel,
+                                myPhase,
+                                myAtomicNum,
+                                myValence,
+                                myAtomLoad,
+                                curLife,
+                                ip.pos,
+                                nbVel,
+                                ip.colour,
+                                ip.phase,
+                                ip.bioSpecies,
+                                nbLife,
+                                nbAtomLoad,
+                                nbAtomicNum,
+                                nbValence,
+                                oc,
+                                bio,
+                                &acc,
+                            );
+                        }
                     }
                     elementIndex = ip.next;
                 }
@@ -117,6 +128,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         tSample,
         uvSample,
         hydroSample,
+        terrainSample,
         acc,
         bio,
     );

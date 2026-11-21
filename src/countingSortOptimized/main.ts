@@ -188,10 +188,11 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 7, resource: { buffer: refs.bioForceBuffer } },
           { binding: 8, resource: { buffer: sortedBuffer } },
           { binding: 9, resource: { buffer: prefixSumBuffer } },
-          { binding: 10, resource: refs.windTexView },
-          { binding: 11, resource: refs.tempTexView },
+          { binding: 10, resource: refs.windStackTexView },
+          { binding: 11, resource: refs.tempStackTexView },
           { binding: 12, resource: refs.uvTexView },
           { binding: 13, resource: refs.hydroTexView },
+          { binding: 14, resource: refs.terrainTexView },
         ],
       }),
     );
@@ -203,7 +204,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 0, resource: { buffer: refs.uniformBuffer } },
           { binding: 1, resource: { buffer: refs.simBuffer } },
           { binding: 2, resource: { buffer: refs.oceanSimBuffer } },
-          { binding: 3, resource: refs.windTexView },
+          { binding: 3, resource: refs.windStackTexView },
           { binding: 4, resource: refs.oceanTexView },
           { binding: 5, resource: { buffer: refs.rulesMatrixBuffer } },
           { binding: 6, resource: { buffer: refs.particleBuffers[i] } },
@@ -213,9 +214,10 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
           { binding: 10, resource: { buffer: refs.bioForceBuffer } },
           { binding: 11, resource: { buffer: sortedBuffer } },
           { binding: 12, resource: { buffer: prefixSumBuffer } },
-          { binding: 13, resource: refs.tempTexView },
+          { binding: 13, resource: refs.tempStackTexView },
           { binding: 14, resource: refs.uvTexView },
           { binding: 15, resource: refs.hydroTexView },
+          { binding: 16, resource: refs.terrainTexView },
         ],
       }),
     );
@@ -236,6 +238,7 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
   };
 }
 
+let tickSeq = 0;
 export function tick(
   device: GPUDevice,
   commandEncoder: GPUCommandEncoder,
@@ -255,33 +258,34 @@ export function tick(
   }
 
   const wgCount = Math.ceil(particleAmt / workgroupSize);
+  const profile = (tickSeq++ % 12) === 0;
 
   commandEncoder.copyBufferToBuffer(s.zeroBuffer, 0, s.countBuffer, 0, s.countBuffer.size);
 
-  const cellPass = commandEncoder.beginComputePass(linkComputeTimestamp(device, 'cell'));
+  const cellPass = commandEncoder.beginComputePass(profile ? linkComputeTimestamp(device, 'cell') : {});
   cellPass.setPipeline(cellPipeline);
   cellPass.setBindGroup(0, s.cellBindGroups[alternate]);
   cellPass.dispatchWorkgroups(wgCount);
   cellPass.end();
-  resolveTimestamp(commandEncoder, 'cell');
+  if (profile) resolveTimestamp(commandEncoder, 'cell');
 
-  s.prefixSumModule.run(commandEncoder, true);
+  s.prefixSumModule.run(commandEncoder, profile);
 
-  const sortPass = commandEncoder.beginComputePass(linkComputeTimestamp(device, 'sort'));
+  const sortPass = commandEncoder.beginComputePass(profile ? linkComputeTimestamp(device, 'sort') : {});
   sortPass.setPipeline(sortPipeline);
   sortPass.setBindGroup(0, s.sortBindGroup);
   sortPass.dispatchWorkgroups(wgCount);
   sortPass.end();
-  resolveTimestamp(commandEncoder, 'sort');
+  if (profile) resolveTimestamp(commandEncoder, 'sort');
 
   const valencePass = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'psValence'),
+    profile ? linkComputeTimestamp(device, 'psValence') : {},
   );
   valencePass.setPipeline(valencePipeline);
   valencePass.setBindGroup(0, s.valenceBindGroups[alternate]);
   valencePass.dispatchWorkgroups(wgCount);
   valencePass.end();
-  resolveTimestamp(commandEncoder, 'psValence');
+  if (profile) resolveTimestamp(commandEncoder, 'psValence');
 
   const bioPass = commandEncoder.beginComputePass({});
   bioPass.setPipeline(bioPipeline);
@@ -290,13 +294,13 @@ export function tick(
   bioPass.end();
 
   const simPass = commandEncoder.beginComputePass(
-    linkComputeTimestamp(device, 'countSim'),
+    profile ? linkComputeTimestamp(device, 'countSim') : {},
   );
   simPass.setPipeline(simPipeline);
   simPass.setBindGroup(0, s.simBindGroups[alternate]);
   simPass.dispatchWorkgroups(wgCount);
   simPass.end();
-  resolveTimestamp(commandEncoder, 'countSim');
+  if (profile) resolveTimestamp(commandEncoder, 'countSim');
 }
 
 export function updateDisplays(params: Record<string, number>) {

@@ -48,13 +48,13 @@ interface StreamParticle {
 }
 
 const MAX_AGE = 85;
-const MAX_PARTICLES = 2400;
-const TRAIL_LEN = 18;
-// Subsampled offsets from oldest (17) to head (0) for smooth, low-overhead polyline redraws
-const TAIL_OFFSETS = [17, 13, 9, 6] as const;
-const HEAD_OFFSETS = [6, 3, 1, 0] as const;
+const MAX_PARTICLES = 760;
+const TRAIL_LEN = 12;
+// Subsampled offsets from oldest (11) to head (0) for smooth, low-overhead polyline redraws
+const TAIL_OFFSETS = [11, 7, 4] as const;
+const HEAD_OFFSETS = [4, 2, 0] as const;
 const FADE_BANDS = 2;
-const INTENSITY_BUCKETS = 12;
+const INTENSITY_BUCKETS = 5;
 const REPROJECT_BUCKETS = 4;
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
@@ -155,8 +155,8 @@ export class WindStreamRenderer {
 
   private ensureCount(width: number, masked: boolean): void {
     const base = Math.max(
-      1000,
-      Math.min(MAX_PARTICLES, Math.round(width * (masked ? 1.8 : 1.6))),
+      400,
+      Math.min(MAX_PARTICLES, Math.round(width * (masked ? 0.68 : 0.60))),
     );
     while (this.particles.length < base) {
       const idx = this.particles.length;
@@ -582,7 +582,7 @@ export class WindStreamRenderer {
         this.pushTrailPoint(i, curLon, curLat, bIdx0);
       }
 
-      const nSub = Math.min(4, Math.max(1, Math.ceil(mag0 / Math.max(sampler.streamMax, 0.25))));
+      const nSub = Math.min(2, Math.max(1, Math.ceil(mag0 / Math.max(sampler.streamMax * 1.4, 0.35))));
       const subRadScale = radScale / nSub;
       let lastBucket = bIdx0;
 
@@ -716,14 +716,12 @@ export class WindStreamRenderer {
         r22,
       );
     } else {
-      ctx.save();
-      ctx.beginPath();
-      if (isOrthographic) {
-        ctx.arc(tx, ty, scale + 1, 0, Math.PI * 2);
-      } else {
+      if (!isOrthographic) {
+        ctx.save();
+        ctx.beginPath();
         d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+        ctx.clip();
       }
-      ctx.clip();
 
       ctx.lineWidth = sampler.lineWidth;
       ctx.lineCap = 'round';
@@ -738,7 +736,9 @@ export class WindStreamRenderer {
         }
         ctx.stroke();
       }
-      ctx.restore();
+      if (!isOrthographic) {
+        ctx.restore();
+      }
     }
     this.frameCounter++;
   }

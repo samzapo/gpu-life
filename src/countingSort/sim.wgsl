@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<uniform> oceanSim: OceanSim;
-@group(0) @binding(3) var windTex: texture_2d<f32>;
+@group(0) @binding(3) var windStackTex: texture_2d_array<f32>;
 @group(0) @binding(4) var oceanTex: texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> matrix: array<f32>;
 @group(0) @binding(6) var<storage, read> input: array<Particle>;
@@ -11,9 +11,10 @@
 @group(0) @binding(10) var<storage, read> bioForce: array<vec4f>;
 @group(0) @binding(11) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(12) var<storage, read> indices: array<vec2<u32>>;
-@group(0) @binding(13) var tempTex: texture_2d<f32>;
+@group(0) @binding(13) var tempStackTex: texture_2d_array<f32>;
 @group(0) @binding(14) var uvTex: texture_2d<f32>;
 @group(0) @binding(15) var hydroTex: texture_2d<f32>;
+@group(0) @binding(16) var terrainTex: texture_2d<f32>;
 
 fn getChemCellForce(
     pi: u32,
@@ -24,6 +25,7 @@ fn getChemCellForce(
     bioCleave: f32,
     shearStress: f32,
     tempWellMod: f32,
+    maxChord2: f32,
     cell: u32,
     acc: ptr<function, ForceAccum>,
 ) {
@@ -35,6 +37,10 @@ fn getChemCellForce(
     for (var i = idxRange.x; i < idxRange.x + idxRange.y; i++) {
         let ip = sorted[i];
         if (ip.idx == pi || ip.phase != 0u) {
+            continue;
+        }
+        let dVec = ip.pos - p.pos;
+        if (dot(dVec, dVec) >= maxChord2) {
             continue;
         }
         accumulateSimNeighbor(
@@ -64,12 +70,14 @@ fn getChemForce(pi: u32, p: Particle, actScale: f32, bioCleave: f32, shearStress
     let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
     let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
     let numCells = u32(sim.cellAmt);
+    let maxAng = sim.rMax / max(sim.worldSize, 0.25);
+    let maxChord2 = maxAng * maxAng;
 
     for (var cx = cmin.x; cx <= cmax.x; cx++) {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getChemCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, tempWellMod, c, &acc);
+                getChemCellForce(pi, p, sP, mySlots, actScale, bioCleave, shearStress, tempWellMod, maxChord2, c, &acc);
             }
         }
     }
@@ -156,18 +164,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let p = input[pi];
     let ls = lifeStateNext[pi];
     let myPhase = unpackPhase(ls.w);
-    let tSample = sampleTempTexture(tempTex, p.pos);
-    let localTempScale = uniforms.mineralParams.z;
-
     if (myPhase == 3u) {
         output[pi] = integrateMineralParticle(p, ls, bioForce[pi]);
         return;
     }
 
+    let myFlight = unpackFlightMode(ls.w);
+    let alt01 = select(0.0, select(clamp(p._pad, 0.0, 1.0), clamp(ls.z, 0.0, 1.0), myPhase == 0u), (myPhase == 0u && ls.y < 0.5) || (myPhase == 1u && myFlight == 1u));
+    let eq = makeEquirectCoord(p.pos, textureDimensions(oceanTex, 0));
+    let tSample = sampleTempArrayAtAltCoord(tempStackTex, eq, alt01);
+    let oc = sampleOceanTextureCoord(oceanTex, eq);
+    let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);
+    let localTempScale = uniforms.mineralParams.z;
+
     if (myPhase == 1u || myPhase == 2u) {
         let bioSp = unpackBioSpecies(ls.w);
         let myKin = unpackKinPhase(ls.w);
         let resBio = getBioForce(pi, p, myPhase, bioSp, myKin);
+        let windRaw = sampleWindArrayAtAltCoord(windStackTex, eq, alt01);
         output[pi] = integrateOceanParticle(
             pi,
             p,
@@ -175,7 +189,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             resBio.torque,
             myPhase,
             oceanSim,
-            oceanTex,
+            oc,
+            windRaw,
+            sim.windStrength,
+            uniforms.flags.w,
+            terrainSample,
             tSample,
             localTempScale,
             uniforms.mouseSphere,
@@ -189,13 +207,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bReact = bioForce[pi];
     let actGlow = unpackActGlow(bReact.w);
     let airTherm = evalAirTempChemFactors(tSample.x, localTempScale);
-    let uvS = sampleUvTexture(uvTex, p.pos);
+    let uvS = sampleUvTextureCoord(uvTex, eq);
     let uvChem = evalUvChemFactors(uvS.x, uniforms.uvParams.y);
-    let hydroS = sampleHydroTexture(hydroTex, p.pos);
+    let hydroS = sampleHydroTextureCoord(hydroTex, eq);
     let hydroChem = evalHydroChemFactors(hydroS.x, hydroS.y, uniforms.hydroParams.z);
     let actScale = actGlow.x * airTherm.x * uvChem.x * hydroChem.x;
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
-    let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
+    let windSample = evalWindAndShear(windStackTex, p.pos, alt01, uniforms.flags.w);
     let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
     let res = getChemForce(pi, p, actScale, bioCleave, shearStress, airTherm.y * uvChem.y * hydroChem.y);
     output[pi] = integrateParticle(
@@ -204,6 +222,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         mySlots,
         res,
         windSample,
+        oc,
+        terrainSample,
+        ls,
+        oceanSim.currentStrength,
         shearStress,
         uniforms.mouseSphere,
         bReact,

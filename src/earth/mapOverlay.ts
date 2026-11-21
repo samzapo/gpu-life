@@ -96,6 +96,19 @@ export function loadEarthFeatures(): Promise<EarthTopoFeatures> {
   return cachedFeatures;
 }
 
+const cachedSvgRefs = new WeakMap<
+  SVGSVGElement,
+  {
+    gratPath: SVGPathElement | null;
+    hemiPath: SVGPathElement | null;
+    coastPath: SVGPathElement | null;
+    lakePath: SVGPathElement | null;
+    rimPath: SVGPathElement | null;
+    clipPath: SVGPathElement | null;
+    lastRimOrtho: boolean | null;
+  }
+>();
+
 export function renderMapOverlaySvg(
   svg: SVGSVGElement,
   proj: d3Geo.GeoProjection,
@@ -103,12 +116,20 @@ export function renderMapOverlaySvg(
   showCoastlines: boolean,
   isOrthographic: boolean,
 ): void {
-  const gratPath = svg.querySelector('#graticulePath') as SVGPathElement | null;
-  const hemiPath = svg.querySelector('#hemispherePath') as SVGPathElement | null;
-  const coastPath = svg.querySelector('#coastlinePath') as SVGPathElement | null;
-  const lakePath = svg.querySelector('#lakesPath') as SVGPathElement | null;
-  const rimPath = svg.querySelector('#sphereRimPath') as SVGPathElement | null;
-  const clipPath = svg.querySelector('#sphereClipPath') as SVGPathElement | null;
+  let refs = cachedSvgRefs.get(svg);
+  if (!refs) {
+    refs = {
+      gratPath: svg.querySelector('#graticulePath') as SVGPathElement | null,
+      hemiPath: svg.querySelector('#hemispherePath') as SVGPathElement | null,
+      coastPath: svg.querySelector('#coastlinePath') as SVGPathElement | null,
+      lakePath: svg.querySelector('#lakesPath') as SVGPathElement | null,
+      rimPath: svg.querySelector('#sphereRimPath') as SVGPathElement | null,
+      clipPath: svg.querySelector('#sphereClipPath') as SVGPathElement | null,
+      lastRimOrtho: null,
+    };
+    cachedSvgRefs.set(svg, refs);
+  }
+  const { gratPath, hemiPath, coastPath, lakePath, rimPath, clipPath } = refs;
 
   if (!showCoastlines) {
     for (const p of [gratPath, hemiPath, coastPath, lakePath, rimPath]) {
@@ -117,16 +138,19 @@ export function renderMapOverlaySvg(
     return;
   }
 
-  const path = d3Geo.geoPath(proj);
+  const path = d3Geo.geoPath(proj).digits(1);
   const sphereD = path({ type: 'Sphere' }) ?? '';
   clipPath?.setAttribute('d', sphereD);
   if (rimPath) {
     rimPath.setAttribute('d', sphereD);
-    rimPath.setAttribute(
-      'stroke',
-      isOrthographic ? 'rgba(155, 200, 235, 0.65)' : 'rgba(120, 140, 165, 0.50)',
-    );
-    rimPath.setAttribute('stroke-width', isOrthographic ? '1.6' : '1.1');
+    if (refs.lastRimOrtho !== isOrthographic) {
+      refs.lastRimOrtho = isOrthographic;
+      rimPath.setAttribute(
+        'stroke',
+        isOrthographic ? 'rgba(155, 200, 235, 0.65)' : 'rgba(120, 140, 165, 0.50)',
+      );
+      rimPath.setAttribute('stroke-width', isOrthographic ? '1.6' : '1.1');
+    }
   }
 
   if (features) {
