@@ -73,9 +73,12 @@ const COUNTDOWN_STEP_MS = 850;
 const COUNTDOWN_TOTAL_MS = 3 * COUNTDOWN_STEP_MS;
 const BETWEEN_PAUSE_MS = 1600;
 const RESULT_HOLD_MS = 2600;
-const SWIPE_RADIUS = 0.17;
-const SWIPE_DECAY_MS = 115;
-const SWIPE_TRAIL_MS = 420;
+const SWIPE_RADIUS = 0.21;
+const SWIPE_MAX_PATH_CHORD = 0.44;
+const SWIPE_RELEASE_TAIL_MS = 100;
+const SWIPE_TRAIL_MS = 480;
+const FALLBACK_BLOOM_WARMUP_TICKS = 24 * ticksPerSecond;
+const FALLBACK_BLOOM_COOLDOWN_TICKS = 28 * ticksPerSecond;
 
 const seconds = (ticks: number) => (ticks / ticksPerSecond).toFixed(1) + 's';
 const element = <T extends HTMLElement>(id: string) =>
@@ -97,9 +100,11 @@ export class TemporalGame {
   private incident?: Incident;
   private swipeTicks = new Set<number>();
   private activeSweep?: Force & { updatedAt: number };
+  private pathPoints: Point[] = [];
   private swipeTrail: SwipeNode[] = [];
   private pointerId?: number;
   private lastClient?: [number, number];
+  private lastMoveMs = 0;
   private lastSphere?: Point;
   private lastHealthyCount = 0;
   private nextStepMs = 0;
@@ -152,8 +157,11 @@ export class TemporalGame {
         this.world.forceStarted();
         this.pointerId = event.pointerId;
         this.lastClient = [event.clientX, event.clientY];
+        this.lastMoveMs = performance.now();
         this.lastSphere =
           this.world.pointer(event.clientX, event.clientY) ?? undefined;
+        this.pathPoints = this.lastSphere ? [this.lastSphere] : [];
+        this.activeSweep = undefined;
         try {
           canvas.setPointerCapture(event.pointerId);
         } catch {
@@ -165,20 +173,32 @@ export class TemporalGame {
 
     canvas.addEventListener('pointermove', (event) => {
       if (this.mode !== 'play' || event.pointerId !== this.pointerId) return;
+      const now = performance.now();
       const prevClient = this.lastClient;
       const prevSphere = this.lastSphere;
       const currClient: [number, number] = [event.clientX, event.clientY];
       const currSphere =
         this.world.pointer(event.clientX, event.clientY) ?? undefined;
-      this.lastClient = currClient;
-      if (currSphere) this.lastSphere = currSphere;
 
-      if (!prevClient || !prevSphere || !currSphere) return;
+      if (!prevClient || !prevSphere || !currSphere) {
+        this.lastClient = currClient;
+        this.lastMoveMs = now;
+        if (currSphere) {
+          this.lastSphere = currSphere;
+          this.pathPoints.push(currSphere);
+        }
+        return;
+      }
       const pixelDelta = Math.hypot(
         currClient[0] - prevClient[0],
         currClient[1] - prevClient[1],
       );
-      if (pixelDelta < 1.5) return;
+      if (pixelDelta < 1.8) return;
+
+      const dtMs = Math.max(4, now - this.lastMoveMs);
+      this.lastClient = currClient;
+      this.lastMoveMs = now;
+      this.lastSphere = currSphere;
 
       const dx = currSphere[0] - prevSphere[0];
       const dy = currSphere[1] - prevSphere[1];
@@ -191,16 +211,27 @@ export class TemporalGame {
       const tLen = Math.hypot(tx, ty, tz);
       if (tLen <= 1e-5) return;
 
-      const now = performance.now();
-      const rawStrength = clamp(pixelDelta / 14, 0.45, 2.2);
-      const prevStrength =
-        this.activeSweep && now - this.activeSweep.updatedAt < SWIPE_DECAY_MS
-          ? this.activeSweep.strength * 0.45
-          : 0;
-      const strength = clamp(Math.max(rawStrength, prevStrength), 0.45, 2.2);
+      this.pathPoints.push(currSphere);
+      while (
+        this.pathPoints.length > 2 &&
+        Math.hypot(
+          currSphere[0] - this.pathPoints[0][0],
+          currSphere[1] - this.pathPoints[0][1],
+          currSphere[2] - this.pathPoints[0][2],
+        ) > SWIPE_MAX_PATH_CHORD
+      ) {
+        this.pathPoints.shift();
+      }
+      const pathStart = this.pathPoints[0] ?? prevSphere;
+
+      const speedPxPerSec = (pixelDelta / dtMs) * 1000;
+      const speedStrength = clamp(0.8 + speedPxPerSec / 300, 1.0, 5.5);
+      const prevStrength = this.activeSweep ? this.activeSweep.strength * 0.85 : 0;
+      const strength = clamp(Math.max(speedStrength, prevStrength), 1.0, 5.5);
 
       this.activeSweep = {
         point: currSphere,
+        pathStart: [...pathStart],
         direction: [tx / tLen, ty / tLen, tz / tLen],
         strength,
         radius: SWIPE_RADIUS,
@@ -262,6 +293,10 @@ export class TemporalGame {
     this.pointerId = undefined;
     this.lastClient = undefined;
     this.lastSphere = undefined;
+    this.pathPoints = [];
+    if (this.activeSweep) {
+      this.activeSweep.updatedAt = performance.now();
+    }
   }
 
   private release() {
@@ -409,19 +444,30 @@ export class TemporalGame {
 
     const nextTick = this.tick + 1;
     let force: Force | undefined;
-    if (
-      this.mode === 'play' &&
-      this.activeSweep &&
-      nowMs - this.activeSweep.updatedAt <= SWIPE_DECAY_MS &&
-      this.activeSweep.strength > 0.08
-    ) {
-      force = {
-        point: [...this.activeSweep.point],
-        direction: [...this.activeSweep.direction],
-        strength: this.activeSweep.strength,
-        radius: this.activeSweep.radius,
-      };
-      this.activeSweep.strength *= 0.68;
+    if (this.mode === 'play' && this.activeSweep) {
+      const held = this.pointerId !== undefined;
+      if (held || nowMs - this.activeSweep.updatedAt <= SWIPE_RELEASE_TAIL_MS) {
+        if (this.activeSweep.strength > 0.1) {
+          force = {
+            point: [...this.activeSweep.point],
+            pathStart: [...this.activeSweep.pathStart],
+            direction: [...this.activeSweep.direction],
+            strength: this.activeSweep.strength,
+            radius: this.activeSweep.radius,
+          };
+          this.swipeTicks.add(nextTick);
+        }
+        if (held) {
+          if (nowMs - this.activeSweep.updatedAt > 90) {
+            this.activeSweep.strength = Math.max(
+              1.35,
+              this.activeSweep.strength * 0.96,
+            );
+          }
+        } else {
+          this.activeSweep.strength *= 0.55;
+        }
+      }
     }
 
     this.world.step(force, this.activeBloom(nextTick));
@@ -516,15 +562,19 @@ export class TemporalGame {
       if (exposed && state.tick <= exposed.bloom.endTick) continue;
       if (
         countSurvivors(state, colony.members, reference.state) <=
-          colony.members.length * 0.42 &&
+          colony.members.length * 0.48 &&
         countSurvivors(previous, colony.members, reference.state) <=
-          colony.members.length * 0.7
+          colony.members.length * 0.72
       ) {
         if (this.beginIncident(colony, reference.state, state)) return;
       }
     }
     const latest = this.blooms.at(-1);
-    if (latest && state.tick <= latest.endTick + 3 * ticksPerSecond) return;
+    if (
+      state.tick - this.observationStart < FALLBACK_BLOOM_WARMUP_TICKS ||
+      (latest && state.tick <= latest.endTick + FALLBACK_BLOOM_COOLDOWN_TICKS)
+    )
+      return;
     for (const colony of colonies) {
       if (colony.members.length < minimum) break;
       const distances = colony.members
@@ -723,8 +773,9 @@ export class TemporalGame {
       this.swipeCanvas.width = w;
       this.swipeCanvas.height = h;
     }
+    const held = this.pointerId !== undefined && this.activeSweep !== undefined;
     while (
-      this.swipeTrail.length &&
+      this.swipeTrail.length > (held ? 2 : 0) &&
       nowMs - this.swipeTrail[0].bornAt > SWIPE_TRAIL_MS
     ) {
       this.swipeTrail.shift();
@@ -739,8 +790,8 @@ export class TemporalGame {
       const a = this.swipeTrail[i - 1];
       const b = this.swipeTrail[i];
       const age = (nowMs - b.bornAt) / SWIPE_TRAIL_MS;
-      const life = Math.max(0, 1 - age);
-      const width = (4 + b.strength * 8) * life;
+      const life = Math.max(held ? 0.55 : 0, 1 - age);
+      const width = (4 + Math.min(b.strength, 4) * 3.5) * life;
 
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
@@ -765,15 +816,20 @@ export class TemporalGame {
     }
 
     const head = this.swipeTrail.at(-1)!;
-    const headLife = Math.max(
-      0,
-      1 - (nowMs - head.bornAt) / (SWIPE_TRAIL_MS * 0.65),
-    );
+    const headLife = held
+      ? 0.7 + 0.3 * Math.sin(nowMs * 0.018)
+      : Math.max(0, 1 - (nowMs - head.bornAt) / (SWIPE_TRAIL_MS * 0.65));
     if (headLife > 0.05) {
       ctx.beginPath();
-      ctx.arc(head.x, head.y, 12 + (1 - headLife) * 26, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(0, 240, 255, ${0.65 * headLife})`;
-      ctx.lineWidth = 2;
+      ctx.arc(
+        head.x,
+        head.y,
+        held ? 18 + 6 * Math.sin(nowMs * 0.018) : 12 + (1 - headLife) * 26,
+        0,
+        Math.PI * 2,
+      );
+      ctx.strokeStyle = `rgba(0, 240, 255, ${0.72 * headLife})`;
+      ctx.lineWidth = 2.5;
       ctx.stroke();
     }
     ctx.restore();

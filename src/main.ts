@@ -2145,7 +2145,7 @@ function buildGameGroups() {
     },
   });
   gameUniform ??= device.createBuffer({
-    size: 48,
+    size: 64,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   gameTracking = device.createBuffer({
@@ -2196,16 +2196,17 @@ function stepWorld(
   const encoder = sharedEncoder ?? device.createCommandEncoder();
   tick(encoder);
   if (gameUniform && gamePipeline && gameGroups[alternate]) {
-    const field = new Float32Array(12);
+    const field = new Float32Array(16);
     if (force) {
       field.set(force.point, 0);
       field[3] = force.radius;
-      field.set(force.direction, 4);
-      field[7] = force.strength;
+      field.set(force.pathStart, 4);
+      field.set(force.direction, 8);
+      field[11] = force.strength;
     }
     if (bloom) {
-      field.set(bloom.point, 8);
-      field[11] = bloom.radius;
+      field.set(bloom.point, 12);
+      field[15] = bloom.radius;
     }
     device.queue.writeBuffer(gameUniform, 0, field);
     const pass = encoder.beginComputePass();

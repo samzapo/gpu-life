@@ -1,6 +1,7 @@
 export type Point = [number, number, number];
 export type Force = {
   point: Point;
+  pathStart: Point;
   direction: Point;
   strength: number;
   radius: number;
