@@ -57,10 +57,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       let pushLen = length(pushTangent);
       if (pushLen > 0.00001) {
         let pushDir = pushTangent / pushLen;
-        let strength = clamp(field.sweep.w, 0.0, 6.0);
-        position = normalize(position + pushDir * (strength * 0.018 * falloff));
+        let strength = clamp(field.sweep.w, 0.0, 2.6);
+        position = normalize(position + pushDir * (strength * 0.008 * falloff));
         cells[index].pos = position;
-        cells[index].vel += pushDir * (strength * 0.34 * falloff);
+        cells[index].vel += pushDir * (strength * 0.11 * falloff);
       }
     }
   }

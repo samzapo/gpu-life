@@ -4,6 +4,7 @@
 @group(0) @binding(3) var oceanTex: texture_2d<f32>;
 @group(0) @binding(4) var tempTex: texture_2d<f32>;
 @group(0) @binding(5) var uvTex: texture_2d<f32>;
+@group(0) @binding(6) var hydroTex: texture_2d<f32>;
 
 struct BgOut {
     @builtin(position) pos: vec4f,
@@ -101,6 +102,21 @@ fn fragment(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
     if (uvColOpacity > 0.001) {
         let uvS = sampleUvTexture(uvTex, inv.xyz);
         baseCol = mix(baseCol, uvIndexColor(uvS.x), uvColOpacity);
+    }
+
+    let rhColOpacity = clamp(uniforms.hydroParams.x, 0.0, 1.0);
+    let precipColOpacity = clamp(uniforms.hydroParams.y, 0.0, 1.0);
+    if (rhColOpacity > 0.001 || precipColOpacity > 0.001) {
+        let hS = sampleHydroTexture(hydroTex, inv.xyz);
+        if (rhColOpacity > 0.001) {
+            baseCol = mix(baseCol, rhColor(hS.x), rhColOpacity);
+        }
+        if (precipColOpacity > 0.001) {
+            let rainAlpha = smoothstep(0.05, 0.75, hS.y) * precipColOpacity;
+            if (rainAlpha > 0.001) {
+                baseCol = mix(baseCol, precip3hColor(hS.y), rainAlpha);
+            }
+        }
     }
 
     return vec4f(baseCol, 1.0);

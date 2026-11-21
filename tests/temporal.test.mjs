@@ -164,3 +164,23 @@ test('findColonies computes colony angular radius', () => {
   assert.equal(colonies[0].members.length, 8);
   assert.ok(colonies[0].radius > 0.01 && colonies[0].radius < 0.05);
 });
+
+test('globe tour resumes 5s after rescue intervention when enabled', () => {
+  const tour = new GlobeTour();
+  tour.setEnabled(true);
+  tour.rescue();
+  const view = {
+    rotate: [0, 0, 0],
+    pan: [0, 0],
+    scale: 1200,
+    width: 1000,
+    height: 800,
+    projectionId: 'orthographic',
+  };
+  assert.equal(tour.caption, 'Rescue site');
+  tour.frame(1000, view);
+  tour.frame(5500, view);
+  assert.equal(tour.caption, 'Rescue site');
+  tour.frame(6200, view);
+  assert.equal(tour.caption, 'Sweeping globe');
+});

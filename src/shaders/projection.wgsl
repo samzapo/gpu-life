@@ -202,6 +202,91 @@ fn sampleUvTexture(uvTex: texture_2d<f32>, n: vec3f) -> vec4f {
     return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
 }
 
+// Samples live global surface hydrology `(rh01, precip3hMm)` at unit sphere normal `n`.
+fn sampleHydroTexture(hydroTex: texture_2d<f32>, n: vec3f) -> vec2f {
+    let dims = textureDimensions(hydroTex, 0);
+    let nx = f32(dims.x);
+    let ny = f32(dims.y);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec2f(0.65, 0.0);
+    }
+
+    var lonDeg = atan2(n.y, n.x) * (180.0 / PI);
+    if (lonDeg < 0.0) {
+        lonDeg += 360.0;
+    }
+    let latDeg = clamp(safeAsin(n.z) * (180.0 / PI), -90.0, 90.0);
+
+    let gx = (lonDeg / 360.0) * nx;
+    let gy = ((90.0 - latDeg) / 180.0) * (ny - 1.0);
+
+    let i0 = u32(floor(gx)) % dims.x;
+    let i1 = (i0 + 1u) % dims.x;
+    let fx = gx - floor(gx);
+
+    let j0 = min(dims.y - 1u, u32(max(0.0, floor(gy))));
+    let j1 = min(dims.y - 1u, j0 + 1u);
+    let fy = clamp(gy - f32(j0), 0.0, 1.0);
+
+    let c00 = textureLoad(hydroTex, vec2u(i0, j0), 0).xy;
+    let c10 = textureLoad(hydroTex, vec2u(i1, j0), 0).xy;
+    let c01 = textureLoad(hydroTex, vec2u(i0, j1), 0).xy;
+    let c11 = textureLoad(hydroTex, vec2u(i1, j1), 0).xy;
+
+    let h = mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+    return vec2f(clamp(h.x, 0.0, 1.0), max(h.y, 0.0));
+}
+
+// Magnus-Tetens saturation vapor pressure (kPa) from temperature in Kelvin.
+fn saturationVaporKpa(tempK: f32) -> f32 {
+    let tc = clamp(tempK - 273.15, -60.0, 60.0);
+    return 0.6108 * exp((17.27 * tc) / (tc + 237.3));
+}
+
+// Returns `(actScaleMod, chemWellMod)` for atmospheric humidity catalysis & rain scavenging.
+fn evalHydroChemFactors(rh01: f32, precipMm: f32, localHydroScale: f32) -> vec2f {
+    let hBlend = clamp(localHydroScale, 0.0, 2.0);
+    if (hBlend <= 0.001) {
+        return vec2f(1.0, 1.0);
+    }
+    let humEase = clamp(1.0 - 0.16 * smoothstep(0.35, 0.95, rh01), 0.78, 1.08);
+    let rainScavenge = 1.0 + 0.14 * smoothstep(0.4, 8.0, precipMm);
+    return vec2f(
+        mix(1.0, humEase, min(hBlend, 1.2)),
+        mix(1.0, rainScavenge, min(hBlend, 1.2)),
+    );
+}
+
+fn rhColor(rh01: f32) -> vec3f {
+    let r = clamp(rh01, 0.0, 1.0);
+    let c0 = vec3f(94.0, 62.0, 30.0) / 255.0;
+    let c1 = vec3f(168.0, 134.0, 68.0) / 255.0;
+    let c2 = vec3f(202.0, 198.0, 118.0) / 255.0;
+    let c3 = vec3f(92.0, 186.0, 174.0) / 255.0;
+    let c4 = vec3f(34.0, 146.0, 212.0) / 255.0;
+    let c5 = vec3f(68.0, 74.0, 214.0) / 255.0;
+    if (r <= 0.2) { return mix(c0, c1, r / 0.2); }
+    if (r <= 0.4) { return mix(c1, c2, (r - 0.2) / 0.2); }
+    if (r <= 0.6) { return mix(c2, c3, (r - 0.4) / 0.2); }
+    if (r <= 0.8) { return mix(c3, c4, (r - 0.6) / 0.2); }
+    return mix(c4, c5, (r - 0.8) / 0.2);
+}
+
+fn precip3hColor(mm: f32) -> vec3f {
+    let p = clamp(mm, 0.0, 30.0);
+    let c0 = vec3f(14.0, 20.0, 32.0) / 255.0;
+    let c1 = vec3f(28.0, 118.0, 178.0) / 255.0;
+    let c2 = vec3f(34.0, 196.0, 172.0) / 255.0;
+    let c3 = vec3f(168.0, 228.0, 64.0) / 255.0;
+    let c4 = vec3f(248.0, 164.0, 34.0) / 255.0;
+    let c5 = vec3f(238.0, 46.0, 128.0) / 255.0;
+    if (p <= 0.5) { return mix(c0, c1, p / 0.5); }
+    if (p <= 2.5) { return mix(c1, c2, (p - 0.5) / 2.0); }
+    if (p <= 7.0) { return mix(c2, c3, (p - 2.5) / 4.5); }
+    if (p <= 15.0) { return mix(c3, c4, (p - 7.0) / 8.0); }
+    return mix(c4, c5, (p - 15.0) / 15.0);
+}
+
 // Exact `earth.nullschool.net` CPC Ultraviolet Index color gradient `[0 .. 18]` (0 .. 0.45 W/m²).
 fn uvIndexColor(uvi: f32) -> vec3f {
     let u = clamp(uvi, 0.0, 18.0);

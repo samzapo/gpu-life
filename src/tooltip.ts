@@ -1,6 +1,7 @@
 import type * as d3Geo from 'd3-geo';
 import { lonLatToUnitVec } from './earth/projections';
 import type { LocalUvSample } from './earth/uvData';
+import type { LocalHydroSample } from './earth/hydroData';
 import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D';
 import type { ViewLayerMode } from './options';
 
@@ -39,6 +40,7 @@ export interface HoverInspectConfig {
   getWindSpeedMs?: (unitVec: [number, number, number]) => number;
   getLocalTemps?: (unitVec: [number, number, number]) => LocalTempsSample | null;
   getLocalUv?: (unitVec: [number, number, number]) => LocalUvSample | null;
+  getLocalHydro?: (unitVec: [number, number, number]) => LocalHydroSample | null;
   getMineralOpacity?: () => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
@@ -845,16 +847,18 @@ export function analyzeReactionAt(
   const overLand = ocMask < 0.42;
   const localTSurf = cfg.getLocalTemps ? cfg.getLocalTemps([p0[0], p0[1], p0[2]]) : null;
   const localUvSurf = cfg.getLocalUv ? cfg.getLocalUv([p0[0], p0[1], p0[2]]) : null;
+  const localHydroSurf = cfg.getLocalHydro ? cfg.getLocalHydro([p0[0], p0[1], p0[2]]) : null;
   const surfTempPart = localTSurf
     ? overLand || localTSurf.sstC === null
       ? `Sfc ${localTSurf.sfcAirC >= 0 ? '+' : ''}${localTSurf.sfcAirC.toFixed(1)}°C`
       : `SST ${localTSurf.sstC >= 0 ? '+' : ''}${localTSurf.sstC.toFixed(1)}°C`
     : '';
   const uvPartSurf = localUvSurf ? `UV ${localUvSurf.uviNow.toFixed(1)}` : '';
+  const hydroPartSurf = localHydroSurf
+    ? `RH ${localHydroSurf.rhPct}%${localHydroSurf.precip3hMm >= 0.05 ? ` · 3HPS ${localHydroSurf.precip3hMm.toFixed(1)}mm` : ''}`
+    : '';
   const surfTempTag =
-    surfTempPart && uvPartSurf
-      ? `${surfTempPart} · ${uvPartSurf}`
-      : surfTempPart || uvPartSurf || undefined;
+    [surfTempPart, uvPartSurf, hydroPartSurf].filter(Boolean).join(' · ') || undefined;
 
   // Inorganic Crust-Pinned Mineral (`bestPhase === 3`): cluster matching crystal vein & inspect risk/reward
   if (bestPhase === 3) {

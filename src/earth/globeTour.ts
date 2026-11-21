@@ -11,7 +11,7 @@ const landmarks: { name: string; center: Coordinates }[] = [
   { name: 'Kuroshio Current', center: [140, 35] },
   { name: 'Drake Passage', center: [-64, -58] },
 ];
-const rescueDwellSeconds = 22;
+const rescueDwellSeconds = 5;
 const colonyDwellSeconds = 18;
 const landmarkDwellSeconds = 10;
 const orbitTransitSeconds = 4.5;

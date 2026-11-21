@@ -75,6 +75,16 @@ import {
   type LocalUvSample,
   type UvGrid,
 } from './earth/uvData';
+import {
+  buildGlobalHydroTexture,
+  createBaselineHydroGrid,
+  fetchLiveGfsHydroFields,
+  precip3hColorRgb,
+  rhColorRgb,
+  sampleHydroLonLat,
+  type HydroGrid,
+  type LocalHydroSample,
+} from './earth/hydroData';
 import { oceanGridToSampler, WindStreamRenderer } from './earth/windLines';
 import {
   hslToRgb,
@@ -138,6 +148,11 @@ import {
   uvColorsBinding,
   uvStatusBinding,
   uvStrengthBinding,
+  rhColorsBinding,
+  precipColorsBinding,
+  localHydroBinding,
+  hydroStrengthBinding,
+  hydroStatusBinding,
   tooltipsBinding,
   updatePeriodicLegend,
   viewLayerSelect,
@@ -191,6 +206,12 @@ const tempScaleMaxLabel = document.getElementById('tempScaleMaxLabel') as HTMLEl
 const uvHudGroup = document.getElementById('uvHudGroup') as HTMLElement;
 const uvLevelBadge = document.getElementById('uvLevelBadge') as HTMLElement;
 const uvTimeBadge = document.getElementById('uvTimeBadge') as HTMLElement;
+const rhHudGroup = document.getElementById('rhHudGroup') as HTMLElement;
+const rhTimeBadge = document.getElementById('rhTimeBadge') as HTMLElement;
+const rhScaleBar = document.getElementById('rhScaleBar') as HTMLElement;
+const precipHudGroup = document.getElementById('precipHudGroup') as HTMLElement;
+const precipTimeBadge = document.getElementById('precipTimeBadge') as HTMLElement;
+const precipScaleBar = document.getElementById('precipScaleBar') as HTMLElement;
 const scaleMaxLabel = document.getElementById('scaleMaxLabel') as HTMLElement;
 
 const oceanCtx = oceanCanvas.getContext('2d', { willReadFrequently: true });
@@ -198,7 +219,7 @@ const windCtx = windCanvas.getContext('2d', { willReadFrequently: true });
 const oceanStreamRenderer = new WindStreamRenderer();
 const windStreamRenderer = new WindStreamRenderer();
 
-const uniformsFloats = 48; // 192 bytes
+const uniformsFloats = 52; // 208 bytes
 const uniformData = new Float32Array(uniformsFloats);
 const simSize = 24;
 const simData = new Float32Array(simSize);
@@ -327,6 +348,7 @@ let windTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
 let tempTexture: GPUTexture | undefined;
 let uvTexture: GPUTexture | undefined;
+let hydroTexture: GPUTexture | undefined;
 let watermanFwdTexture: GPUTexture | undefined;
 let watermanInvTexture: GPUTexture | undefined;
 
@@ -413,6 +435,7 @@ let earthFeatures: EarthTopoFeatures | null = null;
 let currentWindGrid: WindGrid = createEmptyWindGrid();
 let currentOceanGrid: OceanGrid | null = null;
 let currentUvGrid: UvGrid | null = null;
+let currentHydroGrid: HydroGrid = createBaselineHydroGrid();
 let uvUtcOverrideMs: number | null = null;
 let watermanDirty = true;
 let mapDirty = true;
@@ -504,6 +527,41 @@ function sampleLocalUvAtLonLat(
     ozoneDU: 300,
     cloudPct: 25,
   };
+}
+
+function sampleLocalHydroAtUnit(u: [number, number, number]): LocalHydroSample {
+  const z = Math.max(-1, Math.min(1, u[2] ?? 0));
+  const latDeg = Math.asin(z) * (180 / Math.PI);
+  const lonDeg = Math.atan2(u[1] ?? 0, u[0] ?? 1) * (180 / Math.PI);
+  return sampleHydroLonLat(currentHydroGrid, lonDeg, latDeg);
+}
+
+function drawHydroScaleBars() {
+  const rhStops: string[] = [];
+  const pStops: string[] = [];
+  const steps = 12;
+  for (let i = 0; i <= steps; i++) {
+    const f = i / steps;
+    const [rr, rg, rb] = rhColorRgb(f);
+    rhStops.push(`rgb(${Math.round(rr)}, ${Math.round(rg)}, ${Math.round(rb)}) ${(f * 100).toFixed(0)}%`);
+    const [pr, pg, pb] = precip3hColorRgb(f * 30);
+    pStops.push(`rgb(${Math.round(pr)}, ${Math.round(pg)}, ${Math.round(pb)}) ${(f * 100).toFixed(0)}%`);
+  }
+  rhScaleBar.style.background = `linear-gradient(to right, ${rhStops.join(', ')})`;
+  precipScaleBar.style.background = `linear-gradient(to right, ${pStops.join(', ')})`;
+}
+drawHydroScaleBars();
+
+function refreshHydroHudBadges() {
+  const tag = currentHydroGrid.isLive
+    ? `${currentHydroGrid.gfsValidTime} · ${currentHydroGrid.source}`
+    : currentHydroGrid.source;
+  rhTimeBadge.textContent = tag;
+  precipTimeBadge.textContent = tag;
+  earthParams.hydroStatus = currentHydroGrid.isLive
+    ? `Live (${currentHydroGrid.gfsRefTime})`
+    : 'Climatology RH+3HPS';
+  hydroStatusBinding.refresh();
 }
 
 function sampleLocalTempsAtUnit(u: [number, number, number]) {
@@ -599,8 +657,11 @@ function refreshHudVisibility() {
   oceanHudGroup.style.display = showOcean ? '' : 'none';
   tempHudGroup.style.display = '';
   uvHudGroup.style.display = '';
+  rhHudGroup.style.display = earthParams.rhColors > 0.01 ? '' : 'none';
+  precipHudGroup.style.display = earthParams.precipColors > 0.01 ? '' : 'none';
   refreshTempHudBadges();
   refreshUvHudBadges();
+  refreshHydroHudBadges();
 }
 
 function refreshHudBadges(grid: WindGrid) {
@@ -718,6 +779,10 @@ function exportCurrentConfig(): SimConfigV1 {
       uvColors: earthParams.uvColors,
       localUv: earthParams.localUv,
       uvStrength: earthParams.uvStrength,
+      rhColors: earthParams.rhColors,
+      precipColors: earthParams.precipColors,
+      localHydro: earthParams.localHydro,
+      hydroStrength: earthParams.hydroStrength,
       lifeOpacity: earthParams.lifeOpacity,
       mineralOpacity: earthParams.mineralOpacity,
       coastlines: earthParams.coastlines,
@@ -892,6 +957,10 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.uvColors !== undefined) earthParams.uvColors = e.uvColors;
     if (e.localUv !== undefined) earthParams.localUv = e.localUv;
     if (e.uvStrength !== undefined) earthParams.uvStrength = e.uvStrength;
+    if (e.rhColors !== undefined) earthParams.rhColors = e.rhColors;
+    if (e.precipColors !== undefined) earthParams.precipColors = e.precipColors;
+    if (e.localHydro !== undefined) earthParams.localHydro = e.localHydro;
+    if (e.hydroStrength !== undefined) earthParams.hydroStrength = e.hydroStrength;
     if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
     if (e.mineralOpacity !== undefined) earthParams.mineralOpacity = e.mineralOpacity;
     if (e.coastlines !== undefined) {
@@ -1030,6 +1099,19 @@ function uploadUvToGpu() {
   refreshUvHudBadges();
 }
 
+function uploadHydroToGpu() {
+  if (freezeGameWeather && particleBuffers) return;
+  if (!device || !hydroTexture) return;
+  const texData = buildGlobalHydroTexture(currentHydroGrid, GRID_TEX_W, GRID_TEX_H);
+  device.queue.writeTexture(
+    { texture: hydroTexture },
+    texData,
+    { bytesPerRow: GRID_TEX_W * 16 },
+    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
+  );
+  refreshHydroHudBadges();
+}
+
 function uploadWindToGpu(grid: WindGrid) {
   if (freezeGameWeather && particleBuffers) return;
   if (!device || !windTexture) return;
@@ -1093,6 +1175,14 @@ async function loadWindLevel(levelId: WindLevelId) {
             // Keep CPC + cached GFS ozone baseline
           });
       }
+      void fetchLiveGfsHydroFields()
+        .then((liveHydro) => {
+          currentHydroGrid = liveHydro;
+          uploadHydroToGpu();
+        })
+        .catch(() => {
+          // Keep climatology RH + 3HPS fallback
+        });
     }
   } catch {
     if (reqId === activeWindLoadId && !currentWindGrid.isLive && levelId === 'surface') {
@@ -1195,6 +1285,21 @@ async function backgroundRefreshWeather(opts?: {
             updatedAny = true;
           } catch {
             if (uvBaselineUpdated) uploadUvToGpu();
+          }
+        }
+        if (
+          !currentHydroGrid.isLive ||
+          currentHydroGrid.gfsRefTime !== live.refTime ||
+          currentHydroGrid.gfsValidTime !== live.validTime
+        ) {
+          try {
+            currentHydroGrid = await fetchLiveGfsHydroFields({
+              forceRefresh: Boolean(opts?.forceGfs),
+            });
+            uploadHydroToGpu();
+            updatedAny = true;
+          } catch {
+            // Keep existing hydrology grid
           }
         }
       } catch {
@@ -2441,6 +2546,7 @@ const game = new TemporalGame({
       if (currentOceanGrid) uploadOceanToGpu(currentOceanGrid);
       uploadWindToGpu(currentWindGrid);
       uploadUvToGpu();
+      uploadHydroToGpu();
     }
   },
 });
@@ -2501,6 +2607,7 @@ const tooltipManager = new TooltipManager({
   },
   getLocalTemps: (u) => sampleLocalTempsAtUnit(u),
   getLocalUv: (u) => sampleLocalUvAtUnit(u),
+  getLocalHydro: (u) => sampleLocalHydroAtUnit(u),
   getMineralOpacity: () => earthParams.mineralOpacity,
   requestSnapshot: captureHoverSnapshot,
 });
@@ -2915,6 +3022,13 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     label: 'uvTexture',
   });
   uploadUvToGpu();
+  hydroTexture = device.createTexture({
+    size: { width: GRID_TEX_W, height: GRID_TEX_H },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'hydroTexture',
+  });
+  uploadHydroToGpu();
   watermanFwdTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -2957,6 +3071,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
       { binding: 3, resource: oceanTexture.createView() },
       { binding: 4, resource: tempTexture.createView() },
       { binding: 5, resource: uvTexture.createView() },
+      { binding: 6, resource: hydroTexture.createView() },
     ],
   });
 
@@ -3411,6 +3526,7 @@ function startWorld() {
     !oceanTexture ||
     !tempTexture ||
     !uvTexture ||
+    !hydroTexture ||
     !watermanFwdTexture
   ) {
     return;
@@ -3919,6 +4035,7 @@ function startWorld() {
     oceanTexView: oceanTexture.createView(),
     tempTexView: tempTexture.createView(),
     uvTexView: uvTexture.createView(),
+    hydroTexView: hydroTexture.createView(),
     particleAmt,
     cellAmt: params.cells,
   };
@@ -4009,6 +4126,10 @@ function writeUniforms() {
   uniformData[45] = earthParams.localUv ? earthParams.uvStrength : 0;
   uniformData[46] = 0;
   uniformData[47] = 0;
+  uniformData[48] = earthParams.rhColors;
+  uniformData[49] = earthParams.precipColors;
+  uniformData[50] = earthParams.localHydro ? earthParams.hydroStrength : 0;
+  uniformData[51] = 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 }
@@ -4479,6 +4600,26 @@ localUvBinding.on('change', () => {
 });
 
 uvStrengthBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+rhColorsBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  refreshHudVisibility();
+});
+
+precipColorsBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  refreshHudVisibility();
+});
+
+localHydroBinding.on('change', () => {
+  if (suppressPaneEvents) return;
+  syncBioUniformState();
+});
+
+hydroStrengthBinding.on('change', () => {
   if (suppressPaneEvents) return;
   syncBioUniformState();
 });

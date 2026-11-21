@@ -73,12 +73,10 @@ const COUNTDOWN_STEP_MS = 850;
 const COUNTDOWN_TOTAL_MS = 3 * COUNTDOWN_STEP_MS;
 const BETWEEN_PAUSE_MS = 1600;
 const RESULT_HOLD_MS = 2600;
-const SWIPE_RADIUS = 0.21;
-const SWIPE_MAX_PATH_CHORD = 0.44;
+const SWIPE_RADIUS = 0.19;
+const SWIPE_MAX_PATH_CHORD = 0.40;
 const SWIPE_RELEASE_TAIL_MS = 100;
 const SWIPE_TRAIL_MS = 480;
-const FALLBACK_BLOOM_WARMUP_TICKS = 24 * ticksPerSecond;
-const FALLBACK_BLOOM_COOLDOWN_TICKS = 28 * ticksPerSecond;
 
 const seconds = (ticks: number) => (ticks / ticksPerSecond).toFixed(1) + 's';
 const element = <T extends HTMLElement>(id: string) =>
@@ -95,8 +93,6 @@ export class TemporalGame {
   private observationStart = 0;
   private history: Observation[] = [];
   private attemptCheckpoints: Snapshot[] = [];
-  private blooms: Bloom[] = [];
-  private exposed?: { colony: Colony; baseline: Snapshot; bloom: Bloom };
   private incident?: Incident;
   private swipeTicks = new Set<number>();
   private activeSweep?: Force & { updatedAt: number };
@@ -225,9 +221,9 @@ export class TemporalGame {
       const pathStart = this.pathPoints[0] ?? prevSphere;
 
       const speedPxPerSec = (pixelDelta / dtMs) * 1000;
-      const speedStrength = clamp(0.8 + speedPxPerSec / 300, 1.0, 5.5);
+      const speedStrength = clamp(0.55 + speedPxPerSec / 650, 0.65, 2.4);
       const prevStrength = this.activeSweep ? this.activeSweep.strength * 0.85 : 0;
-      const strength = clamp(Math.max(speedStrength, prevStrength), 1.0, 5.5);
+      const strength = clamp(Math.max(speedStrength, prevStrength), 0.65, 2.4);
 
       this.activeSweep = {
         point: currSphere,
@@ -323,8 +319,6 @@ export class TemporalGame {
     this.history = [];
     this.attemptCheckpoints = [];
     this.swipeTicks.clear();
-    this.blooms = [];
-    this.exposed = undefined;
     this.incident = undefined;
     this.nextStepMs = 0;
     this.phaseEndMs = 0;
@@ -361,12 +355,6 @@ export class TemporalGame {
     return this.incident?.original.tick ?? this.tick;
   }
 
-  private activeBloom(tick: number) {
-    return this.blooms.find(
-      (bloom) => tick >= bloom.startTick && tick <= bloom.endTick,
-    );
-  }
-
   frame(nowMs: number) {
     this.renderSwipeTrail(nowMs);
     if (
@@ -376,7 +364,6 @@ export class TemporalGame {
       document.hidden
     )
       return;
-    this.positionMarkers();
 
     if (this.mode === 'film') {
       this.film(nowMs);
@@ -460,8 +447,8 @@ export class TemporalGame {
         if (held) {
           if (nowMs - this.activeSweep.updatedAt > 90) {
             this.activeSweep.strength = Math.max(
-              1.35,
-              this.activeSweep.strength * 0.96,
+              0.75,
+              this.activeSweep.strength * 0.94,
             );
           }
         } else {
@@ -470,7 +457,7 @@ export class TemporalGame {
       }
     }
 
-    this.world.step(force, this.activeBloom(nextTick));
+    this.world.step(force, undefined);
     this.tick = nextTick;
 
     if (
@@ -546,20 +533,9 @@ export class TemporalGame {
       5,
       Math.min(30, Math.floor(state.life.length / 4 / 140)),
     );
-    const exposed = this.exposed;
-    if (exposed && state.tick >= exposed.bloom.endTick) {
-      this.exposed = undefined;
-      if (
-        countSurvivors(state, exposed.colony.members, exposed.baseline) <=
-        exposed.colony.members.length * 0.42
-      ) {
-        if (this.beginIncident(exposed.colony, exposed.baseline, state)) return;
-      }
-    }
     const previous = this.history.at(-2)!.state;
     for (const colony of reference.colonies) {
       if (colony.members.length < minimum) break;
-      if (exposed && state.tick <= exposed.bloom.endTick) continue;
       if (
         countSurvivors(state, colony.members, reference.state) <=
           colony.members.length * 0.48 &&
@@ -568,42 +544,6 @@ export class TemporalGame {
       ) {
         if (this.beginIncident(colony, reference.state, state)) return;
       }
-    }
-    const latest = this.blooms.at(-1);
-    if (
-      state.tick - this.observationStart < FALLBACK_BLOOM_WARMUP_TICKS ||
-      (latest && state.tick <= latest.endTick + FALLBACK_BLOOM_COOLDOWN_TICKS)
-    )
-      return;
-    for (const colony of colonies) {
-      if (colony.members.length < minimum) break;
-      const distances = colony.members
-        .map((index) => {
-          const offset = index * 12;
-          return Math.hypot(
-            state.particles[offset] - colony.center[0],
-            state.particles[offset + 1] - colony.center[1],
-            state.particles[offset + 2] - colony.center[2],
-          );
-        })
-        .sort((left, right) => left - right);
-      const radius = Math.max(
-        0.075,
-        distances[Math.floor(distances.length * 0.85)] * 1.4,
-      );
-      if (radius > 0.17) continue;
-      const bloom = {
-        point: colony.center,
-        radius,
-        startTick: state.tick + ticksPerSecond,
-        endTick: state.tick + 4 * ticksPerSecond,
-      };
-      this.blooms = this.blooms.filter(
-        (item) => item.endTick >= this.history[0].state.tick,
-      );
-      this.blooms.push(bloom);
-      this.exposed = { colony, baseline: state, bloom };
-      break;
     }
   }
 
@@ -835,39 +775,6 @@ export class TemporalGame {
     ctx.restore();
   }
 
-  private positionMarkers() {
-    const bloom =
-      this.activeBloom(this.tick) ??
-      this.blooms.find(
-        (item) =>
-          item.startTick >= this.tick &&
-          (!this.incident || item.startTick <= this.incident.original.tick),
-      );
-    const point = bloom?.point ?? this.incident?.colony.center;
-    const marker = element('event-marker');
-    const showMarker =
-      this.mode === 'film' ||
-      this.mode === 'countdown' ||
-      this.mode === 'play' ||
-      this.mode === 'between';
-    const projected = showMarker && point && this.world.project(point);
-    marker.hidden = !projected;
-    if (projected) {
-      const size = Math.max(24, 2 * (bloom?.radius ?? 0.06) * projected.scale);
-      marker.style.cssText =
-        'left:' +
-        projected.x +
-        'px;top:' +
-        projected.y +
-        'px;width:' +
-        size +
-        'px;height:' +
-        size +
-        'px';
-      marker.classList.toggle('active', Boolean(this.activeBloom(this.tick)));
-    }
-  }
-
   private display() {
     const mode = this.mode;
     const incident = this.incident;
@@ -941,18 +848,8 @@ export class TemporalGame {
     survivorReadout.textContent = `${this.lastHealthyCount}/${total}`;
     survivorReadout.classList.toggle('clear', this.lastHealthyCount >= target);
 
-    // Render bloom danger zone & live swipe activity on the bottom progress bar
+    // Render live swipe activity on the bottom progress bar
     track.replaceChildren();
-    for (const bloom of this.blooms) {
-      if (bloom.endTick < start || bloom.startTick > end) continue;
-      const bStart = clamp(bloom.startTick, start, end);
-      const bEnd = clamp(bloom.endTick, start, end);
-      const zone = document.createElement('i');
-      zone.className = 'bloom-zone';
-      zone.style.left = `${((bStart - start) / span) * 100}%`;
-      zone.style.width = `${((bEnd - bStart) / span) * 100}%`;
-      track.append(zone);
-    }
     for (const sTick of this.swipeTicks) {
       if (sTick < start || sTick > end) continue;
       const mark = document.createElement('i');

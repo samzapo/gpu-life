@@ -18,6 +18,7 @@ struct Uniforms {
     renderParams: vec4f, // x: bioSize, y: lifeOpacity, z: nChemColours, w: nBioColours
     mineralParams: vec4f, // x: mineralOpacity, y: tempColors, z: localTempScale, w: viewLayerCode
     uvParams: vec4f, // x: uvColors, y: localUvScale, z: _pad, w: _pad
+    hydroParams: vec4f, // x: rhColors, y: precipColors, z: localHydroScale, w: _pad
 }
 
 struct Sim {

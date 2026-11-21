@@ -28,7 +28,7 @@ struct BioLink {
     mineralRate: f32,
     localTempScale: f32,
     localUvScale: f32,
-    pad1: f32,
+    localHydroScale: f32,
     pad2: f32,
 }
 
@@ -1020,6 +1020,8 @@ fn attemptMineralCrystallize(
     upwell: f32,
     oc: vec4f,
     tSurfK: f32,
+    tAirSfcK: f32,
+    hydroSample: vec2f,
     landFrac: f32,
     windNorm: f32,
     curNorm: f32,
@@ -1037,10 +1039,20 @@ fn attemptMineralCrystallize(
 
     let dtMin = bio.dt * mRate * 0.24;
     let tBlend = clamp(bio.localTempScale, 0.0, 1.5);
-    let evapTemp = mix(1.0, clamp(0.28 + 1.15 * smoothstep(275.0, 314.0, tSurfK), 0.25, 1.45), tBlend);
+    let hBlend = clamp(bio.localHydroScale, 0.0, 1.5);
+    let rh = hydroSample.x;
+    let precipMm = hydroSample.y;
+    let eAir = rh * saturationVaporKpa(tAirSfcK);
+    let eSea = saturationVaporKpa(tSurfK);
+    let vpdLand = max(0.0, saturationVaporKpa(tAirSfcK) - eAir);
+    let rainWash = smoothstep(0.3, 6.0, precipMm);
+    let netOceanEvap = max(0.0, (eSea - eAir) * (0.45 + 0.75 * windNorm) - precipMm * 0.25);
+    let evapHydro = mix(1.0, mix(clamp(0.45 + 0.45 * netOceanEvap, 0.30, 1.65), clamp(0.40 + 0.45 * vpdLand, 0.25, 1.75) * (1.0 - 0.72 * rainWash), landFrac), hBlend);
+    let clayHydro = mix(1.0, clamp(0.65 + 0.50 * rh + 0.40 * rainWash - 0.30 * smoothstep(1.4, 4.0, vpdLand), 0.35, 1.35), hBlend);
+    let evapTemp = mix(1.0, clamp(0.28 + 1.15 * smoothstep(275.0, 314.0, tSurfK), 0.25, 1.45), tBlend) * evapHydro;
     let carbTemp = mix(1.0, clamp(0.55 + 0.85 * smoothstep(278.0, 303.0, tSurfK), 0.50, 1.40), tBlend);
     let sulfTemp = mix(1.0, clamp(1.28 - 0.50 * smoothstep(274.0, 302.0, tSurfK), 0.72, 1.32), tBlend);
-    let clayTemp = mix(1.0, clamp(1.15 - 0.55 * smoothstep(296.0, 318.0, tSurfK), 0.58, 1.18), tBlend);
+    let clayTemp = mix(1.0, clamp(1.15 - 0.55 * smoothstep(296.0, 318.0, tSurfK), 0.58, 1.18), tBlend) * clayHydro;
     let mineralHeadroom = clamp(1.0 - acc.nearMineralCount / 11.0, 0.0, 1.0);
     let calmWind = 1.0 / (1.0 + 2.6 * windNorm * windNorm);
     let calmCur = 1.0 / (1.0 + 2.4 * curNorm * curNorm);
@@ -1181,20 +1193,30 @@ fn finalizeBioUnified(
     oc: vec4f,
     tSample: vec4f,
     uvSample: vec4f,
+    hydroSample: vec2f,
     acc: BioUnifiedAccum,
     bio: BioLink,
 ) -> BioStepResult {
     let myPhase = unpackPhase(curLifeState.w);
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let tBlend = clamp(bio.localTempScale, 0.0, 1.5);
+    let hBlend = clamp(bio.localHydroScale, 0.0, 1.5);
     let tHabK = effectiveSurfaceTempK(tSample, oc.w);
     let uvRes = evalUvSolarAndStress(uvSample, bio.localUvScale);
     let solar = uvRes.x;
-    let uvStress = uvRes.y;
     let windSim = evalWindVel3D(pos, windRaw, bio);
     let windNorm = length(windSim);
     let curSim = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
     let curNorm = length(curSim);
+    let rh = hydroSample.x;
+    let precipMm = hydroSample.y;
+    let eAir = rh * saturationVaporKpa(tSample.w);
+    let eSea = saturationVaporKpa(tSample.y);
+    let seaEvapFlux = max(0.0, eSea - eAir) * (0.45 + 0.75 * windNorm);
+    let seaFogCondense = smoothstep(0.0, 0.35, eAir - eSea);
+    let rainWash = smoothstep(0.3, 6.0, precipMm);
+    let vpdLand = max(0.0, saturationVaporKpa(tSample.w) - eAir);
+    let uvStress = uvRes.y * mix(1.0, max(0.38, 1.0 - 0.50 * seaFogCondense - 0.32 * rainWash), hBlend);
     let frameU = u32(max(bio.frame, 0.0)) + u32(max(bio.seedHash, 0.0));
 
     // Inorganic Crustal Mineral (`myPhase == 3u`): stability, dual-layer wind/current erosion & thermal geochemistry
@@ -1225,27 +1247,28 @@ fn finalizeBioUnified(
             mechErode = 0.06 * (windNorm + curNorm) + 0.20 * (windNorm * windNorm + curNorm * curNorm) + freezeThaw * 0.5;
         } else if (mType == MINERAL_EVAPORITE) {
             let evapDissolveT = mix(1.0, clamp(0.65 + 0.70 * smoothstep(273.0, 305.0, tHabK), 0.60, 1.40), tBlend);
-            waterErode = inWater * (0.65 + 3.0 * curNorm) * evapDissolveT;
+            waterErode = (inWater * (0.65 + 3.0 * curNorm) + landFrac * rainWash * 2.2 * hBlend) * evapDissolveT;
             airErode = (1.0 - inWater) * (0.07 * windNorm + 0.18 * windNorm * windNorm);
         } else if (mType == MINERAL_CARBONATE) {
             // Carbonate exhibits retrograde solubility: cold polar seas dissolve faster than warm tropical waters
             let coldCarbDissolve = mix(1.0, clamp(1.38 - 0.65 * smoothstep(278.0, 303.0, tHabK), 0.70, 1.55), tBlend);
-            waterErode = inWater * (0.14 + 1.05 * curNorm) * coldCarbDissolve;
+            waterErode = (inWater * (0.14 + 1.05 * curNorm) + landFrac * rainWash * 0.45 * hBlend) * coldCarbDissolve;
             airErode = (1.0 - inWater) * (0.09 + 0.65 * windNorm) + freezeThaw;
         } else if (mType == MINERAL_SULFIDE) {
             waterErode = inWater * (0.04 + 0.22 * curNorm);
             let airExposed = smoothstep(0.24, 0.68, landFrac);
-            let hotOx = mix(1.0, clamp(0.70 + 0.65 * smoothstep(275.0, 310.0, tHabK), 0.65, 1.40), tBlend) * (1.0 + 0.35 * uvStress);
+            let hotOx = mix(1.0, clamp(0.70 + 0.65 * smoothstep(275.0, 310.0, tHabK), 0.65, 1.40), tBlend) * (1.0 + 0.35 * uvStress) * mix(1.0, 1.0 + 0.55 * rainWash + 0.25 * smoothstep(0.5, 0.95, rh), hBlend);
             airErode = airExposed * (0.58 + 2.6 * windNorm) * hotOx;
             if (airExposed > 0.40) {
                 mTrap = 1u;
                 haz = clamp(haz + 0.48 * hotOx * dtMin, 0.0, 1.0);
             }
         } else {
-            // Hydrated Clay: stable underwater/moist coasts, desiccates faster under hot continental heat, UV or frost
+            // Hydrated Clay: stable underwater/moist coasts, desiccates faster under hot continental heat, UV, high VPD, or frost
             waterErode = inWater * (0.04 + 0.20 * curNorm);
             let clayHeat = mix(1.0, clamp(0.75 + 0.75 * smoothstep(294.0, 316.0, tHabK), 0.75, 1.55), tBlend) * (1.0 + 0.30 * uvStress);
-            airErode = smoothstep(0.26, 0.72, landFrac) * (0.40 + 2.0 * windNorm) * clayHeat + freezeThaw * 0.6;
+            let clayDry = mix(1.0, clamp(0.75 + 0.45 * smoothstep(1.2, 4.0, vpdLand) - 0.35 * smoothstep(0.4, 0.95, rh) - 0.45 * rainWash, 0.35, 1.50), hBlend);
+            airErode = smoothstep(0.26, 0.72, landFrac) * (0.40 + 2.0 * windNorm) * clayHeat * clayDry + freezeThaw * 0.6;
         }
 
         let erodeRate = (waterErode + airErode + mechErode + bioWeather) * latticeShield;
@@ -1281,10 +1304,10 @@ fn finalizeBioUnified(
         if (myPhase != 0u) {
             return BioStepResult(vec4f(max(curLifeState.x, 0.55), curLifeState.y, curLifeState.z, curLifeState.w), vec4f(0.0));
         }
-        let chemUpwell = evalCoastalUpwelling(oc);
+        let chemUpwell = evalCoastalUpwelling(oc) + 0.25 * smoothstep(1.0, 9.0, tSample.y - tSample.w) * smoothstep(0.36, 0.54, oc.w) * hBlend;
         let crystRes = attemptMineralCrystallize(
             pi, pos, atomicNum, valence, 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0)),
-            solar, chemUpwell, oc, tHabK, landFrac, windNorm, curNorm, frameU, acc, bio,
+            solar, chemUpwell, oc, tHabK, tSample.w, hydroSample, landFrac, windNorm, curNorm, frameU, acc, bio,
         );
         return crystRes;
     }
@@ -1292,7 +1315,11 @@ fn finalizeBioUnified(
     let rate = max(bio.rate, 0.0);
     let dtBio = bio.dt * rate;
     let q10Bio = mix(1.0, clamp(pow(1.38, clamp((tHabK - 288.15) / 10.0, -2.5, 2.2)), 0.42, 1.55), tBlend);
-    let upwell = evalCoastalUpwelling(oc);
+    let convectiveMix = smoothstep(1.0, 9.0, tSample.y - tSample.w) * smoothstep(0.36, 0.54, oc.w);
+    let upwell = evalCoastalUpwelling(oc) + (0.28 * convectiveMix + 0.16 * rainWash) * hBlend * smoothstep(0.36, 0.54, oc.w);
+    let landHydration = clamp(0.42 * smoothstep(0.32, 0.92, rh) + 0.68 * rainWash + 0.32 * seaFogCondense, 0.0, 1.25);
+    let aridStress = smoothstep(1.1, 4.0, vpdLand) * (1.0 - smoothstep(0.4, 3.0, precipMm));
+    let oceanBleachBoost = smoothstep(301.0, 307.0, tHabK) * smoothstep(0.36, 0.54, oc.w) * uvStress * (1.0 - rainWash) * hBlend;
     let nChem = max(u32(bio.chemColours), 1u);
     let nBio = max(u32(bio.bioColours), 1u);
 
@@ -1302,7 +1329,7 @@ fn finalizeBioUnified(
         if (!isBiogenicElement(atomicNum, valence)) {
             let crystRes = attemptMineralCrystallize(
                 pi, pos, atomicNum, valence, bondEase,
-                solar, upwell, oc, tHabK, landFrac, windNorm, curNorm, frameU, acc, bio,
+                solar, upwell, oc, tHabK, tSample.w, hydroSample, landFrac, windNorm, curNorm, frameU, acc, bio,
             );
             if (unpackPhase(crystRes.nextLifeState.w) == 3u) {
                 return crystRes;
@@ -1486,11 +1513,11 @@ fn finalizeBioUnified(
         let lipHealthy = (acc.blobCount >= 1.0 || acc.blobLipidCount >= 2.0);
         let gradNow = (myGrad == 1u && lipHealthy && (acc.blobGradCount >= 1.5 || acc.blobCount >= 8.0)) ||
             (acc.blobGradCount >= 3.0 && acc.blobCount >= 20.0);
-        let heatLipidStress = smoothstep(307.0, 323.0, tHabK) * tBlend * 0.09;
+        let heatLipidStress = (smoothstep(307.0, 323.0, tHabK) * tBlend + 0.65 * oceanBleachBoost) * 0.09;
         let coldLipidStab = mix(1.0, 0.78, smoothstep(278.0, 266.0, tHabK) * tBlend);
         let upkeep = select(0.55, select(0.055, 0.036, gradNow), lipHealthy);
         let poisonPenalty = 0.24 * poi;
-        let landPenalty = 0.045 * landFrac;
+        let landPenalty = 0.045 * landFrac * mix(1.0, clamp(0.28 + 1.35 * aridStress - 0.30 * landHydration, 0.16, 2.1), hBlend);
         let nextEnergy = clamp(eDiffused - (upkeep + poisonPenalty + landPenalty + heatLipidStress) * dtVit, 0.02, 1.45);
         let hostIsGrad = gradNow && (nextEnergy >= 0.36) && (poi < 0.72);
 
@@ -1606,7 +1633,15 @@ fn finalizeBioUnified(
         nextKin = wrapAngle(myKin + jitter);
     }
 
-    let moistureFactor = mix(1.0, 0.74 + 0.16 * membraneShield, landFrac);
+    let moistureFactor = mix(
+        1.0,
+        mix(
+            0.74 + 0.16 * membraneShield,
+            clamp(0.52 + 0.44 * landHydration - 0.24 * aridStress + 0.16 * membraneShield, 0.35, 1.12),
+            hBlend,
+        ),
+        landFrac,
+    );
     let solarGain = 0.56 * mix(1.0, q10Bio, 0.75) * solar * mix(0.55 + 0.85 * upwell, 0.55, landFrac) * autoCap * moistureFactor;
     let haloGain = select(0.0, 0.24 * min(acc.nearHalogen, 2.5) * haloTol, haloTol > 0.52);
     let detritusGain = 0.26 * min(acc.nearStressedBio, 2.5) * decompCap;
@@ -1621,11 +1656,12 @@ fn finalizeBioUnified(
     let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) * foreignCrowdScale + ownCrowdSlope * max(0.0, acc.blobCount - ownCrowdStart);
     let poisonPenalty = 0.28 * poi * (1.0 - 0.65 * clamp(haloTol - 0.35, 0.0, 1.0));
     let desiccationShield = 0.55 * membraneShield;
-    let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend;
+    let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend + 0.55 * oceanBleachBoost;
     let frostShock = smoothstep(271.0, 249.0, tHabK) * tBlend;
     let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield);
     let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield);
-    let landPenalty = 0.075 * landFrac * (1.0 - desiccationShield);
+    let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * (1.0 - clamp(haloTol, 0.0, 1.0)) * 0.022 * hBlend;
+    let landPenalty = (0.075 * landFrac * mix(1.0, clamp(0.28 + 1.35 * aridStress - 0.30 * landHydration, 0.16, 2.1), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield);
 
     let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;

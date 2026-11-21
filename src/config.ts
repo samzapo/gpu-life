@@ -62,6 +62,10 @@ export const FACTORY_DEFAULTS = {
     uvColors: 0.2,
     localUv: true,
     uvStrength: 1.0,
+    rhColors: 0.1,
+    precipColors: 0.15,
+    localHydro: true,
+    hydroStrength: 1.0,
     lifeOpacity: 1.0,
     mineralOpacity: 1.0,
     coastlines: true,
@@ -127,6 +131,10 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'uvColors',
   'localUv',
   'uvStrength',
+  'rhColors',
+  'precipColors',
+  'localHydro',
+  'hydroStrength',
   'lifeOpacity',
   'mineralOpacity',
   'coastlines',
@@ -218,6 +226,10 @@ export interface SimConfigV1 {
     uvColors?: number;
     localUv?: boolean;
     uvStrength?: number;
+    rhColors?: number;
+    precipColors?: number;
+    localHydro?: boolean;
+    hydroStrength?: number;
     lifeOpacity?: number;
     mineralOpacity?: number;
     coastlines?: boolean;
@@ -380,6 +392,10 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.uvColors = opParam('uvColors') ?? FACTORY_DEFAULTS.earth.uvColors;
     if (sp.has('localUv')) cfg.earth!.localUv = sp.get('localUv') !== 'false';
     cfg.earth!.uvStrength = numParam('uvStrength') ?? FACTORY_DEFAULTS.earth.uvStrength;
+    cfg.earth!.rhColors = opParam('rhColors') ?? FACTORY_DEFAULTS.earth.rhColors;
+    cfg.earth!.precipColors = opParam('precipColors') ?? FACTORY_DEFAULTS.earth.precipColors;
+    if (sp.has('localHydro')) cfg.earth!.localHydro = sp.get('localHydro') !== 'false';
+    cfg.earth!.hydroStrength = numParam('hydroStrength') ?? FACTORY_DEFAULTS.earth.hydroStrength;
     cfg.earth!.chemOpacity = opParam('chemOpacity') ?? FACTORY_DEFAULTS.earth.chemOpacity;
     cfg.earth!.lifeOpacity = opParam('lifeOpacity') ?? FACTORY_DEFAULTS.earth.lifeOpacity;
     cfg.earth!.mineralOpacity = opParam('mineralOpacity') ?? FACTORY_DEFAULTS.earth.mineralOpacity;
@@ -516,6 +532,10 @@ export function buildUrlPartsFromConfig(
     setNum('uvColors', e.uvColors, FACTORY_DEFAULTS.earth.uvColors);
     setBool('localUv', e.localUv, FACTORY_DEFAULTS.earth.localUv);
     setNum('uvStrength', e.uvStrength, FACTORY_DEFAULTS.earth.uvStrength);
+    setNum('rhColors', e.rhColors, FACTORY_DEFAULTS.earth.rhColors);
+    setNum('precipColors', e.precipColors, FACTORY_DEFAULTS.earth.precipColors);
+    setBool('localHydro', e.localHydro, FACTORY_DEFAULTS.earth.localHydro);
+    setNum('hydroStrength', e.hydroStrength, FACTORY_DEFAULTS.earth.hydroStrength);
     setNum('lifeOpacity', e.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity);
     setNum('mineralOpacity', e.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity);
     setBool('coastlines', e.coastlines, FACTORY_DEFAULTS.earth.coastlines);
@@ -634,6 +654,10 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     uvColors: unitOpacity(earthRaw.uvColors),
     localUv: boolVal(earthRaw.localUv),
     uvStrength: finiteNum(earthRaw.uvStrength),
+    rhColors: unitOpacity(earthRaw.rhColors),
+    precipColors: unitOpacity(earthRaw.precipColors),
+    localHydro: boolVal(earthRaw.localHydro),
+    hydroStrength: finiteNum(earthRaw.hydroStrength),
     lifeOpacity: unitOpacity(earthRaw.lifeOpacity),
     mineralOpacity: unitOpacity(earthRaw.mineralOpacity),
     coastlines: boolVal(earthRaw.coastlines),

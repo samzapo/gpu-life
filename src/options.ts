@@ -195,6 +195,10 @@ export const earthParams = {
   uvColors: parseOpacityParam('uvColors', effectiveCachedConfig?.earth?.uvColors, FACTORY_DEFAULTS.earth.uvColors),
   localUv: resolveBool('localUv', effectiveCachedConfig?.earth?.localUv, FACTORY_DEFAULTS.earth.localUv),
   uvStrength: resolveNumber('uvStrength', effectiveCachedConfig?.earth?.uvStrength, FACTORY_DEFAULTS.earth.uvStrength),
+  rhColors: parseOpacityParam('rhColors', effectiveCachedConfig?.earth?.rhColors, FACTORY_DEFAULTS.earth.rhColors),
+  precipColors: parseOpacityParam('precipColors', effectiveCachedConfig?.earth?.precipColors, FACTORY_DEFAULTS.earth.precipColors),
+  localHydro: resolveBool('localHydro', effectiveCachedConfig?.earth?.localHydro, FACTORY_DEFAULTS.earth.localHydro),
+  hydroStrength: resolveNumber('hydroStrength', effectiveCachedConfig?.earth?.hydroStrength, FACTORY_DEFAULTS.earth.hydroStrength),
   chemOpacity: parseOpacityParam('chemOpacity', effectiveCachedConfig?.earth?.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity),
   lifeOpacity: parseOpacityParam('lifeOpacity', effectiveCachedConfig?.earth?.lifeOpacity, FACTORY_DEFAULTS.earth.lifeOpacity),
   mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
@@ -209,6 +213,7 @@ export const earthParams = {
   oceanStatus: 'Loading CoastWatch…',
   tempStatus: 'Loading Temp+SST…',
   uvStatus: 'Loading CPC+GFS UV…',
+  hydroStatus: 'Loading GFS RH+3HPS…',
 };
 setMouseToolMode(earthParams.mouseTool);
 
@@ -286,7 +291,7 @@ export function setBioLink(
   bioData[15] = earthParams.mineralRate;
   bioData[16] = earthParams.localTemp ? earthParams.tempStrength : 0;
   bioData[17] = earthParams.localUv ? earthParams.uvStrength : 0;
-  bioData[18] = 0;
+  bioData[18] = earthParams.localHydro ? earthParams.hydroStrength : 0;
   bioData[19] = 0;
   device.queue.writeBuffer(bioBuffer, 0, bioData);
 }
@@ -616,6 +621,39 @@ export const uvStrengthBinding = withTooltip(
   'Local UV Strength',
   'Multiplier scaling how strongly live Earth UV radiation drives fixation, photodamage, mutagenesis, and photochemistry.',
 );
+export const rhColorsBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'rhColors', {
+    label: 'rhColors',
+    ...opacitySliderParams,
+  }),
+  'Relative Humidity Map Opacity',
+  'Opacity (0%–100%) of live NOAA GFS 2m Relative Humidity shading across Earth.',
+);
+export const precipColorsBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'precipColors', {
+    label: '3hpsColors',
+    ...opacitySliderParams,
+  }),
+  '3-Hour Precipitation (3HPS) Opacity',
+  'Opacity (0%–100%) of live NOAA GFS 3-hour accumulated precipitation shading across Earth.',
+);
+export const localHydroBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'localHydro', {
+    label: 'localHydro',
+  }),
+  'Local RH, 3HPS & SST Hydrology',
+  'Couple live GFS Relative Humidity, 3-hour Precipitation, and NOAA SST into air-sea evaporation, fog shading, upwelling, land hydration/desiccation, and mineral weathering.',
+);
+export const hydroStrengthBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'hydroStrength', {
+    label: 'hydroForce',
+    min: 0,
+    max: 2,
+    step: 0.05,
+  }),
+  'Hydrology Coupling Strength',
+  'Multiplier scaling how strongly live RH, 3HPS precipitation, and SST air-sea gradients modulate Chemistry, Life, and Minerals.',
+);
 export const lifeOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'lifeOpacity', {
     index: 8,
@@ -727,6 +765,14 @@ export const uvStatusBinding = withTooltip(
   }),
   'UV Index Data Source',
   'NOAA Climate Prediction Center Solar-Noon UVI v2 modulated by live NOAA GFS Total Ozone (TOZNE), Cloud Cover (TCDC), Elevation, and UTC Sun Angle.',
+);
+export const hydroStatusBinding = withTooltip(
+  earthFolder.addBinding(earthParams, 'hydroStatus', {
+    readonly: true,
+    label: 'hydroSrc',
+  }),
+  'Hydrology Data Source',
+  'Live NOAA GFS 2m Relative Humidity (RH) and 3-Hour Accumulated Precipitation (3HPS / APCP).',
 );
 export const resetViewBtn = withTooltip(
   earthFolder.addButton({ title: 'Reset Globe View' }),
@@ -986,6 +1032,10 @@ export function bindConfigPersistence(onChange: () => void) {
     uvColorsBinding,
     localUvBinding,
     uvStrengthBinding,
+    rhColorsBinding,
+    precipColorsBinding,
+    localHydroBinding,
+    hydroStrengthBinding,
     lifeOpacityBinding,
     mineralOpacityBinding,
     coastlinesBinding,

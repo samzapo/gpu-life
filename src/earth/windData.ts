@@ -124,6 +124,8 @@ export interface GfsCycleInfo {
   idxEntries: IdxEntry[];
   cycleLabel: string;
   validLabel: string;
+  cycMs: number;
+  fh: number;
 }
 
 const GFS_S3_BASE = 'https://noaa-gfs-bdp-pds.s3.amazonaws.com';
@@ -155,12 +157,38 @@ function parseIdx(text: string): IdxEntry[] {
   return out;
 }
 
-async function resolveLatestGfsCycle(nowMs: number): Promise<{
-  gribUrl: string;
-  idxEntries: IdxEntry[];
-  cycleLabel: string;
-  validLabel: string;
-}> {
+export async function fetchGfsCycleAtOffset(
+  cycMs: number,
+  fh: number,
+): Promise<GfsCycleInfo | null> {
+  const cycDate = new Date(cycMs);
+  const ymd = `${cycDate.getUTCFullYear()}${pad2(cycDate.getUTCMonth() + 1)}${pad2(cycDate.getUTCDate())}`;
+  const hh = pad2(cycDate.getUTCHours());
+  const fStr = `f${pad3(fh)}`;
+  const gribUrl = `${GFS_S3_BASE}/gfs.${ymd}/${hh}/atmos/gfs.t${hh}z.pgrb2.1p00.${fStr}`;
+  const idxUrl = `${gribUrl}.idx`;
+  try {
+    const res = await fetch(idxUrl);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const idxEntries = parseIdx(text);
+    if (idxEntries.length === 0) return null;
+    const validDate = new Date(cycMs + fh * 3600 * 1000);
+    const validLabel = `${validDate.getUTCFullYear()}-${pad2(validDate.getUTCMonth() + 1)}-${pad2(validDate.getUTCDate())} ${pad2(validDate.getUTCHours())}:00Z`;
+    return {
+      gribUrl,
+      idxEntries,
+      cycleLabel: `${ymd} ${hh}Z+${pad2(fh)}h`,
+      validLabel,
+      cycMs,
+      fh,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveLatestGfsCycle(nowMs: number): Promise<GfsCycleInfo> {
   // GFS 1.0 deg runs at 00/06/12/18 UTC and usually lands on S3 ~3.5-4.2h after cycle init.
   const latestReadyMs = nowMs - 4.25 * 3600 * 1000;
   const candidateDate = new Date(latestReadyMs);
@@ -174,34 +202,13 @@ async function resolveLatestGfsCycle(nowMs: number): Promise<{
 
   for (let step = 0; step < 4; step++) {
     const cycMs = baseUtcMs - step * 6 * 3600 * 1000;
-    const cycDate = new Date(cycMs);
-    const ymd = `${cycDate.getUTCFullYear()}${pad2(cycDate.getUTCMonth() + 1)}${pad2(cycDate.getUTCDate())}`;
-    const hh = pad2(cycDate.getUTCHours());
     const diffHours = Math.max(0, (nowMs - cycMs) / (3600 * 1000));
     const fhr = Math.min(24, Math.max(0, Math.round(diffHours / 3) * 3));
     const tryFhrs = fhr > 0 ? [fhr, Math.max(0, fhr - 3), 0] : [0];
 
     for (const fh of tryFhrs) {
-      const fStr = `f${pad3(fh)}`;
-      const gribUrl = `${GFS_S3_BASE}/gfs.${ymd}/${hh}/atmos/gfs.t${hh}z.pgrb2.1p00.${fStr}`;
-      const idxUrl = `${gribUrl}.idx`;
-      try {
-        const res = await fetch(idxUrl);
-        if (!res.ok) continue;
-        const text = await res.text();
-        const idxEntries = parseIdx(text);
-        if (idxEntries.length === 0) continue;
-        const validDate = new Date(cycMs + fh * 3600 * 1000);
-        const validLabel = `${validDate.getUTCFullYear()}-${pad2(validDate.getUTCMonth() + 1)}-${pad2(validDate.getUTCDate())} ${pad2(validDate.getUTCHours())}:00Z`;
-        return {
-          gribUrl,
-          idxEntries,
-          cycleLabel: `${ymd} ${hh}Z+${pad2(fh)}h`,
-          validLabel,
-        };
-      } catch {
-        // Try earlier cycle/forecast
-      }
+      const info = await fetchGfsCycleAtOffset(cycMs, fh);
+      if (info) return info;
     }
   }
   throw new Error('Unable to resolve live NOAA GFS index from S3');
