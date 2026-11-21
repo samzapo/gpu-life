@@ -18,8 +18,8 @@ ${bioChemShader}
 @group(0) @binding(7) var<storage, read_write> bioForceOut: array<vec4f>;
 @group(0) @binding(8) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(9) var<storage, read> prefixSumIndices: array<u32>;
-@group(0) @binding(10) var windStackTex: texture_2d_array<f32>;
-@group(0) @binding(11) var tempStackTex: texture_2d_array<f32>;
+@group(0) @binding(10) var windTex: texture_2d<f32>;
+@group(0) @binding(11) var tempTex: texture_2d<f32>;
 @group(0) @binding(12) var uvTex: texture_2d<f32>;
 @group(0) @binding(13) var hydroTex: texture_2d<f32>;
 @group(0) @binding(14) var terrainTex: texture_2d<f32>;
@@ -41,12 +41,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let myAtomicNum = u32(matrix[mySBase + 7u]);
     let myV = valence[pi];
     let myAtomLoad = select(0.0, myV.x + myV.y + myV.z, myPhase == 0u);
-    let myFlight = unpackFlightMode(curLife.w);
-    let alt01 = select(0.0, select(clamp(p._pad, 0.0, 1.0), clamp(curLife.z, 0.0, 1.0), myPhase == 0u), (myPhase == 0u && curLife.y < 0.5) || (myPhase == 1u && myFlight == 1u));
     let eq = makeEquirectCoord(p.pos, textureDimensions(oceanTex, 0));
-    let windRaw = sampleWindArrayAtAltCoord(windStackTex, eq, alt01);
+    let windRaw = sampleWindTextureCoord(windTex, eq);
     let oc = sampleOceanTextureCoord(oceanTex, eq);
-    let tSample = sampleTempArrayAtAltCoord(tempStackTex, eq, alt01);
+    let tSample = sampleTempTextureCoord(tempTex, eq);
     let uvSample = sampleUvTextureCoord(uvTex, eq);
     let hydroSample = sampleHydroTextureCoord(hydroTex, eq);
     let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);

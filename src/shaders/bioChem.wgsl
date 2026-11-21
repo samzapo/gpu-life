@@ -523,14 +523,10 @@ struct BioUnifiedAccum {
     nearPreSulf: f32,
     nearBe: f32,
     nearClayH: f32,
-    // Closed water-cycle, O2/CO2 exchange & aerial flocking accumulators
+    // Closed water-cycle & O2/CO2 exchange accumulators
     nearWaterFluid: f32,
     nearOxygenGas: f32,
     nearCarbonFeed: f32,
-    nearWaterBio: f32,
-    nearAerialCount: f32,
-    aerialCenterDir: vec3f,
-    aerialMatchVel: vec3f,
 }
 
 fn initBioUnifiedAccum() -> BioUnifiedAccum {
@@ -835,8 +831,6 @@ fn accumulateBioUnifiedNeighbor(
     }
 
     // Neighbor is living Particle Life cytoplasm (`nbPhase == 1u`)
-    let nbFlight = unpackFlightMode(nbLifeState.w);
-    let myFlight = unpackFlightMode(myLifeState.w);
     let curVel = evalOceanCurrentVel(nbPos, oc, bio.oceanCurrentScale);
     let nbSelfVel = nbVel - curVel;
     let nbSelfSpeed = length(nbSelfVel);
@@ -844,11 +838,9 @@ fn accumulateBioUnifiedNeighbor(
     let nbSolarElem = elemSolarWeight(nbAtomicNum);
     let nbRedoxElem = elemRedoxWeight(nbAtomicNum);
 
-    if (nbFlight == 0u) {
-        (*acc).nearTotalBio += 1.0;
-        if (nbEnergy < 0.44 || nbPoi > 0.24) {
-            (*acc).nearStressedBio += wDist * 1.15;
-        }
+    (*acc).nearTotalBio += 1.0;
+    if (nbEnergy < 0.44 || nbPoi > 0.24) {
+        (*acc).nearStressedBio += wDist * 1.15;
     }
 
     if (myPhase == 0u) {
@@ -927,36 +919,6 @@ fn accumulateBioUnifiedNeighbor(
     }
 
     // Both particles are living cytoplasm (`myPhase == 1u && nbPhase == 1u`)
-    if (myFlight == 1u) {
-        if (nbFlight == 1u) {
-            (*acc).nearAerialCount += 1.0;
-            (*acc).aerialCenterDir += wDist * dToNb;
-            (*acc).aerialMatchVel += wDist * nbVel;
-            (*acc).blobCount += 1.0;
-            (*acc).blobWeightSum += max(wDist, 0.15);
-            (*acc).blobEnergySum += nbEnergy;
-            (*acc).blobVitSum += nbVit;
-            (*acc).blobCohSum += nbTraits.x;
-            (*acc).blobAsymSum += nbTraits.w;
-            (*acc).blobSolarAtomSum += nbSolarElem;
-            (*acc).blobRedoxAtomSum += nbRedoxElem;
-            (*acc).blobSpeedSum += nbSelfSpeed;
-            (*acc).blobSpeciesMask |= (1u << (nbSp % 24u));
-            (*acc).blobGeneSum += f32(nbGene);
-            if (nbGrad == 1u) {
-                (*acc).blobGradCount += 1.0;
-            }
-        } else {
-            (*acc).nearWaterBio += wDist;
-            (*acc).nearForeignPrey += wDist;
-            (*acc).bioSteer += dToNb * (wDist * 0.35);
-        }
-        return;
-    }
-    if (nbFlight == 1u) {
-        return;
-    }
-
     let myKin = unpackKinPhase(myLifeState.w);
     let kinDist = kinAngularDist(myKin, nbKin);
     let aMyNb = getBioMatrixA(nChem, nBio, myBioSp, nbSp);
@@ -1709,7 +1671,6 @@ fn finalizeBioUnified(
 
     let myBioSp = min(unpackBioSpecies(curLifeState.w), nBio - 1u);
     let myKin = unpackKinPhase(curLifeState.w);
-    let myFlight = unpackFlightMode(curLifeState.w);
     let myGene = unpackEncapGene(curLifeState.w);
     let myGrad = unpackGraduated(curLifeState.w);
     let dtVit = dtBio * 1.8;
@@ -1883,7 +1844,7 @@ fn finalizeBioUnified(
     let grazeEnvGain = 0.34 * min(acc.nearForeignPrey, 2.5) * predCap * o2RespireBoost;
     let chemBonus = 0.24 * acc.dE * normChem * q10Bio * (1.0 + 0.35 * landFrac);
     let coldTorpor = mix(1.0, clamp(0.66 + 0.38 * smoothstep(271.0, 296.0, tHabK), 0.62, 1.18), tBlend);
-    let basalBurn = (0.13 + 0.10 * motility * motility + 0.04 * avgAsym + select(0.0, 0.025, myFlight == 1u)) * coldTorpor * (1.0 - 0.14 * membraneShield - 0.26 * isGradNowF);
+    let basalBurn = (0.13 + 0.10 * motility * motility + 0.04 * avgAsym) * coldTorpor * (1.0 - 0.14 * membraneShield - 0.26 * isGradNowF);
     let foreignBio = max(0.0, acc.nearTotalBio - acc.blobCount);
     let ownCrowdStart = select(56.0, 145.0, isGradNow);
     let ownCrowdSlope = select(0.020, 0.008, isGradNow);
@@ -1896,14 +1857,14 @@ fn finalizeBioUnified(
     let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield);
     let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield);
     let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * (1.0 - clamp(haloTol, 0.0, 1.0)) * 0.022 * hBlend;
-    let landPenalty = (0.062 * landFrac * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.12, 2.0), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield) * select(1.0, 0.45, myFlight == 1u);
+    let landPenalty = (0.062 * landFrac * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.12, 2.0), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield);
 
     let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;
     let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, 1.55);
 
     // Inter-blob Grazing: foreign hunter eats vulnerable prey (~35% assimilated, ~65% respired back to pool)
-    if (acc.nearPredThreat > 0.0 && myFlight == 0u) {
+    if (acc.nearPredThreat > 0.0) {
         let haloShield = 1.0 / (1.0 + 1.4 * acc.nearHalogen);
         let pGraze = clamp(
             0.38 * min(acc.nearPredThreat, 3.0) * haloShield * (1.0 - 0.30 * vit) * (1.0 - 0.78 * membraneShield) * select(1.0, 0.42, isGradNow) * dtBio,
@@ -2002,20 +1963,6 @@ fn finalizeBioUnified(
         }
     }
 
-    // Emergent Bird / Aerial Adaptation (`flightMode = 1u`) from energetic graduated coastal/tropical consumers
-    var outFlight = myFlight;
-    if (myFlight == 0u) {
-        let canTakeFlight = (outGrad == 1u) && (predCap > autoCap * 1.08) && (motility >= 0.38) && (nextEnergy >= 0.88) && (landFrac > 0.12 || acc.nearWaterBio > 0.25 || acc.nearAerialCount >= 0.5) && (acc.nearAerialCount < 8.0);
-        if (canTakeFlight && hashFloat(pi, frameU, 81u) < clamp(0.032 * dtBio, 0.0, 0.025)) {
-            outFlight = 1u;
-        }
-    } else {
-        // Birds stay aerial while healthy; severe cold/poison grounds them safely back to land/surface
-        if (nextEnergy < 0.26 || tHabK < 258.0) {
-            outFlight = 0u;
-        }
-    }
-
     // Controlled post-encapsulation somatic innovation & mega-cell budding
     var outSp = myBioSp;
     var outKin = nextKin;
@@ -2036,28 +1983,17 @@ fn finalizeBioUnified(
         outGrad = 0u;
     }
 
-    // Flocking steer for birds + gentle chemotaxis / foraging steer for aquatic & land blobs
+    // Gentle chemotaxis / foraging steer for aquatic & terrestrial blobs
     var st = acc.steer * (normChem * 1.4) + acc.bioSteer * max(rate, 0.2);
-    if (outFlight == 1u) {
-        let matchV = acc.aerialMatchVel / max(acc.nearAerialCount, 1.0);
-        st += acc.aerialCenterDir * 0.45 + (matchV - vel) * 0.35;
-    }
     let stLen = length(st);
-    let maxSt = select(1.6, 2.4, outFlight == 1u) * max(rate, 0.1);
+    let maxSt = 1.6 * max(rate, 0.1);
     if (stLen > maxSt) {
         st *= maxSt / stLen;
     }
-    var outMetaW = clamp((predCap - autoCap) * 0.85, -1.0, 1.0);
-    if (outFlight == 1u) {
-        // Encode desired soaring altitude `[0.15 .. 0.92]` mapped above `1.1` so oceanSim reads both!
-        let forageDive = smoothstep(0.3, 1.8, acc.nearWaterBio);
-        let stormDrop = smoothstep(1.0, 6.0, precipMm);
-        let soarAlt = clamp(0.45 + 0.35 * solar - 0.32 * forageDive - 0.35 * stormDrop, 0.12, 0.92);
-        outMetaW = 1.15 + soarAlt;
-    }
+    let outMetaW = clamp((predCap - autoCap) * 0.85, -1.0, 1.0);
 
     return BioStepResult(
-        vec4f(nextEnergy, vit, poi, packLifeMetaFull(1u, outSp, outKin, outFlight, outGene, outGrad)),
+        vec4f(nextEnergy, vit, poi, packLifeMetaGrad(1u, outSp, outKin, outGene, outGrad)),
         vec4f(st, outMetaW),
     );
 }

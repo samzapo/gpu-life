@@ -9,29 +9,16 @@
   </head>
   <body>
     <canvas id="bgCanvas"></canvas>
-    <svg id="mapSvg" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <clipPath id="sphereClip">
-          <path id="sphereClipPath" />
-        </clipPath>
-      </defs>
-      <g clip-path="url(#sphereClip)" fill="none">
-        <path id="graticulePath" stroke="rgba(140, 165, 190, 0.25)" stroke-width="0.8" />
-        <path id="hemispherePath" stroke="rgba(165, 190, 215, 0.34)" stroke-width="1.0" />
-        <path id="coastlinePath" stroke="rgba(245, 248, 255, 0.82)" stroke-width="1.15" />
-        <path id="lakesPath" stroke="rgba(220, 232, 245, 0.62)" stroke-width="0.95" />
-      </g>
-      <path id="sphereRimPath" fill="none" />
-    </svg>
+    <canvas id="mapCanvas"></canvas>
     <canvas id="oceanCanvas"></canvas>
     <canvas id="windCanvas"></canvas>
     <canvas id="canvas"></canvas>
     <div id="projection-fade" aria-hidden="true"></div>
 
-    <div id="controls">
+    <div id="controls" class="minimized">
       <div id="hudHeader">
         <span id="hudTitle">Wind &amp; Ocean</span>
-        <button id="hudToggleBtn" type="button" aria-expanded="true" aria-label="Minimize display">−</button>
+        <button id="hudToggleBtn" type="button" aria-expanded="false" aria-label="Expand display">+</button>
       </div>
       <div id="hudBody">
         <div id="windHudGroup">

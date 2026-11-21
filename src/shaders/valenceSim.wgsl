@@ -47,20 +47,17 @@ struct WindSample {
     refSpeed: f32,
 }
 
-fn sampleWind3D(windArr: texture_2d_array<f32>, dir: vec3f, alt01: f32) -> vec3f {
+fn sampleWind3D(windTex: texture_2d<f32>, dir: vec3f) -> vec3f {
     let n = normalize(dir);
-    let dims = textureDimensions(windArr, 0);
-    let eq = makeEquirectCoord(n, dims);
-    let uv = sampleWindArrayAtAltCoord(windArr, eq, alt01);
+    let uv = sampleWindTexture(windTex, n);
     let eEast = sphereEastBasis(n);
     let eNorth = normalize(cross(n, eEast));
     return uv.x * eEast + uv.y * eNorth;
 }
 
 fn evalWindAndShear(
-    windArr: texture_2d_array<f32>,
+    windTex: texture_2d<f32>,
     pos: vec3f,
-    alt01: f32,
     windStreamMax: f32,
 ) -> WindSample {
     if (sim.vortex <= 0.0 || sim.windStrength <= 0.0) {
@@ -71,9 +68,9 @@ fn evalWindAndShear(
     let eNorth = normalize(cross(pos, eEast));
     let eps = clamp((sim.rMax / R) * 0.55, 0.008, 0.045);
 
-    let w0 = sampleWind3D(windArr, pos, alt01);
-    var wE = sampleWind3D(windArr, pos + eps * eEast, alt01);
-    var wN = sampleWind3D(windArr, pos + eps * eNorth, alt01);
+    let w0 = sampleWind3D(windTex, pos);
+    var wE = sampleWind3D(windTex, pos + eps * eEast);
+    var wN = sampleWind3D(windTex, pos + eps * eNorth);
 
     wE -= dot(wE, pos) * pos;
     wN -= dot(wN, pos) * pos;

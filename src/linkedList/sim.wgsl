@@ -10,7 +10,7 @@ struct LinkedList {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<uniform> oceanSim: OceanSim;
-@group(0) @binding(3) var windStackTex: texture_2d_array<f32>;
+@group(0) @binding(3) var windTex: texture_2d<f32>;
 @group(0) @binding(4) var oceanTex: texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> matrix: array<f32>;
 @group(0) @binding(6) var<storage, read> input: array<Particle>;
@@ -20,7 +20,7 @@ struct LinkedList {
 @group(0) @binding(10) var<storage, read> bioForce: array<vec4f>;
 @group(0) @binding(11) var<storage, read> heads: HeadsRead;
 @group(0) @binding(12) var<storage, read> linkedList: LinkedList;
-@group(0) @binding(13) var tempStackTex: texture_2d_array<f32>;
+@group(0) @binding(13) var tempTex: texture_2d<f32>;
 @group(0) @binding(14) var uvTex: texture_2d<f32>;
 @group(0) @binding(15) var hydroTex: texture_2d<f32>;
 @group(0) @binding(16) var terrainTex: texture_2d<f32>;
@@ -168,10 +168,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let myFlight = unpackFlightMode(ls.w);
-    let alt01 = select(0.0, select(clamp(p._pad, 0.0, 1.0), clamp(ls.z, 0.0, 1.0), myPhase == 0u), (myPhase == 0u && ls.y < 0.5) || (myPhase == 1u && myFlight == 1u));
     let eq = makeEquirectCoord(p.pos, textureDimensions(oceanTex, 0));
-    let tSample = sampleTempArrayAtAltCoord(tempStackTex, eq, alt01);
+    let tSample = sampleTempTextureCoord(tempTex, eq);
     let oc = sampleOceanTextureCoord(oceanTex, eq);
     let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);
     let localTempScale = uniforms.mineralParams.z;
@@ -180,7 +178,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let bioSp = unpackBioSpecies(ls.w);
         let myKin = unpackKinPhase(ls.w);
         let resBio = getBioForce(pi, p, myPhase, bioSp, myKin);
-        let windRaw = sampleWindArrayAtAltCoord(windStackTex, eq, alt01);
+        let windRaw = sampleWindTextureCoord(windTex, eq);
         output[pi] = integrateOceanParticle(
             pi,
             p,
@@ -212,7 +210,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let hydroChem = evalHydroChemFactors(hydroS.x, hydroS.y, uniforms.hydroParams.z);
     let actScale = actGlow.x * airTherm.x * uvChem.x * hydroChem.x;
     let bioCleave = clamp(-actGlow.y, 0.0, 1.0);
-    let windSample = evalWindAndShear(windStackTex, p.pos, alt01, uniforms.flags.w);
+    let windSample = evalWindAndShear(windTex, p.pos, uniforms.flags.w);
     let shearStress = clamp(max(0.0, windSample.shearRel - sim.shearFloor) * 4.5 * max(sim.shearBreak, 0.0), 0.0, 1.0);
     let res = getChemForce(pi, p, actScale, bioCleave, shearStress, airTherm.y * uvChem.y * hydroChem.y);
     output[pi] = integrateParticle(

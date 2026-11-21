@@ -157,11 +157,12 @@ export function loadOceanCurrents(forceRefresh = false): Promise<OceanGrid> {
  * Masked bilinear sample `[u, v, mag, mask]` (m/s) at `[lonDeg, latDeg]`.
  * Velocity is normalized by ocean weight so coastal boundary currents stay sharp right to `mask = 0.45`.
  */
-export function sampleOceanLonLat(
+export function sampleOceanLonLatInto(
   grid: OceanGrid,
   lonDeg: number,
   latDeg: number,
-): [number, number, number, number] {
+  out: [number, number, number, number],
+): void {
   const { nx, ny, u, v, mask } = grid;
   const wrappedLon = ((lonDeg % 360) + 360) % 360;
   const clampedLat = Math.max(-90, Math.min(90, latDeg));
@@ -198,11 +199,28 @@ export function sampleOceanLonLat(
   if (mask[k11]) { mSum += w11; uSum += u[k11] * w11; vSum += v[k11] * w11; }
 
   if (mSum <= 1e-4) {
-    return [0, 0, 0, 0];
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    return;
   }
   const uu = uSum / mSum;
   const vv = vSum / mSum;
-  return [uu, vv, Math.hypot(uu, vv), mSum];
+  out[0] = uu;
+  out[1] = vv;
+  out[2] = Math.hypot(uu, vv);
+  out[3] = mSum;
+}
+
+export function sampleOceanLonLat(
+  grid: OceanGrid,
+  lonDeg: number,
+  latDeg: number,
+): [number, number, number, number] {
+  const out: [number, number, number, number] = [0, 0, 0, 0];
+  sampleOceanLonLatInto(grid, lonDeg, latDeg, out);
+  return out;
 }
 
 /**

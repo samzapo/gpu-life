@@ -1,7 +1,7 @@
 import * as d3Geo from 'd3-geo';
 import { buildD3RotationMatrixColMajor } from './projections';
-import { sampleWindLonLat, WIND_LEVELS, type WindGrid } from './windData';
-import { OCEAN_CURRENTS_SPEC, sampleOceanLonLat, type OceanGrid } from './oceanData';
+import { sampleWindLonLatInto, WIND_LEVELS, type WindGrid } from './windData';
+import { OCEAN_CURRENTS_SPEC, sampleOceanLonLatInto, type OceanGrid } from './oceanData';
 
 export interface StreamFieldSampler {
   streamMax: number;
@@ -9,7 +9,7 @@ export interface StreamFieldSampler {
   fadeAlpha: number;
   tintRgb: [number, number, number];
   lineWidth: number;
-  sample: (lonDeg: number, latDeg: number) => [number, number, number, number];
+  sampleInto: (lonDeg: number, latDeg: number, out: [number, number, number, number]) => void;
 }
 
 export function windGridToSampler(grid: WindGrid): StreamFieldSampler {
@@ -20,10 +20,7 @@ export function windGridToSampler(grid: WindGrid): StreamFieldSampler {
     fadeAlpha: 0.94,
     tintRgb: [255, 255, 255],
     lineWidth: 1.05,
-    sample: (lon, lat) => {
-      const [u, v, mag] = sampleWindLonLat(grid, lon, lat);
-      return [u, v, mag, 1];
-    },
+    sampleInto: (lon, lat, out) => sampleWindLonLatInto(grid, lon, lat, out),
   };
 }
 
@@ -37,7 +34,7 @@ export function oceanGridToSampler(
     fadeAlpha: 0.95,
     tintRgb: rgbTint,
     lineWidth: 1.15,
-    sample: (lon, lat) => sampleOceanLonLat(grid, lon, lat),
+    sampleInto: (lon, lat, out) => sampleOceanLonLatInto(grid, lon, lat, out),
   };
 }
 
@@ -48,11 +45,12 @@ interface StreamParticle {
 }
 
 const MAX_AGE = 85;
-const MAX_PARTICLES = 760;
+const MAX_PARTICLES = 620;
 const TRAIL_LEN = 12;
 // Subsampled offsets from oldest (11) to head (0) for smooth, low-overhead polyline redraws
 const TAIL_OFFSETS = [11, 7, 4] as const;
 const HEAD_OFFSETS = [4, 2, 0] as const;
+const MOVING_OFFSETS = [9, 5, 2, 0] as const;
 const FADE_BANDS = 2;
 const INTENSITY_BUCKETS = 5;
 const REPROJECT_BUCKETS = 4;
@@ -111,6 +109,7 @@ export class WindStreamRenderer {
     Array.from({ length: REPROJECT_BUCKETS }, () => []),
   );
   private segPools: number[][] = Array.from({ length: INTENSITY_BUCKETS }, () => []);
+  private sampleScratch: [number, number, number, number] = [0, 0, 0, 0];
 
   private getStyles(tint: [number, number, number]): string[] {
     const key = `${tint[0]},${tint[1]},${tint[2]}`;
@@ -202,7 +201,8 @@ export class WindStreamRenderer {
             chk[1] <= height &&
             Math.hypot(chk[0] - sx, chk[1] - sy) < 8
           ) {
-            if (!sampler.masked || sampler.sample(ll[0], ll[1])[3] >= 0.45) {
+            sampler.sampleInto(ll[0], ll[1], this.sampleScratch);
+            if (!sampler.masked || this.sampleScratch[3] >= 0.45) {
               p.lon = ll[0];
               p.lat = ll[1];
               p.age = Math.floor(Math.random() * 14);
@@ -216,7 +216,8 @@ export class WindStreamRenderer {
       for (let t = 0; t < 10; t++) {
         const lon = (Math.random() - 0.5) * 360;
         const lat = Math.asin(Math.random() * 2 - 1) * RAD2DEG;
-        if (sampler.sample(lon, lat)[3] >= 0.45) {
+        sampler.sampleInto(lon, lat, this.sampleScratch);
+        if (this.sampleScratch[3] >= 0.45) {
           p.lon = lon;
           p.lat = lat;
           p.age = Math.floor(Math.random() * 14);
@@ -337,8 +338,10 @@ export class WindStreamRenderer {
     r20: number,
     r21: number,
     r22: number,
+    cameraMoving: boolean,
   ): void {
-    for (let band = 0; band < FADE_BANDS; band++) {
+    const startBand = cameraMoving ? 1 : 0;
+    for (let band = startBand; band < FADE_BANDS; band++) {
       for (let b = 0; b < REPROJECT_BUCKETS; b++) {
         this.polyPools[band][b].length = 0;
       }
@@ -356,7 +359,7 @@ export class WindStreamRenderer {
         Math.floor((headBucket / INTENSITY_BUCKETS) * REPROJECT_BUCKETS),
       );
 
-      if (count > 7) {
+      if (!cameraMoving && count > 7) {
         this.emitBandPolyline(
           this.polyPools[0][rBucket],
           TAIL_OFFSETS,
@@ -384,7 +387,7 @@ export class WindStreamRenderer {
       }
       this.emitBandPolyline(
         this.polyPools[1][rBucket],
-        HEAD_OFFSETS,
+        cameraMoving ? MOVING_OFFSETS : HEAD_OFFSETS,
         base,
         head,
         count,
@@ -408,19 +411,17 @@ export class WindStreamRenderer {
       );
     }
 
-    ctx.save();
-    ctx.beginPath();
-    if (isOrthographic) {
-      ctx.arc(tx, ty, scale + 1, 0, Math.PI * 2);
-    } else {
+    if (!isOrthographic) {
+      ctx.save();
+      ctx.beginPath();
       d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+      ctx.clip();
     }
-    ctx.clip();
     ctx.lineWidth = sampler.lineWidth;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'bevel';
 
-    for (let band = 0; band < FADE_BANDS; band++) {
+    for (let band = startBand; band < FADE_BANDS; band++) {
       const styles = this.cachedBandStyles[band];
       const bandRow = this.polyPools[band];
       for (let b = 0; b < REPROJECT_BUCKETS; b++) {
@@ -441,7 +442,9 @@ export class WindStreamRenderer {
         ctx.stroke();
       }
     }
-    ctx.restore();
+    if (!isOrthographic) {
+      ctx.restore();
+    }
   }
 
   stepAndDraw(
@@ -462,8 +465,9 @@ export class WindStreamRenderer {
     }
 
     const sampler =
-      'sample' in gridOrSampler ? gridOrSampler : windGridToSampler(gridOrSampler);
+      'sampleInto' in gridOrSampler ? gridOrSampler : windGridToSampler(gridOrSampler);
     const styles = this.getStyles(sampler.tintRgb);
+    const sampleScratch = this.sampleScratch;
     const colon = viewSignature.indexOf(':');
     const nextProjId = colon > 0 ? viewSignature.slice(0, colon) : '';
     const isOrthographic = nextProjId === 'orthographic';
@@ -565,7 +569,11 @@ export class WindStreamRenderer {
         }
       }
 
-      const [u0, v0, mag0, mask0] = sampler.sample(curLon, curLat);
+      sampler.sampleInto(curLon, curLat, sampleScratch);
+      const u0 = sampleScratch[0];
+      const v0 = sampleScratch[1];
+      const mag0 = sampleScratch[2];
+      const mask0 = sampleScratch[3];
       if (sampler.masked && mask0 < 0.42) {
         p.age = MAX_AGE;
         continue;
@@ -582,16 +590,25 @@ export class WindStreamRenderer {
         this.pushTrailPoint(i, curLon, curLat, bIdx0);
       }
 
-      const nSub = Math.min(2, Math.max(1, Math.ceil(mag0 / Math.max(sampler.streamMax * 1.4, 0.35))));
+      const nSub = cameraMoving
+        ? 1
+        : Math.min(2, Math.max(1, Math.ceil(mag0 / Math.max(sampler.streamMax * 1.4, 0.35))));
       const subRadScale = radScale / nSub;
       let lastBucket = bIdx0;
 
       for (let s = 0; s < nSub; s++) {
-        const [u, v, mag, mask] =
-          s === 0 ? [u0, v0, mag0, mask0] : sampler.sample(curLon, curLat);
-        if (sampler.masked && mask < 0.40) {
-          p.age = MAX_AGE;
-          break;
+        let u = u0;
+        let v = v0;
+        let mag = mag0;
+        if (s > 0) {
+          sampler.sampleInto(curLon, curLat, sampleScratch);
+          if (sampler.masked && sampleScratch[3] < 0.40) {
+            p.age = MAX_AGE;
+            break;
+          }
+          u = sampleScratch[0];
+          v = sampleScratch[1];
+          mag = sampleScratch[2];
         }
         const cosLat = Math.max(0.18, Math.cos(curLat * DEG2RAD));
         const dLon = (u / cosLat) * subRadScale * RAD2DEG;
@@ -714,6 +731,7 @@ export class WindStreamRenderer {
         r20,
         r21,
         r22,
+        cameraMoving,
       );
     } else {
       if (!isOrthographic) {

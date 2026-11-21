@@ -96,67 +96,63 @@ export function loadEarthFeatures(): Promise<EarthTopoFeatures> {
   return cachedFeatures;
 }
 
-const cachedSvgRefs = new WeakMap<
-  SVGSVGElement,
-  {
-    gratPath: SVGPathElement | null;
-    hemiPath: SVGPathElement | null;
-    coastPath: SVGPathElement | null;
-    lakePath: SVGPathElement | null;
-    rimPath: SVGPathElement | null;
-    clipPath: SVGPathElement | null;
-    lastRimOrtho: boolean | null;
-  }
->();
-
-export function renderMapOverlaySvg(
-  svg: SVGSVGElement,
+export function renderMapOverlayCanvas(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
   proj: d3Geo.GeoProjection,
   features: EarthTopoFeatures | null,
   showCoastlines: boolean,
   isOrthographic: boolean,
 ): void {
-  let refs = cachedSvgRefs.get(svg);
-  if (!refs) {
-    refs = {
-      gratPath: svg.querySelector('#graticulePath') as SVGPathElement | null,
-      hemiPath: svg.querySelector('#hemispherePath') as SVGPathElement | null,
-      coastPath: svg.querySelector('#coastlinePath') as SVGPathElement | null,
-      lakePath: svg.querySelector('#lakesPath') as SVGPathElement | null,
-      rimPath: svg.querySelector('#sphereRimPath') as SVGPathElement | null,
-      clipPath: svg.querySelector('#sphereClipPath') as SVGPathElement | null,
-      lastRimOrtho: null,
-    };
-    cachedSvgRefs.set(svg, refs);
-  }
-  const { gratPath, hemiPath, coastPath, lakePath, rimPath, clipPath } = refs;
-
+  ctx.clearRect(0, 0, width, height);
   if (!showCoastlines) {
-    for (const p of [gratPath, hemiPath, coastPath, lakePath, rimPath]) {
-      p?.setAttribute('d', '');
-    }
     return;
   }
 
-  const path = d3Geo.geoPath(proj).digits(1);
-  const sphereD = path({ type: 'Sphere' }) ?? '';
-  clipPath?.setAttribute('d', sphereD);
-  if (rimPath) {
-    rimPath.setAttribute('d', sphereD);
-    if (refs.lastRimOrtho !== isOrthographic) {
-      refs.lastRimOrtho = isOrthographic;
-      rimPath.setAttribute(
-        'stroke',
-        isOrthographic ? 'rgba(155, 200, 235, 0.65)' : 'rgba(120, 140, 165, 0.50)',
-      );
-      rimPath.setAttribute('stroke-width', isOrthographic ? '1.6' : '1.1');
-    }
+  const path = d3Geo.geoPath(proj, ctx);
+  if (!isOrthographic) {
+    ctx.save();
+    ctx.beginPath();
+    path({ type: 'Sphere' });
+    ctx.clip();
   }
 
   if (features) {
-    gratPath?.setAttribute('d', path(features.graticule) ?? '');
-    hemiPath?.setAttribute('d', path(features.hemisphere) ?? '');
-    coastPath?.setAttribute('d', path(features.coastlines) ?? '');
-    lakePath?.setAttribute('d', path(features.lakes) ?? '');
+    ctx.beginPath();
+    path(features.graticule);
+    ctx.strokeStyle = 'rgba(140, 165, 190, 0.25)';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    ctx.beginPath();
+    path(features.hemisphere);
+    ctx.strokeStyle = 'rgba(165, 190, 215, 0.34)';
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+
+    ctx.beginPath();
+    path(features.coastlines);
+    ctx.strokeStyle = 'rgba(245, 248, 255, 0.82)';
+    ctx.lineWidth = 1.15;
+    ctx.stroke();
+
+    ctx.beginPath();
+    path(features.lakes);
+    ctx.strokeStyle = 'rgba(220, 232, 245, 0.62)';
+    ctx.lineWidth = 0.95;
+    ctx.stroke();
   }
+
+  if (!isOrthographic) {
+    ctx.restore();
+  }
+
+  ctx.beginPath();
+  path({ type: 'Sphere' });
+  ctx.strokeStyle = isOrthographic
+    ? 'rgba(155, 200, 235, 0.65)'
+    : 'rgba(120, 140, 165, 0.50)';
+  ctx.lineWidth = isOrthographic ? 1.6 : 1.1;
+  ctx.stroke();
 }

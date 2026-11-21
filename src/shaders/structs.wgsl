@@ -19,7 +19,7 @@ struct Uniforms {
     mineralParams: vec4f, // x: mineralOpacity, y: tempColors, z: localTempScale, w: viewLayerCode
     uvParams: vec4f, // x: uvColors, y: localUvScale, z: _pad, w: _pad
     hydroParams: vec4f, // x: rhColors, y: precipColors, z: localHydroScale, w: _pad
-    terrainParams: vec4f, // x: terrainOpacity, y: nightShading, z: birdExaggeration, w: _pad
+    terrainParams: vec4f, // x: terrainOpacity, y: nightShading, z: _pad, w: _pad
 }
 
 struct Sim {
@@ -129,13 +129,6 @@ fn unpackKinPhase(packed: f32) -> f32 {
     return (f32((u32(round(packed)) >> 10u) & 255u) / 256.0) * TWO_PI;
 }
 
-fn unpackFlightMode(packed: f32) -> u32 {
-    if (packed < 0.5) {
-        return 0u;
-    }
-    return (u32(round(packed)) >> 18u) & 1u;
-}
-
 fn unpackEncapGene(packed: f32) -> u32 {
     if (packed < 0.5) {
         return 7u;
@@ -150,24 +143,6 @@ fn unpackGraduated(packed: f32) -> u32 {
     return (u32(round(packed)) >> 23u) & 1u;
 }
 
-fn packLifeMetaFull(
-    phase: u32,
-    bioSp: u32,
-    kinAngle: f32,
-    flightMode: u32,
-    encapGene: u32,
-    graduated: u32,
-) -> f32 {
-    if (phase == 0u) {
-        return 0.0;
-    }
-    let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 256.0)) & 255u;
-    let fl = min(flightMode, 1u);
-    let g = min(encapGene, 15u);
-    let gr = min(graduated, 1u);
-    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u) | (fl << 18u) | (g << 19u) | (gr << 23u));
-}
-
 fn packLifeMetaGrad(
     phase: u32,
     bioSp: u32,
@@ -175,7 +150,13 @@ fn packLifeMetaGrad(
     encapGene: u32,
     graduated: u32,
 ) -> f32 {
-    return packLifeMetaFull(phase, bioSp, kinAngle, 0u, encapGene, graduated);
+    if (phase == 0u) {
+        return 0.0;
+    }
+    let k = u32(floor((wrapAngle(kinAngle) / TWO_PI) * 256.0)) & 255u;
+    let g = min(encapGene, 15u);
+    let gr = min(graduated, 1u);
+    return f32((phase & 3u) | (min(bioSp, 255u) << 2u) | (k << 10u) | (g << 19u) | (gr << 23u));
 }
 
 fn packLifeMeta(phase: u32, bioSp: u32, kinAngle: f32, encapGene: u32) -> f32 {

@@ -14,7 +14,7 @@ import {
   PROJECTIONS,
   type ProjectionId,
 } from './earth/projections';
-import { WIND_LEVELS, type WindLevelId } from './earth/windData';
+import { WIND_LEVELS } from './earth/windData';
 import { setMouseToolMode } from './input';
 import {
   FACTORY_DEFAULTS,
@@ -118,16 +118,6 @@ const initialProjection: ProjectionId =
         ? effectiveCachedConfig.earth.projection
         : FACTORY_DEFAULTS.earth.projection;
 
-const urlLevel = validateURLParam('windLevel', '');
-const initialLevel: WindLevelId =
-  urlLevel in WIND_LEVELS
-    ? (urlLevel as WindLevelId)
-    : hasExplicitUrlHash && parsedHash.level && parsedHash.level in WIND_LEVELS
-      ? (parsedHash.level as WindLevelId)
-      : effectiveCachedConfig?.earth?.windLevel && effectiveCachedConfig.earth.windLevel in WIND_LEVELS
-        ? effectiveCachedConfig.earth.windLevel
-        : FACTORY_DEFAULTS.earth.windLevel;
-
 const urlLayer = validateURLParam('layer', '');
 export type ViewLayerMode = 'both' | 'ocean' | 'air';
 const initialViewLayer: ViewLayerMode =
@@ -180,7 +170,6 @@ const initialWindMix = urlParams.has('windMix')
 export const earthParams = {
   viewLayer: initialViewLayer,
   projection: initialProjection,
-  windLevel: initialLevel,
   vortex: initialWindMix,
   windStrength: resolveNumber('windStrength', effectiveCachedConfig?.earth?.windStrength, FACTORY_DEFAULTS.earth.windStrength),
   windLines: parseOpacityParam('windLines', effectiveCachedConfig?.earth?.windLines, FACTORY_DEFAULTS.earth.windLines),
@@ -204,7 +193,6 @@ export const earthParams = {
   mineralOpacity: parseOpacityParam('mineralOpacity', effectiveCachedConfig?.earth?.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity),
   terrainOpacity: parseOpacityParam('terrainOpacity', effectiveCachedConfig?.earth?.terrainOpacity, FACTORY_DEFAULTS.earth.terrainOpacity),
   nightShading: parseOpacityParam('nightShading', effectiveCachedConfig?.earth?.nightShading, FACTORY_DEFAULTS.earth.nightShading),
-  birdExaggeration: resolveNumber('birdExaggeration', effectiveCachedConfig?.earth?.birdExaggeration, FACTORY_DEFAULTS.earth.birdExaggeration),
   coastlines: resolveBool('coastlines', effectiveCachedConfig?.earth?.coastlines, FACTORY_DEFAULTS.earth.coastlines),
   bioLink: resolveBool('bioLink', effectiveCachedConfig?.earth?.bioLink, FACTORY_DEFAULTS.earth.bioLink),
   bioRate: resolveNumber('bioRate', effectiveCachedConfig?.earth?.bioRate, FACTORY_DEFAULTS.earth.bioRate),
@@ -289,7 +277,7 @@ export function setBioLink(
   bioData[10] = seedHash;
   bioData[11] = earthParams.oceanMix ? earthParams.oceanStrength : 0;
   bioData[12] = earthParams.vortex ? earthParams.windStrength : 0;
-  bioData[13] = WIND_LEVELS[earthParams.windLevel].streamMax;
+  bioData[13] = WIND_LEVELS.surface.streamMax;
   bioData[14] = earthParams.mineralLink && earthParams.mineralRate > 0 ? 1 : 0;
   bioData[15] = earthParams.mineralRate;
   bioData[16] = earthParams.localTemp ? earthParams.tempStrength : 0;
@@ -382,7 +370,7 @@ const opacitySliderParams: BindingParams = {
 
 const pane = new Pane({
   title: 'Display',
-  expanded: window.innerWidth >= 768,
+  expanded: false,
 });
 {
   const rootHeader = pane.element.querySelector<HTMLElement>(':scope > .tp-rotv_b');
@@ -472,11 +460,6 @@ for (const key of Object.keys(PROJECTIONS) as ProjectionId[]) {
   projectionOptions[PROJECTIONS[key].label] = key;
 }
 
-const windLevelOptions: Record<string, WindLevelId> = {};
-for (const key of Object.keys(WIND_LEVELS) as WindLevelId[]) {
-  windLevelOptions[WIND_LEVELS[key].label] = key;
-}
-
 export const projectionSelect = withTooltip(
   earthFolder.addBinding(earthParams, 'projection', {
     label: 'proj',
@@ -484,14 +467,6 @@ export const projectionSelect = withTooltip(
   }),
   'Map Projection',
   'Cartographic globe projection matching earth.nullschool.net (Orthographic, Atlantis, Waterman Butterfly, etc.).',
-);
-export const windLevelSelect = withTooltip(
-  earthFolder.addBinding(earthParams, 'windLevel', {
-    label: 'windLevel',
-    options: windLevelOptions,
-  }),
-  'Wind Pressure Altitude',
-  'Atmospheric pressure surface (Surface 10m to 10 hPa jet stream) for GFS/NCEP wind velocities.',
 );
 export const windMixBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'vortex', {
@@ -694,16 +669,6 @@ export const nightShadingBinding = withTooltip(
   }),
   'Day/Night Terminator Shading',
   'Strength (0%–100%) of planetary night-hemisphere shadow across unlit longitudes.',
-);
-export const birdExaggerationBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'birdExaggeration', {
-    label: 'birdAlt',
-    min: 0,
-    max: 0.2,
-    step: 0.005,
-  }),
-  'Aerial Altitude Exaggeration',
-  'Visual radial altitude offset above Earth for elevated clouds, vapors, and soaring birds.',
 );
 export const coastlinesBinding = withTooltip(
   earthFolder.addBinding(earthParams, 'coastlines'),
@@ -1035,9 +1000,9 @@ export function buildFactoryConfig(seed: string, oceanSeed: string): SimConfigV1
     ocean: { ...FACTORY_DEFAULTS.ocean },
     earth: { ...FACTORY_DEFAULTS.earth },
     view: {
-      rotate: [...PROJECTIONS.orthographic.defaultRotate],
-      pan: [0, 0],
-      scale: 423,
+      rotate: [...FACTORY_DEFAULTS.view.rotate],
+      pan: [...FACTORY_DEFAULTS.view.pan],
+      scale: FACTORY_DEFAULTS.view.scale,
     },
   };
 }
@@ -1049,7 +1014,6 @@ export function bindConfigPersistence(onChange: () => void) {
     seedInput,
     viewLayerSelect,
     projectionSelect,
-    windLevelSelect,
     windMixBinding,
     windStrengthBinding,
     windLinesBinding,
@@ -1073,7 +1037,6 @@ export function bindConfigPersistence(onChange: () => void) {
     mineralOpacityBinding,
     terrainOpacityBinding,
     nightShadingBinding,
-    birdExaggerationBinding,
     coastlinesBinding,
     bioLinkBinding,
     bioRateBinding,

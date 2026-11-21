@@ -38,11 +38,10 @@ import {
 } from './earth/projections';
 import {
   loadEarthFeatures,
-  renderMapOverlaySvg,
+  renderMapOverlayCanvas,
   type EarthTopoFeatures,
 } from './earth/mapOverlay';
 import {
-  AIR_STACK_LEVELS,
   airTempColorRgb,
   buildDivergenceFreeWind,
   extendedSinebowColor,
@@ -50,7 +49,6 @@ import {
   loadFallbackWind,
   sampleWindLonLat,
   sampleWindTempLonLat,
-  synthesizeUpperAirGrid,
   WIND_LEVELS,
   type WindGrid,
   type WindLevelId,
@@ -91,7 +89,11 @@ import {
   type HydroGrid,
   type LocalHydroSample,
 } from './earth/hydroData';
-import { oceanGridToSampler, WindStreamRenderer } from './earth/windLines';
+import {
+  oceanGridToSampler,
+  windGridToSampler,
+  WindStreamRenderer,
+} from './earth/windLines';
 import {
   hslToRgb,
   linkRenderTimestamp,
@@ -164,7 +166,6 @@ import {
   viewLayerSelect,
   type ViewLayerMode,
   windColorsBinding,
-  windLevelSelect,
   windLinesBinding,
   windStatusBinding,
 } from './options';
@@ -192,7 +193,7 @@ import * as countingSort from './countingSort/main';
 import * as prefixSum from './countingSortOptimized/main';
 
 const bgCanvas = document.getElementById('bgCanvas') as HTMLCanvasElement;
-const mapSvg = document.getElementById('mapSvg') as unknown as SVGSVGElement;
+const mapCanvas = document.getElementById('mapCanvas') as HTMLCanvasElement;
 const oceanCanvas = document.getElementById('oceanCanvas') as HTMLCanvasElement;
 const windCanvas = document.getElementById('windCanvas') as HTMLCanvasElement;
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -220,6 +221,7 @@ const precipTimeBadge = document.getElementById('precipTimeBadge') as HTMLElemen
 const precipScaleBar = document.getElementById('precipScaleBar') as HTMLElement;
 const scaleMaxLabel = document.getElementById('scaleMaxLabel') as HTMLElement;
 
+const mapCtx = mapCanvas.getContext('2d');
 const oceanCtx = oceanCanvas.getContext('2d');
 const windCtx = windCanvas.getContext('2d');
 const oceanStreamRenderer = new WindStreamRenderer();
@@ -232,6 +234,15 @@ function getCachedOceanSampler(grid: OceanGrid, tint: [number, number, number]) 
   }
   const sampler = oceanGridToSampler(grid, tint);
   cachedOceanStreamSampler = { grid, tintKey: key, sampler };
+  return sampler;
+}
+let cachedWindStreamSampler: { grid: WindGrid | null; sampler: ReturnType<typeof windGridToSampler> } | null = null;
+function getCachedWindSampler(grid: WindGrid) {
+  if (cachedWindStreamSampler && cachedWindStreamSampler.grid === grid) {
+    return cachedWindStreamSampler.sampler;
+  }
+  const sampler = windGridToSampler(grid);
+  cachedWindStreamSampler = { grid, sampler };
   return sampler;
 }
 
@@ -349,7 +360,6 @@ let simBuffer: GPUBuffer | undefined;
 let oceanSimBuffer: GPUBuffer | undefined;
 let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
-let birdShadowPipeline: GPURenderPipeline | undefined;
 let mineralRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
 
@@ -362,10 +372,8 @@ let lifeStateBuffers: [GPUBuffer, GPUBuffer] | undefined;
 let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
-let windStackTexture: GPUTexture | undefined;
 let oceanTexture: GPUTexture | undefined;
 let tempTexture: GPUTexture | undefined;
-let tempStackTexture: GPUTexture | undefined;
 let uvTexture: GPUTexture | undefined;
 let hydroTexture: GPUTexture | undefined;
 let terrainTexture: GPUTexture | undefined;
@@ -376,7 +384,6 @@ let bgCacheKey = '';
 let bgDataVersion = 0;
 
 let bgBindGroup: GPUBindGroup | undefined;
-let birdShadowBindGroup: GPUBindGroup | undefined;
 let mineralRenderBindGroup: GPUBindGroup | undefined;
 let renderBindGroup: GPUBindGroup | undefined;
 
@@ -423,7 +430,7 @@ const initScale =
     : useCachedView && typeof cachedBootCfg?.view?.scale === 'number'
       ? cachedBootCfg.view.scale
       : earthParams.projection === 'orthographic'
-        ? Math.round(423 * Math.min(window.innerWidth / 1280, window.innerHeight / 800) || 423)
+        ? FACTORY_DEFAULTS.view.scale
         : fitScaleForProjection(
             earthParams.projection,
             initSpec.defaultRotate,
@@ -435,11 +442,15 @@ const initRotate: [number, number, number] = initialOrientation
   ? [-initialOrientation[0], -initialOrientation[1], initSpec.defaultRotate[2]]
   : useCachedView && cachedBootCfg?.view?.rotate
     ? [...cachedBootCfg.view.rotate]
-    : [...initSpec.defaultRotate];
+    : earthParams.projection === 'orthographic'
+      ? [...FACTORY_DEFAULTS.view.rotate]
+      : [...initSpec.defaultRotate];
 
 const initPan: [number, number] =
   initialUrlPan ??
-  (useCachedView && cachedBootCfg?.view?.pan ? [...cachedBootCfg.view.pan] : [0, 0]);
+  (useCachedView && cachedBootCfg?.view?.pan
+    ? [...cachedBootCfg.view.pan]
+    : [...FACTORY_DEFAULTS.view.pan]);
 
 const viewState: GlobeViewState = {
   projectionId: earthParams.projection,
@@ -488,7 +499,7 @@ function createEmptyWindGrid(): WindGrid {
     tempK: climK,
     sfcTempK: climK,
     tempLabel: '2m Air',
-    level: earthParams.windLevel,
+    level: 'surface',
     refTime: 'initializing',
     validTime: '',
     source: 'GFS',
@@ -787,7 +798,6 @@ function exportCurrentConfig(): SimConfigV1 {
     earth: {
       viewLayer: earthParams.viewLayer,
       projection: view.projectionId,
-      windLevel: earthParams.windLevel,
       vortex: earthParams.vortex,
       windStrength: earthParams.windStrength,
       windLines: earthParams.windLines,
@@ -809,6 +819,8 @@ function exportCurrentConfig(): SimConfigV1 {
       hydroStrength: earthParams.hydroStrength,
       lifeOpacity: earthParams.lifeOpacity,
       mineralOpacity: earthParams.mineralOpacity,
+      terrainOpacity: earthParams.terrainOpacity,
+      nightShading: earthParams.nightShading,
       coastlines: earthParams.coastlines,
       bioLink: earthParams.bioLink,
       bioRate: earthParams.bioRate,
@@ -873,7 +885,6 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
   const cfg = parseConfigInput(rawInput);
 
   let resetWorld = false;
-  let nextWindLevel: WindLevelId | null = null;
   let nextViewLayer: ViewLayerMode | null = null;
   let projUpdated = false;
   const importedView = copyView(viewState);
@@ -962,10 +973,6 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
       importedView.projectionId = e.projection;
       projUpdated = true;
     }
-    if (e.windLevel && e.windLevel !== earthParams.windLevel) {
-      earthParams.windLevel = e.windLevel;
-      nextWindLevel = e.windLevel;
-    }
     if (e.vortex !== undefined) earthParams.vortex = e.vortex;
     if (e.windStrength !== undefined) earthParams.windStrength = e.windStrength;
     if (e.windLines !== undefined) earthParams.windLines = e.windLines;
@@ -987,6 +994,8 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     if (e.hydroStrength !== undefined) earthParams.hydroStrength = e.hydroStrength;
     if (e.lifeOpacity !== undefined) earthParams.lifeOpacity = e.lifeOpacity;
     if (e.mineralOpacity !== undefined) earthParams.mineralOpacity = e.mineralOpacity;
+    if (e.terrainOpacity !== undefined) earthParams.terrainOpacity = e.terrainOpacity;
+    if (e.nightShading !== undefined) earthParams.nightShading = e.nightShading;
     if (e.coastlines !== undefined) {
       earthParams.coastlines = e.coastlines;
       mapDirty = true;
@@ -1045,9 +1054,6 @@ async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimC
     refreshChemistryDefinition();
     startWorld();
   }
-  if (nextWindLevel) {
-    await loadWindLevel(nextWindLevel);
-  }
 
   suppressPaneEvents = true;
   try {
@@ -1087,9 +1093,6 @@ bindGlobeInput(viewState, () => d3Proj, () => {
   wheelZooming = true;
 });
 
-const airStackGrids: (WindGrid | null)[] = [null, null, null, null];
-let upperStackHydrateStarted = false;
-
 function uploadTerrainToGpu() {
   if (!device || !terrainTexture) return;
   const texData = buildGlobalTerrainTexture(
@@ -1107,58 +1110,6 @@ function uploadTerrainToGpu() {
   bgDataVersion++;
 }
 
-function uploadAirStackLayer(sliceIdx: number, grid: WindGrid) {
-  if (!device || !windStackTexture || !tempStackTexture) return;
-  airStackGrids[sliceIdx] = grid;
-  const windSlice = buildDivergenceFreeWind(grid, GRID_TEX_W, GRID_TEX_H);
-  device.queue.writeTexture(
-    { texture: windStackTexture, origin: { x: 0, y: 0, z: sliceIdx } },
-    windSlice,
-    { bytesPerRow: GRID_TEX_W * 16 },
-    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
-  );
-  const tempSlice = buildGlobalTempTexture(
-    grid,
-    currentOceanGrid,
-    GRID_TEX_W,
-    GRID_TEX_H,
-  );
-  device.queue.writeTexture(
-    { texture: tempStackTexture, origin: { x: 0, y: 0, z: sliceIdx } },
-    tempSlice,
-    { bytesPerRow: GRID_TEX_W * 16 },
-    { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
-  );
-}
-
-function seedUpperAirStackFromSurface(surfaceGrid: WindGrid) {
-  uploadAirStackLayer(0, surfaceGrid);
-  if (!airStackGrids[1] || !airStackGrids[1].isLive) {
-    uploadAirStackLayer(1, synthesizeUpperAirGrid(surfaceGrid, '850hPa'));
-  }
-  if (!airStackGrids[2] || !airStackGrids[2].isLive) {
-    uploadAirStackLayer(2, synthesizeUpperAirGrid(surfaceGrid, '500hPa'));
-  }
-  if (!airStackGrids[3] || !airStackGrids[3].isLive) {
-    uploadAirStackLayer(3, synthesizeUpperAirGrid(surfaceGrid, '250hPa'));
-  }
-}
-
-function hydrateLiveUpperAirStack() {
-  if (upperStackHydrateStarted) return;
-  upperStackHydrateStarted = true;
-  for (let s = 1; s < AIR_STACK_LEVELS.length; s++) {
-    const lvl = AIR_STACK_LEVELS[s];
-    void fetchLiveGfsWind(lvl)
-      .then((live) => {
-        uploadAirStackLayer(s, live);
-      })
-      .catch(() => {
-        // Synthetic profile already active in this slice
-      });
-  }
-}
-
 function uploadTempToGpu() {
   if (freezeGameWeather && particleBuffers) return;
   if (!device || !tempTexture) return;
@@ -1174,23 +1125,6 @@ function uploadTempToGpu() {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
-  for (let s = 0; s < airStackGrids.length; s++) {
-    const g = airStackGrids[s];
-    if (g && tempStackTexture) {
-      const sliceTemp = buildGlobalTempTexture(
-        g,
-        currentOceanGrid,
-        GRID_TEX_W,
-        GRID_TEX_H,
-      );
-      device.queue.writeTexture(
-        { texture: tempStackTexture, origin: { x: 0, y: 0, z: s } },
-        sliceTemp,
-        { bytesPerRow: GRID_TEX_W * 16 },
-        { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
-      );
-    }
-  }
   bgDataVersion++;
   refreshTempHudBadges();
 }
@@ -1238,14 +1172,6 @@ function uploadWindToGpu(grid: WindGrid) {
     { bytesPerRow: GRID_TEX_W * 16 },
     { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 1 },
   );
-  if (grid.level === 'surface') {
-    seedUpperAirStackFromSurface(grid);
-  } else {
-    const stackIdx = AIR_STACK_LEVELS.indexOf(grid.level);
-    if (stackIdx >= 0) {
-      uploadAirStackLayer(stackIdx, grid);
-    }
-  }
   uploadTempToGpu();
 }
 
@@ -1265,13 +1191,13 @@ function uploadOceanToGpu(grid: OceanGrid) {
 
 let activeWindLoadId = 0;
 
-async function loadWindLevel(levelId: WindLevelId) {
+async function loadSurfaceWind() {
   const reqId = ++activeWindLoadId;
-  const spec = WIND_LEVELS[levelId];
+  const spec = WIND_LEVELS.surface;
   earthParams.windStatus = `Fetching ${spec.label}…`;
   windStatusBinding.refresh();
 
-  if (levelId === 'surface' && !currentWindGrid.isLive) {
+  if (!currentWindGrid.isLive) {
     try {
       const fb = await loadFallbackWind();
       if (reqId === activeWindLoadId) {
@@ -1285,7 +1211,7 @@ async function loadWindLevel(levelId: WindLevelId) {
   }
 
   try {
-    const live = await fetchLiveGfsWind(levelId);
+    const live = await fetchLiveGfsWind('surface');
     if (reqId === activeWindLoadId) {
       currentWindGrid = live;
       uploadWindToGpu(live);
@@ -1310,7 +1236,7 @@ async function loadWindLevel(levelId: WindLevelId) {
         });
     }
   } catch {
-    if (reqId === activeWindLoadId && !currentWindGrid.isLive && levelId === 'surface') {
+    if (reqId === activeWindLoadId && !currentWindGrid.isLive) {
       try {
         const fb = await loadFallbackWind();
         currentWindGrid = fb;
@@ -1376,15 +1302,13 @@ async function backgroundRefreshWeather(opts?: {
 
     if (doGfs || uvBaselineUpdated) {
       lastGfsCheckAt = now;
-      const targetLevel = earthParams.windLevel;
       const reqId = activeWindLoadId;
       try {
-        const live = await fetchLiveGfsWind(targetLevel, {
+        const live = await fetchLiveGfsWind('surface', {
           forceRefresh: Boolean(opts?.forceGfs),
         });
         if (
           reqId === activeWindLoadId &&
-          earthParams.windLevel === targetLevel &&
           (!currentWindGrid.isLive ||
             live.refTime !== currentWindGrid.refTime ||
             live.validTime !== currentWindGrid.validTime)
@@ -1572,8 +1496,6 @@ declare global {
       } | null;
       getProjection: () => ProjectionId;
       setProjection: (id: ProjectionId) => void;
-      getWindLevel: () => WindLevelId;
-      setWindLevel: (lvl: WindLevelId) => Promise<void>;
       getWindInfo: () => {
         level: WindLevelId;
         nx: number;
@@ -1824,13 +1746,11 @@ async function computeWorldStats() {
     mixotrophBlobs: 0,
     decomposerBlobs: 0,
     halophileBlobs: 0,
-    aerialBlobs: 0,
     producerParticles: 0,
     consumerParticles: 0,
     mixotrophParticles: 0,
     decomposerParticles: 0,
     halophileParticles: 0,
-    aerialParticles: 0,
   };
   const emptyStrategies = {
     earlyArmorBlobs: 0,
@@ -2152,10 +2072,7 @@ async function computeWorldStats() {
       }
     }
 
-    if (summary.role === 'aerial') {
-      emergentRoles.aerialBlobs++;
-      emergentRoles.aerialParticles += comp.length;
-    } else if (summary.role === 'producer') {
+    if (summary.role === 'producer') {
       emergentRoles.producerBlobs++;
       emergentRoles.producerParticles += comp.length;
     } else if (summary.role === 'consumer') {
@@ -2994,12 +2911,6 @@ window.complexLife = {
       : null,
   getProjection: () => viewState.projectionId,
   setProjection: setProjectionChoice,
-  getWindLevel: () => earthParams.windLevel,
-  setWindLevel: async (lvl: WindLevelId) => {
-    earthParams.windLevel = lvl;
-    windLevelSelect.refresh();
-    await loadWindLevel(lvl);
-  },
   getWindInfo: () => ({
     level: currentWindGrid.level,
     nx: currentWindGrid.nx,
@@ -3048,14 +2959,13 @@ window.complexLife = {
 function syncCanvasDimensions() {
   const w = Math.max(1, window.innerWidth);
   const h = Math.max(1, window.innerHeight);
-  for (const c of [bgCanvas, oceanCanvas, windCanvas, canvas]) {
+  for (const c of [bgCanvas, mapCanvas, oceanCanvas, windCanvas, canvas]) {
     if (c.width !== w || c.height !== h) {
       c.width = w;
       c.height = h;
     }
   }
   if (viewState.width !== w || viewState.height !== h) {
-    mapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
     if (incidentCameraLocked) {
       viewState.scale *= Math.min(w, h) / Math.min(viewState.width, viewState.height);
       viewState.pan = [viewState.pan[0] * w / viewState.width, viewState.pan[1] * h / viewState.height];
@@ -3066,7 +2976,7 @@ function syncCanvasDimensions() {
   }
 }
 
-const windBootPromise = earthParams.windLevel === 'surface' ? loadFallbackWind().catch(() => null) : Promise.resolve(null);
+const windBootPromise = loadFallbackWind().catch(() => null);
 const oceanBootPromise = loadOceanCurrents().catch(() => null);
 const uvBootPromise = loadCpcUvBaseline().catch(() => null);
 
@@ -3149,12 +3059,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'windTexture',
   });
-  windStackTexture = device.createTexture({
-    size: { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 4 },
-    format: 'rgba32float',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'windStackTexture',
-  });
   oceanTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
     format: 'rgba32float',
@@ -3167,13 +3071,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'tempTexture',
   });
-  tempStackTexture = device.createTexture({
-    size: { width: GRID_TEX_W, height: GRID_TEX_H, depthOrArrayLayers: 4 },
-    format: 'rgba32float',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'tempStackTexture',
-  });
-  seedUpperAirStackFromSurface(currentWindGrid);
   uploadTempToGpu();
   uvTexture = device.createTexture({
     size: { width: GRID_TEX_W, height: GRID_TEX_H },
@@ -3307,21 +3204,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     primitive: { topology: 'triangle-strip' },
   });
 
-  birdShadowPipeline = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: {
-      module: renderModule,
-      entryPoint: 'vertexBirdShadows',
-      buffers: particleVertexBuffers,
-    },
-    fragment: {
-      module: renderModule,
-      entryPoint: 'fragmentShadow',
-      targets: renderTargets,
-    },
-    primitive: { topology: 'triangle-strip' },
-  });
-
   renderPipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: {
@@ -3420,7 +3302,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   updateProjectionState();
   setupTimestamp(device, 'render');
 
-  drawScaleBar(WIND_LEVELS[earthParams.windLevel].scaleMax);
+  drawScaleBar(WIND_LEVELS.surface.scaleMax);
   refreshHudVisibility();
 
   const [loadedOcean, loadedUv, loadedWind] = await Promise.all([
@@ -3448,7 +3330,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   }
 
   startWorld();
-  hydrateLiveUpperAirStack();
   window.setInterval(() => {
     if (uvUtcOverrideMs === null) {
       uploadUvToGpu();
@@ -3480,7 +3361,7 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   });
   configPersistenceReady = true;
   syncUrlStateNow();
-  loadWindLevel(earthParams.windLevel);
+  loadSurfaceWind();
 })();
 
 let activeWorldRefs: UnifiedEngineRefs | undefined;
@@ -3691,14 +3572,6 @@ function render(commandEncoder: GPUCommandEncoder) {
       passEncoder.setBindGroup(0, mineralRenderBindGroup);
       passEncoder.draw(6, particleAmt, 0, 0);
     }
-    if (showLife && earthParams.birdExaggeration > 0.001 && birdShadowPipeline && birdShadowBindGroup) {
-      passEncoder.setPipeline(birdShadowPipeline);
-      passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
-      passEncoder.setVertexBuffer(1, valenceBuffer);
-      passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
-      passEncoder.setBindGroup(0, birdShadowBindGroup);
-      passEncoder.draw(6, particleAmt, 0, 0);
-    }
     if ((showChem || showLife) && renderPipeline && renderBindGroup) {
       passEncoder.setPipeline(renderPipeline);
       passEncoder.setVertexBuffer(0, particleBuffers[alternate]);
@@ -3734,21 +3607,18 @@ function packLifeMetaJs(
   kinAngle: number,
   encapGene: number = 7,
   graduated: number = 0,
-  flightMode: number = 0,
 ): number {
   if (phase === 0) return 0;
   const twoPi = Math.PI * 2;
   let a = kinAngle % twoPi;
   if (a < 0) a += twoPi;
   const k = Math.floor((a / twoPi) * 256) & 255;
-  const fl = flightMode ? 1 : 0;
   const g = Math.max(0, Math.min(15, Math.floor(encapGene)));
   const gr = graduated ? 1 : 0;
   return (
     (phase & 3) |
     ((Math.min(255, Math.max(0, bioSp)) & 255) << 2) |
     (k << 10) |
-    (fl << 18) |
     (g << 19) |
     (gr << 23)
   ) >>> 0;
@@ -3763,10 +3633,8 @@ function startWorld() {
     !oceanSimBuffer ||
     !bioUniformBuffer ||
     !windTexture ||
-    !windStackTexture ||
     !oceanTexture ||
     !tempTexture ||
-    !tempStackTexture ||
     !uvTexture ||
     !hydroTexture ||
     !terrainTexture ||
@@ -4326,10 +4194,8 @@ function startWorld() {
     valenceBuffer,
     bioForceBuffer,
     windTexView: windTexture.createView(),
-    windStackTexView: windStackTexture.createView({ dimension: '2d-array' }),
     oceanTexView: oceanTexture.createView(),
     tempTexView: tempTexture.createView(),
-    tempStackTexView: tempStackTexture.createView({ dimension: '2d-array' }),
     uvTexView: uvTexture.createView(),
     hydroTexView: hydroTexture.createView(),
     terrainTexView: terrainTexture.createView(),
@@ -4348,17 +4214,6 @@ function startWorld() {
           { binding: 1, resource: watermanFwdTexture.createView() },
           { binding: 2, resource: { buffer: worldColoursBuffer } },
           { binding: 3, resource: { buffer: worldRulesBuffer } },
-          { binding: 4, resource: uvTexture.createView() },
-        ],
-      })
-    : undefined;
-
-  birdShadowBindGroup = birdShadowPipeline
-    ? device.createBindGroup({
-        layout: birdShadowPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: uniformBuffer } },
-          { binding: 1, resource: watermanFwdTexture.createView() },
           { binding: 4, resource: uvTexture.createView() },
         ],
       })
@@ -4383,7 +4238,7 @@ const deltaVs: number[] = [];
 
 function writeUniforms() {
   if (!device || !uniformBuffer) return;
-  const spec = WIND_LEVELS[earthParams.windLevel];
+  const spec = WIND_LEVELS.surface;
   const R = Math.max(optionParams.worldSize, 0.25);
   const showAir = earthParams.viewLayer !== 'ocean';
   const showOcean = earthParams.viewLayer !== 'air';
@@ -4442,7 +4297,7 @@ function writeUniforms() {
   uniformData[51] = 0;
   uniformData[52] = earthParams.terrainOpacity;
   uniformData[53] = earthParams.nightShading;
-  uniformData[54] = earthParams.birdExaggeration;
+  uniformData[54] = 0;
   uniformData[55] = 0;
 
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
@@ -4498,10 +4353,12 @@ function update() {
     bgDataVersion++;
   }
 
-  if (mapDirty) {
+  if (mapDirty && mapCtx) {
     mapDirty = false;
-    renderMapOverlaySvg(
-      mapSvg,
+    renderMapOverlayCanvas(
+      mapCtx,
+      viewState.width,
+      viewState.height,
       d3Proj,
       earthFeatures,
       earthParams.coastlines,
@@ -4535,7 +4392,7 @@ function update() {
       viewState.width,
       viewState.height,
       d3Proj,
-      currentWindGrid,
+      getCachedWindSampler(currentWindGrid),
       viewSignature,
       showAir && earthParams.windLines > 0.001,
       cameraMoving,
@@ -4624,7 +4481,7 @@ function update() {
 requestAnimationFrame(update);
 
 function physicsSettings() {
-  return JSON.stringify([engine, optionParams, oceanOptionParams, earthParams.windLevel,
+  return JSON.stringify([engine, optionParams, oceanOptionParams,
     earthParams.vortex, earthParams.windStrength, earthParams.oceanMix, earthParams.oceanStrength,
     earthParams.localTemp, earthParams.tempStrength, earthParams.localUv, earthParams.uvStrength,
     earthParams.bioLink, earthParams.bioRate, earthParams.mineralLink, earthParams.mineralRate]);
@@ -4862,12 +4719,6 @@ projectionSelect.on('change', (ev) => {
   // Refreshing the selector after an automated move also emits a change.
   if (suppressPaneEvents || ev.value === viewState.projectionId) return;
   setProjectionChoice(ev.value);
-});
-
-windLevelSelect.on('change', (ev) => {
-  if (suppressPaneEvents) return;
-  syncBioUniformState();
-  loadWindLevel(ev.value);
 });
 
 windLinesBinding.on('change', () => {

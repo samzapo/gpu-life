@@ -63,26 +63,12 @@ fn makeEquirectCoord(n: vec3f, dims: vec2u) -> EquirectCoord {
     );
 }
 
-fn sampleWindArrayLayerCoord(windArr: texture_2d_array<f32>, layerIdx: u32, eq: EquirectCoord) -> vec3f {
-    let c00 = textureLoad(windArr, vec2u(eq.i0, eq.j0), layerIdx, 0).xyz;
-    let c10 = textureLoad(windArr, vec2u(eq.i1, eq.j0), layerIdx, 0).xyz;
-    let c01 = textureLoad(windArr, vec2u(eq.i0, eq.j1), layerIdx, 0).xyz;
-    let c11 = textureLoad(windArr, vec2u(eq.i1, eq.j1), layerIdx, 0).xyz;
+fn sampleWindTextureCoord(windTex: texture_2d<f32>, eq: EquirectCoord) -> vec3f {
+    let c00 = textureLoad(windTex, vec2u(eq.i0, eq.j0), 0).xyz;
+    let c10 = textureLoad(windTex, vec2u(eq.i1, eq.j0), 0).xyz;
+    let c01 = textureLoad(windTex, vec2u(eq.i0, eq.j1), 0).xyz;
+    let c11 = textureLoad(windTex, vec2u(eq.i1, eq.j1), 0).xyz;
     return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
-}
-
-// Samples altitude-blended wind `(uEast, vNorth, speed)` across `[surface, 850hPa, 500hPa, 250hPa]` (`alt01` in `[0, 1]`).
-fn sampleWindArrayAtAltCoord(windArr: texture_2d_array<f32>, eq: EquirectCoord, alt01: f32) -> vec3f {
-    let a = clamp(alt01, 0.0, 1.0) * 3.0;
-    let l0 = min(3u, u32(floor(a)));
-    let l1 = min(3u, l0 + 1u);
-    let f = a - f32(l0);
-    let v0 = sampleWindArrayLayerCoord(windArr, l0, eq);
-    if (l0 == l1 || f <= 0.001) {
-        return v0;
-    }
-    let v1 = sampleWindArrayLayerCoord(windArr, l1, eq);
-    return mix(v0, v1, f);
 }
 
 // Samples wind `(uEast, vNorth, speed)` in m/s at unit sphere normal `n`
@@ -91,12 +77,7 @@ fn sampleWindTexture(windTex: texture_2d<f32>, n: vec3f) -> vec3f {
     if (dims.x < 2u || dims.y < 2u) {
         return vec3f(0.0);
     }
-    let eq = makeEquirectCoord(n, dims);
-    let c00 = textureLoad(windTex, vec2u(eq.i0, eq.j0), 0).xyz;
-    let c10 = textureLoad(windTex, vec2u(eq.i1, eq.j0), 0).xyz;
-    let c01 = textureLoad(windTex, vec2u(eq.i0, eq.j1), 0).xyz;
-    let c11 = textureLoad(windTex, vec2u(eq.i1, eq.j1), 0).xyz;
-    return c00 * eq.w00 + c10 * eq.w10 + c01 * eq.w01 + c11 * eq.w11;
+    return sampleWindTextureCoord(windTex, makeEquirectCoord(n, dims));
 }
 
 fn sampleOceanTextureCoord(oceanTex: texture_2d<f32>, eq: EquirectCoord) -> vec4f {
@@ -127,47 +108,7 @@ fn sampleOceanTexture(oceanTex: texture_2d<f32>, n: vec3f) -> vec4f {
     return sampleOceanTextureCoord(oceanTex, makeEquirectCoord(n, dims));
 }
 
-fn sampleTempArrayLayerCoord(tempArr: texture_2d_array<f32>, layerIdx: u32, eq: EquirectCoord) -> vec4f {
-    let c00 = textureLoad(tempArr, vec2u(eq.i0, eq.j0), layerIdx, 0);
-    let c10 = textureLoad(tempArr, vec2u(eq.i1, eq.j0), layerIdx, 0);
-    let c01 = textureLoad(tempArr, vec2u(eq.i0, eq.j1), layerIdx, 0);
-    let c11 = textureLoad(tempArr, vec2u(eq.i1, eq.j1), layerIdx, 0);
-
-    let airK = c00.x * eq.w00 + c10.x * eq.w10 + c01.x * eq.w01 + c11.x * eq.w11;
-    let sfcK = c00.w * eq.w00 + c10.w * eq.w10 + c01.w * eq.w01 + c11.w * eq.w11;
-    let k00 = eq.w00 * select(0.0, 1.0, c00.z > 0.45);
-    let k10 = eq.w10 * select(0.0, 1.0, c10.z > 0.45);
-    let k01 = eq.w01 * select(0.0, 1.0, c01.z > 0.45);
-    let k11 = eq.w11 * select(0.0, 1.0, c11.z > 0.45);
-    let maskSum = k00 + k10 + k01 + k11;
-    let sstK = select(
-        sfcK,
-        (c00.y * k00 + c10.y * k10 + c01.y * k01 + c11.y * k11) / max(maskSum, 1e-4),
-        maskSum > 1e-4,
-    );
-    return vec4f(airK, sstK, maskSum, sfcK);
-}
-
-fn sampleTempArrayAtAltCoord(tempArr: texture_2d_array<f32>, eq: EquirectCoord, alt01: f32) -> vec4f {
-    let a = clamp(alt01, 0.0, 1.0) * 3.0;
-    let l0 = min(3u, u32(floor(a)));
-    let l1 = min(3u, l0 + 1u);
-    let f = a - f32(l0);
-    let t0 = sampleTempArrayLayerCoord(tempArr, l0, eq);
-    if (l0 == l1 || f <= 0.001) {
-        return t0;
-    }
-    let t1 = sampleTempArrayLayerCoord(tempArr, l1, eq);
-    return vec4f(mix(t0.x, t1.x, f), t0.y, t0.z, t0.w);
-}
-
-// Samples live global temperatures: `(airTempK, sstK, sstMask, sfcAirTempK)` at sphere normal `n`.
-fn sampleTempTexture(tempTex: texture_2d<f32>, n: vec3f) -> vec4f {
-    let dims = textureDimensions(tempTex, 0);
-    if (dims.x < 2u || dims.y < 2u) {
-        return vec4f(288.15, 288.15, 0.0, 288.15);
-    }
-    let eq = makeEquirectCoord(n, dims);
+fn sampleTempTextureCoord(tempTex: texture_2d<f32>, eq: EquirectCoord) -> vec4f {
     let c00 = textureLoad(tempTex, vec2u(eq.i0, eq.j0), 0);
     let c10 = textureLoad(tempTex, vec2u(eq.i1, eq.j0), 0);
     let c01 = textureLoad(tempTex, vec2u(eq.i0, eq.j1), 0);
@@ -188,6 +129,15 @@ fn sampleTempTexture(tempTex: texture_2d<f32>, n: vec3f) -> vec4f {
     );
 
     return vec4f(airK, sstK, maskSum, sfcK);
+}
+
+// Samples live global temperatures: `(airTempK, sstK, sstMask, sfcAirTempK)` at sphere normal `n`.
+fn sampleTempTexture(tempTex: texture_2d<f32>, n: vec3f) -> vec4f {
+    let dims = textureDimensions(tempTex, 0);
+    if (dims.x < 2u || dims.y < 2u) {
+        return vec4f(288.15, 288.15, 0.0, 288.15);
+    }
+    return sampleTempTextureCoord(tempTex, makeEquirectCoord(n, dims));
 }
 
 fn effectiveSurfaceTempK(tSample: vec4f, oceanMask: f32) -> f32 {

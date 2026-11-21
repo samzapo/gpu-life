@@ -3,13 +3,12 @@ import {
   PROJECTIONS,
   type ProjectionId,
 } from './earth/projections';
-import { WIND_LEVELS, type WindLevelId } from './earth/windData';
 
-export const CONFIG_STORAGE_KEY = 'complexLife:config:v1';
+export const CONFIG_STORAGE_KEY = 'complexLife:config:v2';
 
 export const FACTORY_DEFAULTS = {
   engine: 'prefixSum',
-  particles: 20000,
+  particles: 10000,
   colours: 14,
   cells: 4096,
   seed: '19825834',
@@ -46,31 +45,29 @@ export const FACTORY_DEFAULTS = {
   earth: {
     viewLayer: 'both' as ConfigViewLayerMode,
     projection: 'orthographic' as ProjectionId,
-    windLevel: 'surface' as WindLevelId,
     vortex: true,
     windStrength: 1.0,
-    windLines: 0.15,
-    windColors: 0.05,
+    windLines: 1.0,
+    windColors: 0.0,
     chemOpacity: 0.6,
     oceanMix: true,
     oceanStrength: 0.85,
-    oceanLines: 0.5,
-    oceanColors: 0.05,
-    tempColors: 0.2,
+    oceanLines: 1.0,
+    oceanColors: 0.0,
+    tempColors: 0.15,
     localTemp: true,
     tempStrength: 1.0,
-    uvColors: 0.2,
+    uvColors: 0.0,
     localUv: true,
     uvStrength: 1.0,
-    rhColors: 0.1,
-    precipColors: 0.15,
+    rhColors: 0.2,
+    precipColors: 0.25,
     localHydro: true,
     hydroStrength: 1.0,
     lifeOpacity: 1.0,
     mineralOpacity: 1.0,
     terrainOpacity: 0.85,
     nightShading: 0.35,
-    birdExaggeration: 0.075,
     coastlines: true,
     bioLink: true,
     bioRate: 1.0,
@@ -78,6 +75,15 @@ export const FACTORY_DEFAULTS = {
     mineralRate: 1.0,
     tooltips: true,
     mouseTool: 'globe' as ConfigMouseTool,
+  },
+  view: {
+    rotate: [
+      -146.1304722783222,
+      -43.961772363420415,
+      -6.251222977677344,
+    ] as [number, number, number],
+    pan: [0, 0] as [number, number],
+    scale: 2971.0524096688187,
   },
 };
 
@@ -116,7 +122,6 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'oceanAvoidance',
   'oceanCells',
   'projection',
-  'windLevel',
   'layer',
   'windMix',
   'vortex',
@@ -142,7 +147,6 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'mineralOpacity',
   'terrainOpacity',
   'nightShading',
-  'birdExaggeration',
   'coastlines',
   'bioLink',
   'bioRate',
@@ -216,7 +220,6 @@ export interface SimConfigV1 {
   earth?: {
     viewLayer?: ConfigViewLayerMode;
     projection?: ProjectionId;
-    windLevel?: WindLevelId;
     vortex?: boolean;
     windStrength?: number;
     windLines?: number;
@@ -240,7 +243,6 @@ export interface SimConfigV1 {
     mineralOpacity?: number;
     terrainOpacity?: number;
     nightShading?: number;
-    birdExaggeration?: number;
     coastlines?: boolean;
     bioLink?: boolean;
     bioRate?: number;
@@ -410,7 +412,6 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.mineralOpacity = opParam('mineralOpacity') ?? FACTORY_DEFAULTS.earth.mineralOpacity;
     cfg.earth!.terrainOpacity = opParam('terrainOpacity') ?? FACTORY_DEFAULTS.earth.terrainOpacity;
     cfg.earth!.nightShading = opParam('nightShading') ?? FACTORY_DEFAULTS.earth.nightShading;
-    cfg.earth!.birdExaggeration = numParam('birdExaggeration') ?? FACTORY_DEFAULTS.earth.birdExaggeration;
     if (sp.has('oceanMix')) cfg.earth!.oceanMix = sp.get('oceanMix') !== 'false';
     if (sp.has('coastlines')) cfg.earth!.coastlines = sp.get('coastlines') !== 'false';
     if (sp.has('bioLink')) cfg.earth!.bioLink = sp.get('bioLink') !== 'false';
@@ -432,13 +433,6 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.projection = urlProj as ProjectionId;
   } else if (hashParsed.projection && hashParsed.projection in PROJECTIONS) {
     cfg.earth!.projection = hashParsed.projection;
-  }
-
-  const urlLevel = sp.get('windLevel');
-  if (urlLevel && urlLevel in WIND_LEVELS) {
-    cfg.earth!.windLevel = urlLevel as WindLevelId;
-  } else if (hashParsed.level && hashParsed.level in WIND_LEVELS) {
-    cfg.earth!.windLevel = hashParsed.level as WindLevelId;
   }
 
   const urlLayer = sp.get('layer');
@@ -552,7 +546,6 @@ export function buildUrlPartsFromConfig(
     setNum('mineralOpacity', e.mineralOpacity, FACTORY_DEFAULTS.earth.mineralOpacity);
     setNum('terrainOpacity', e.terrainOpacity, FACTORY_DEFAULTS.earth.terrainOpacity);
     setNum('nightShading', e.nightShading, FACTORY_DEFAULTS.earth.nightShading);
-    setNum('birdExaggeration', e.birdExaggeration, FACTORY_DEFAULTS.earth.birdExaggeration);
     setBool('coastlines', e.coastlines, FACTORY_DEFAULTS.earth.coastlines);
     setBool('bioLink', e.bioLink, FACTORY_DEFAULTS.earth.bioLink);
     setNum('bioRate', e.bioRate, FACTORY_DEFAULTS.earth.bioRate);
@@ -571,8 +564,6 @@ export function buildUrlPartsFromConfig(
 
   const proj = e?.projection ?? FACTORY_DEFAULTS.earth.projection;
   const viewLayer = e?.viewLayer ?? FACTORY_DEFAULTS.earth.viewLayer;
-  const windLevel = e?.windLevel ?? FACTORY_DEFAULTS.earth.windLevel;
-  const spec = WIND_LEVELS[windLevel];
   const r = cfg.view?.rotate ?? PROJECTIONS[proj].defaultRotate;
   const lon = (-r[0]).toFixed(2);
   const lat = (-r[1]).toFixed(2);
@@ -582,8 +573,8 @@ export function buildUrlPartsFromConfig(
     viewLayer === 'ocean'
       ? `#current/ocean/surface/currents/${proj}=${lon},${lat},${sc}`
       : viewLayer === 'air'
-        ? `#current/air/${spec.surfaceType === 'surface' ? 'surface/level' : `isobaric/${spec.id}`}/${proj}=${lon},${lat},${sc}`
-        : `#current/both/${spec.surfaceType === 'surface' ? 'surface/level' : `isobaric/${spec.id}`}/${proj}=${lon},${lat},${sc}`;
+        ? `#current/air/surface/level/${proj}=${lon},${lat},${sc}`
+        : `#current/both/surface/level/${proj}=${lon},${lat},${sc}`;
 
   const q = sp.toString();
   return { search: q ? `?${q}` : '', hash };
@@ -638,7 +629,6 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
 
   const viewLayerRaw = earthRaw.viewLayer;
   const projRaw = earthRaw.projection;
-  const windRaw = earthRaw.windLevel;
   const toolRaw = earthRaw.mouseTool;
 
   out.earth = {
@@ -649,10 +639,6 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     projection:
       typeof projRaw === 'string' && projRaw in PROJECTIONS
         ? (projRaw as ProjectionId)
-        : undefined,
-    windLevel:
-      typeof windRaw === 'string' && windRaw in WIND_LEVELS
-        ? (windRaw as WindLevelId)
         : undefined,
     vortex: boolVal(earthRaw.vortex),
     windStrength: finiteNum(earthRaw.windStrength),
@@ -677,7 +663,6 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     mineralOpacity: unitOpacity(earthRaw.mineralOpacity),
     terrainOpacity: unitOpacity(earthRaw.terrainOpacity),
     nightShading: unitOpacity(earthRaw.nightShading),
-    birdExaggeration: finiteNum(earthRaw.birdExaggeration),
     coastlines: boolVal(earthRaw.coastlines),
     bioLink: boolVal(earthRaw.bioLink),
     bioRate: finiteNum(earthRaw.bioRate),

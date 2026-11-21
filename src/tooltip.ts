@@ -197,15 +197,13 @@ export type EmergentBlobRole =
   | 'consumer'
   | 'mixotroph'
   | 'decomposer'
-  | 'halophile'
-  | 'aerial';
+  | 'halophile';
 
 export interface EmergentBlobSummary {
   size: number;
   cytoplasmCount: number;
   lipidCount: number;
   graduatedCount: number;
-  flightCount: number;
   graduated: boolean;
   encapsulated: boolean;
   distinctSpecies: number;
@@ -261,7 +259,6 @@ export function summarizeAndClassifyBlob(
   let cytoplasmCount = 0;
   let lipidCount = 0;
   let graduatedCount = 0;
-  let flightCount = 0;
   let eSum = 0;
   let vitSum = 0;
   let poiSum = 0;
@@ -277,7 +274,6 @@ export function summarizeAndClassifyBlob(
     const ls = lifeState[id] ?? [0.65, 0, 0, 1];
     const meta = unpackLifeMeta(ls);
     if (meta.graduated) graduatedCount++;
-    if (meta.flightMode) flightCount++;
     const el = elements[Math.max(0, Math.min(elements.length - 1, Math.floor(p?.[6] ?? 0)))];
     if (el) {
       const s = getElementSymbol(el.atomicNumber);
@@ -339,9 +335,7 @@ export function summarizeAndClassifyBlob(
   const haloTol = Math.max(0, Math.min(1, 0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh));
 
   let role: EmergentBlobRole = 'producer';
-  if (flightCount > 0 && flightCount >= Math.ceil(bioN * 0.35)) {
-    role = 'aerial';
-  } else if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
+  if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
     role = 'halophile';
   } else if (
     (avgEnergy < 0.36 && decompCap >= 0.45) ||
@@ -359,7 +353,6 @@ export function summarizeAndClassifyBlob(
     cytoplasmCount,
     lipidCount,
     graduatedCount,
-    flightCount,
     graduated: graduatedCount >= 4 && cytoplasmCount >= 28,
     encapsulated: lipidCount >= 4,
     distinctSpecies: spSet.size,
@@ -409,20 +402,18 @@ export function unpackLifeMeta(ls: number[] | undefined): {
   phase: number;
   bioSpecies: number;
   kinPhase: number;
-  flightMode: boolean;
   encapGene: number;
   graduated: boolean;
 } {
   const packed = ls?.[3] ?? 0;
   if (packed < 0.5) {
-    return { phase: 0, bioSpecies: 0, kinPhase: 0, flightMode: false, encapGene: 7, graduated: false };
+    return { phase: 0, bioSpecies: 0, kinPhase: 0, encapGene: 7, graduated: false };
   }
   const u = Math.round(packed);
   return {
     phase: u & 3,
     bioSpecies: (u >>> 2) & 255,
     kinPhase: (((u >>> 10) & 255) / 256) * Math.PI * 2,
-    flightMode: ((u >>> 18) & 1) === 1,
     encapGene: (u >>> 19) & 15,
     graduated: ((u >>> 23) & 1) === 1,
   };
@@ -1160,13 +1151,6 @@ export function analyzeReactionAt(
           : 'MIXOTROPH BLOB';
       title = `${blob.graduated ? 'Complex Mixotroph Organism' : `Mixotroph ${blob.encapsulated ? 'Protocell' : 'Swimmer'}`} (${blob.cytoplasmCount} ${cellWord} · ${blob.distinctSpecies} ${colorWord})`;
       statusDesc = `Hybrid ${blob.formula} anatomy (${encapTag}, ${strategyGeneStr}) pairing a cohesive C/O photosynthetic core (coh=${blob.avgCoh.toFixed(2)}) with a motile tail (asym=${blob.avgAsym.toFixed(2)}).`;
-    } else if (blob.role === 'aerial') {
-      theme = 'complex';
-      badge = 'AERIAL FLOCKER · BIRD LIFE';
-      const birdAlt = Math.max(0, Math.min(1, p0[11] ?? 0.45));
-      const hpa = Math.round(1000 - birdAlt * 750);
-      title = `Aerial Flocker / Bird (${blob.cytoplasmCount} ${cellWord} · ${hpa} hPa)`;
-      statusDesc = `Soaring graduated ${blob.formula} flyer gliding on ${hpa} hPa upper winds (asym=${blob.avgAsym.toFixed(2)}, motility=${blob.avgMotility.toFixed(2)}) and diving to forage over productive coasts & canopies.`;
     } else if (blob.role === 'consumer') {
       theme = blob.graduated ? 'complex' : 'catabolic';
       badge = blob.graduated

@@ -1,14 +1,6 @@
 import { decodeGrib2Field } from './grib2';
 
-export type WindLevelId =
-  | 'surface'
-  | '1000hPa'
-  | '850hPa'
-  | '700hPa'
-  | '500hPa'
-  | '250hPa'
-  | '70hPa'
-  | '10hPa';
+export type WindLevelId = 'surface';
 
 export interface WindLevelSpec {
   id: WindLevelId;
@@ -31,69 +23,6 @@ export const WIND_LEVELS: Record<WindLevelId, WindLevelSpec> = {
     surfaceType: 'surface',
     scaleMax: 100,
     streamMax: 17,
-  },
-  '1000hPa': {
-    id: '1000hPa',
-    label: '1000 hPa',
-    gribLevel: '1000 mb',
-    tempGribLevel: '1000 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 18,
-  },
-  '850hPa': {
-    id: '850hPa',
-    label: '850 hPa',
-    gribLevel: '850 mb',
-    tempGribLevel: '850 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 24,
-  },
-  '700hPa': {
-    id: '700hPa',
-    label: '700 hPa',
-    gribLevel: '700 mb',
-    tempGribLevel: '700 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 30,
-  },
-  '500hPa': {
-    id: '500hPa',
-    label: '500 hPa',
-    gribLevel: '500 mb',
-    tempGribLevel: '500 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 40,
-  },
-  '250hPa': {
-    id: '250hPa',
-    label: '250 hPa',
-    gribLevel: '250 mb',
-    tempGribLevel: '250 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 60,
-  },
-  '70hPa': {
-    id: '70hPa',
-    label: '70 hPa',
-    gribLevel: '70 mb',
-    tempGribLevel: '70 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 45,
-  },
-  '10hPa': {
-    id: '10hPa',
-    label: '10 hPa',
-    gribLevel: '10 mb',
-    tempGribLevel: '10 mb',
-    surfaceType: 'isobaric',
-    scaleMax: 100,
-    streamMax: 65,
   },
 };
 
@@ -395,6 +324,47 @@ export async function fetchLiveGfsWind(
  * Samples bilinearly interpolated `[u, v, speed]` (m/s) at geographic `[lonDeg, latDeg]`.
  * Grid convention: row `0` = `+90N`, row `ny-1` = `-90S`; col `0` = `0E` wrapping cleanly over `360`.
  */
+export function sampleWindLonLatInto(
+  grid: WindGrid,
+  lonDeg: number,
+  latDeg: number,
+  out: [number, number, number, number],
+): void {
+  const { nx, ny, u, v } = grid;
+  const wrappedLon = ((lonDeg % 360) + 360) % 360;
+  const clampedLat = Math.max(-90, Math.min(90, latDeg));
+
+  const gx = (wrappedLon / 360) * nx;
+  const gy = ((90 - clampedLat) / 180) * (ny - 1);
+
+  const i0 = Math.floor(gx) % nx;
+  const i1 = (i0 + 1) % nx;
+  const fx = gx - Math.floor(gx);
+
+  const j0 = Math.min(ny - 1, Math.max(0, Math.floor(gy)));
+  const j1 = Math.min(ny - 1, j0 + 1);
+  const fy = gy - j0;
+
+  const r0 = j0 * nx;
+  const r1 = j1 * nx;
+  const k00 = r0 + i0;
+  const k10 = r0 + i1;
+  const k01 = r1 + i0;
+  const k11 = r1 + i1;
+
+  const w00 = (1 - fx) * (1 - fy);
+  const w10 = fx * (1 - fy);
+  const w01 = (1 - fx) * fy;
+  const w11 = fx * fy;
+
+  const uu = u[k00] * w00 + u[k10] * w10 + u[k01] * w01 + u[k11] * w11;
+  const vv = v[k00] * w00 + v[k10] * w10 + v[k01] * w01 + v[k11] * w11;
+  out[0] = uu;
+  out[1] = vv;
+  out[2] = Math.hypot(uu, vv);
+  out[3] = 1;
+}
+
 export function sampleWindLonLat(
   grid: WindGrid,
   lonDeg: number,
@@ -468,73 +438,6 @@ export function sampleWindTempLonLat(
   const tSfc =
     sfcTempK[k00] * w00 + sfcTempK[k10] * w10 + sfcTempK[k01] * w01 + sfcTempK[k11] * w11;
   return [tLvl, tSfc];
-}
-
-export const AIR_STACK_LEVELS: readonly WindLevelId[] = [
-  'surface',
-  '850hPa',
-  '500hPa',
-  '250hPa',
-];
-
-/**
- * Synthesizes an instantaneous initial upper-air wind & temperature grid from the cached
- * surface grid using standard tropospheric lapse rates (~6.5 K/km), Ekman veering, and
- * subtropical/polar jet-stream profiles until live GFS upper-air fetches hydrate each slice.
- */
-export function synthesizeUpperAirGrid(
-  base: WindGrid,
-  levelId: '850hPa' | '500hPa' | '250hPa',
-): WindGrid {
-  const { nx, ny, u, v, tempK, sfcTempK } = base;
-  const n = nx * ny;
-  const uOut = new Float32Array(n);
-  const vOut = new Float32Array(n);
-  const tOut = new Float32Array(n);
-  const sfcOut = new Float32Array(sfcTempK);
-
-  const scaleSpeed = levelId === '850hPa' ? 1.35 : levelId === '500hPa' ? 2.15 : 2.95;
-  const jetAmp = levelId === '850hPa' ? 3.5 : levelId === '500hPa' ? 14.0 : 28.0;
-  const lapseDropK = levelId === '850hPa' ? 9.5 : levelId === '500hPa' ? 34.0 : 58.0;
-
-  for (let row = 0; row < ny; row++) {
-    const latDeg = 90 - (row / Math.max(1, ny - 1)) * 180;
-    const absLat = Math.abs(latDeg);
-    const hemi = latDeg >= 0 ? 1 : -1;
-    // Subtropical (~32°) + Polar (~55°) jet bands vs equatorial trade easterlies
-    const subJet = Math.exp(-((absLat - 32) * (absLat - 32)) / 130);
-    const polJet = Math.exp(-((absLat - 55) * (absLat - 55)) / 150);
-    const eqTrade = -Math.exp(-(absLat * absLat) / 140) * 0.28;
-    const zonalJet = jetAmp * (0.95 * subJet + 0.72 * polJet + eqTrade);
-    // Slight Ekman turning (~15-25 deg right in NH, left in SH) above boundary layer
-    const veerRad = (levelId === '850hPa' ? 0.24 : 0.35) * hemi;
-    const cv = Math.cos(veerRad);
-    const sv = Math.sin(veerRad);
-
-    for (let col = 0; col < nx; col++) {
-      const idx = row * nx + col;
-      const bu = u[idx];
-      const bv = v[idx];
-      uOut[idx] = (bu * cv + bv * sv) * scaleSpeed + zonalJet;
-      vOut[idx] = (-bu * sv + bv * cv) * scaleSpeed;
-      tOut[idx] = Math.max(193.15, (tempK[idx] || sfcTempK[idx] || 288.15) - lapseDropK);
-    }
-  }
-
-  return {
-    nx,
-    ny,
-    u: uOut,
-    v: vOut,
-    tempK: tOut,
-    sfcTempK: sfcOut,
-    tempLabel: WIND_LEVELS[levelId].tempGribLevel,
-    level: levelId,
-    refTime: base.refTime,
-    validTime: base.validTime,
-    source: `${base.source} (synth ${levelId})`,
-    isLive: false,
-  };
 }
 
 export function interpolateColorStops(

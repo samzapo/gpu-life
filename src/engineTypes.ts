@@ -9,10 +9,8 @@ export interface UnifiedEngineRefs {
   valenceBuffer: GPUBuffer;
   bioForceBuffer: GPUBuffer;
   windTexView: GPUTextureView;
-  windStackTexView: GPUTextureView;
   oceanTexView: GPUTextureView;
   tempTexView: GPUTextureView;
-  tempStackTexView: GPUTextureView;
   uvTexView: GPUTextureView;
   hydroTexView: GPUTextureView;
   terrainTexView: GPUTextureView;
