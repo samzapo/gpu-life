@@ -48,13 +48,17 @@ interface StreamParticle {
 }
 
 const MAX_AGE = 85;
-const MAX_PARTICLES = 3400;
-const TRAIL_LEN = 22;
-const FADE_BANDS = 4;
+const MAX_PARTICLES = 2400;
+const TRAIL_LEN = 18;
+// Subsampled offsets from oldest (17) to head (0) for smooth, low-overhead polyline redraws
+const TAIL_OFFSETS = [17, 13, 9, 6] as const;
+const HEAD_OFFSETS = [6, 3, 1, 0] as const;
+const FADE_BANDS = 2;
 const INTENSITY_BUCKETS = 12;
-const REPROJECT_BUCKETS = 6;
+const REPROJECT_BUCKETS = 4;
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
+const BREAK_SENTINEL = -1e9;
 
 function buildIntensityStyles(rgb: [number, number, number]): string[] {
   const out: string[] = [];
@@ -69,21 +73,18 @@ function buildIntensityStyles(rgb: [number, number, number]): string[] {
 }
 
 function buildBandIntensityStyles(rgb: [number, number, number]): string[][] {
-  const bands: string[][] = [];
-  // Band 0 = oldest tail, Band FADE_BANDS-1 = newest head
-  const alphas = [0.22, 0.42, 0.66, 0.88];
-  for (let band = 0; band < FADE_BANDS; band++) {
+  const alphas = [0.36, 0.86];
+  return alphas.map((alpha) => {
     const row: string[] = [];
     for (let i = 0; i < REPROJECT_BUCKETS; i++) {
-      const scale = (105 + (150 * i) / (REPROJECT_BUCKETS - 1)) / 255;
+      const scale = (115 + (140 * i) / (REPROJECT_BUCKETS - 1)) / 255;
       const r = Math.round(rgb[0] * scale);
       const g = Math.round(rgb[1] * scale);
       const b = Math.round(rgb[2] * scale);
-      row.push(`rgba(${r}, ${g}, ${b}, ${alphas[band]})`);
+      row.push(`rgba(${r}, ${g}, ${b}, ${alpha})`);
     }
-    bands.push(row);
-  }
-  return bands;
+    return row;
+  });
 }
 
 export class WindStreamRenderer {
@@ -97,7 +98,6 @@ export class WindStreamRenderer {
   private cachedStyles: string[] = [];
   private cachedBandStyles: string[][] = [];
 
-  // Ring-buffered geographic trail history per particle so camera movement never wipes or resets streamlines.
   private trailX = new Float32Array(MAX_PARTICLES * TRAIL_LEN);
   private trailY = new Float32Array(MAX_PARTICLES * TRAIL_LEN);
   private trailZ = new Float32Array(MAX_PARTICLES * TRAIL_LEN);
@@ -106,6 +106,11 @@ export class WindStreamRenderer {
   private trailBucket = new Uint8Array(MAX_PARTICLES * TRAIL_LEN);
   private trailHead = new Uint8Array(MAX_PARTICLES);
   private trailCount = new Uint8Array(MAX_PARTICLES);
+
+  private polyPools: number[][][] = Array.from({ length: FADE_BANDS }, () =>
+    Array.from({ length: REPROJECT_BUCKETS }, () => []),
+  );
+  private segPools: number[][] = Array.from({ length: INTENSITY_BUCKETS }, () => []);
 
   private getStyles(tint: [number, number, number]): string[] {
     const key = `${tint[0]},${tint[1]},${tint[2]}`;
@@ -150,8 +155,8 @@ export class WindStreamRenderer {
 
   private ensureCount(width: number, masked: boolean): void {
     const base = Math.max(
-      1200,
-      Math.min(MAX_PARTICLES, Math.round(width * (masked ? 2.5 : 2.2))),
+      1000,
+      Math.min(MAX_PARTICLES, Math.round(width * (masked ? 1.8 : 1.6))),
     );
     while (this.particles.length < base) {
       const idx = this.particles.length;
@@ -180,7 +185,7 @@ export class WindStreamRenderer {
     this.trailCount[index] = 0;
     const inv = proj.invert;
     if (inv) {
-      const maxTries = sampler.masked ? 14 : 6;
+      const maxTries = sampler.masked ? 12 : 5;
       for (let tries = 0; tries < maxTries; tries++) {
         const sx = Math.random() * width;
         const sy = Math.random() * height;
@@ -224,6 +229,95 @@ export class WindStreamRenderer {
     p.age = Math.floor(Math.random() * 14);
   }
 
+  private emitBandPolyline(
+    pool: number[],
+    offsets: readonly number[],
+    base: number,
+    head: number,
+    count: number,
+    width: number,
+    height: number,
+    proj: d3Geo.GeoProjection,
+    isOrthographic: boolean,
+    scale: number,
+    tx: number,
+    ty: number,
+    r00: number,
+    r01: number,
+    r02: number,
+    r10: number,
+    r11: number,
+    r12: number,
+    r20: number,
+    r21: number,
+    r22: number,
+    maxJumpSq: number,
+  ): void {
+    const margin = 48;
+    let started = false;
+    let prevX = 0;
+    let prevY = 0;
+
+    for (let o = 0; o < offsets.length; o++) {
+      const k = offsets[o];
+      if (k >= count) continue;
+      const ringIdx = (head - k + TRAIL_LEN) % TRAIL_LEN;
+      const slot = base + ringIdx;
+      let sx = 0;
+      let sy = 0;
+      let valid = false;
+
+      if (isOrthographic) {
+        const ux = this.trailX[slot];
+        const uy = this.trailY[slot];
+        const uz = this.trailZ[slot];
+        const vx = r00 * ux + r10 * uy + r20 * uz;
+        if (vx >= 0.004) {
+          const vy = r01 * ux + r11 * uy + r21 * uz;
+          const vz = r02 * ux + r12 * uy + r22 * uz;
+          sx = tx + vy * scale;
+          sy = ty - vz * scale;
+          valid =
+            sx >= -margin &&
+            sx <= width + margin &&
+            sy >= -margin &&
+            sy <= height + margin;
+        }
+      } else {
+        const scr = proj([this.trailLon[slot], this.trailLat[slot]]);
+        if (scr && Number.isFinite(scr[0]) && Number.isFinite(scr[1])) {
+          sx = scr[0];
+          sy = scr[1];
+          valid =
+            sx >= -margin &&
+            sx <= width + margin &&
+            sy >= -margin &&
+            sy <= height + margin;
+        }
+      }
+
+      if (!valid) {
+        started = false;
+        continue;
+      }
+
+      if (!started) {
+        pool.push(BREAK_SENTINEL, sx, sy);
+        started = true;
+      } else {
+        const dx = sx - prevX;
+        const dy = sy - prevY;
+        if (dx * dx + dy * dy <= maxJumpSq) {
+          pool.push(sx, sy);
+        } else {
+          pool.push(BREAK_SENTINEL, sx, sy);
+        }
+      }
+      prevX = sx;
+      prevY = sy;
+    }
+  }
+
   private drawStoredTrails(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -231,116 +325,118 @@ export class WindStreamRenderer {
     proj: d3Geo.GeoProjection,
     isOrthographic: boolean,
     sampler: StreamFieldSampler,
+    scale: number,
+    tx: number,
+    ty: number,
+    r00: number,
+    r01: number,
+    r02: number,
+    r10: number,
+    r11: number,
+    r12: number,
+    r20: number,
+    r21: number,
+    r22: number,
   ): void {
-    const scale = proj.scale();
-    const [tx, ty] = proj.translate();
-    const rot = isOrthographic
-      ? buildD3RotationMatrixColMajor(proj.rotate())
-      : null;
-    const r00 = rot ? rot[0] : 0;
-    const r01 = rot ? rot[1] : 0;
-    const r02 = rot ? rot[2] : 0;
-    const r10 = rot ? rot[4] : 0;
-    const r11 = rot ? rot[5] : 0;
-    const r12 = rot ? rot[6] : 0;
-    const r20 = rot ? rot[8] : 0;
-    const r21 = rot ? rot[9] : 0;
-    const r22 = rot ? rot[10] : 0;
-
-    const buckets: number[][][] = Array.from({ length: FADE_BANDS }, () =>
-      Array.from({ length: REPROJECT_BUCKETS }, () => []),
-    );
-    const maxSegJumpSq = 56 * 56;
-    const margin = 48;
+    for (let band = 0; band < FADE_BANDS; band++) {
+      for (let b = 0; b < REPROJECT_BUCKETS; b++) {
+        this.polyPools[band][b].length = 0;
+      }
+    }
+    const maxJumpSq = 96 * 96;
 
     for (let i = 0; i < this.particles.length; i++) {
       const count = this.trailCount[i];
       if (count < 2) continue;
       const head = this.trailHead[i];
       const base = i * TRAIL_LEN;
-      const startAge = count - 1;
+      const headBucket = this.trailBucket[base + head];
+      const rBucket = Math.min(
+        REPROJECT_BUCKETS - 1,
+        Math.floor((headBucket / INTENSITY_BUCKETS) * REPROJECT_BUCKETS),
+      );
 
-      let prevValid = false;
-      let prevX = 0;
-      let prevY = 0;
-
-      for (let k = startAge; k >= 0; k--) {
-        const ringIdx = (head - k + TRAIL_LEN) % TRAIL_LEN;
-        const slot = base + ringIdx;
-        let sx = 0;
-        let sy = 0;
-        let valid = false;
-
-        if (isOrthographic) {
-          const ux = this.trailX[slot];
-          const uy = this.trailY[slot];
-          const uz = this.trailZ[slot];
-          const vx = r00 * ux + r10 * uy + r20 * uz;
-          if (vx >= 0.004) {
-            const vy = r01 * ux + r11 * uy + r21 * uz;
-            const vz = r02 * ux + r12 * uy + r22 * uz;
-            sx = tx + vy * scale;
-            sy = ty - vz * scale;
-            valid =
-              sx >= -margin &&
-              sx <= width + margin &&
-              sy >= -margin &&
-              sy <= height + margin;
-          }
-        } else {
-          const scr = proj([this.trailLon[slot], this.trailLat[slot]]);
-          if (scr && Number.isFinite(scr[0]) && Number.isFinite(scr[1])) {
-            sx = scr[0];
-            sy = scr[1];
-            valid =
-              sx >= -margin &&
-              sx <= width + margin &&
-              sy >= -margin &&
-              sy <= height + margin;
-          }
-        }
-
-        if (prevValid && valid) {
-          const dx = sx - prevX;
-          const dy = sy - prevY;
-          if (dx * dx + dy * dy <= maxSegJumpSq) {
-            const band = Math.min(
-              FADE_BANDS - 1,
-              Math.floor(((TRAIL_LEN - 1 - k) / TRAIL_LEN) * FADE_BANDS),
-            );
-            const rBucket = Math.min(
-              REPROJECT_BUCKETS - 1,
-              Math.floor(
-                (this.trailBucket[slot] / INTENSITY_BUCKETS) * REPROJECT_BUCKETS,
-              ),
-            );
-            buckets[band][rBucket].push(prevX, prevY, sx, sy);
-          }
-        }
-        prevValid = valid;
-        prevX = sx;
-        prevY = sy;
+      if (count > 7) {
+        this.emitBandPolyline(
+          this.polyPools[0][rBucket],
+          TAIL_OFFSETS,
+          base,
+          head,
+          count,
+          width,
+          height,
+          proj,
+          isOrthographic,
+          scale,
+          tx,
+          ty,
+          r00,
+          r01,
+          r02,
+          r10,
+          r11,
+          r12,
+          r20,
+          r21,
+          r22,
+          maxJumpSq,
+        );
       }
+      this.emitBandPolyline(
+        this.polyPools[1][rBucket],
+        HEAD_OFFSETS,
+        base,
+        head,
+        count,
+        width,
+        height,
+        proj,
+        isOrthographic,
+        scale,
+        tx,
+        ty,
+        r00,
+        r01,
+        r02,
+        r10,
+        r11,
+        r12,
+        r20,
+        r21,
+        r22,
+        maxJumpSq,
+      );
     }
 
     ctx.save();
     ctx.beginPath();
-    d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+    if (isOrthographic) {
+      ctx.arc(tx, ty, scale + 1, 0, Math.PI * 2);
+    } else {
+      d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+    }
     ctx.clip();
     ctx.lineWidth = sampler.lineWidth;
-    ctx.lineCap = 'round';
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'bevel';
 
     for (let band = 0; band < FADE_BANDS; band++) {
-      const bandRow = buckets[band];
       const styles = this.cachedBandStyles[band];
+      const bandRow = this.polyPools[band];
       for (let b = 0; b < REPROJECT_BUCKETS; b++) {
-        const segs = bandRow[b];
-        if (segs.length === 0) continue;
+        const pts = bandRow[b];
+        if (pts.length === 0) continue;
         ctx.beginPath();
         ctx.strokeStyle = styles[b];
-        for (let k = 0; k < segs.length; k += 4) {
-          ctx.moveTo(segs[k], segs[k + 1]);
-          ctx.lineTo(segs[k + 2], segs[k + 3]);
+        let k = 0;
+        while (k < pts.length) {
+          if (pts[k] === BREAK_SENTINEL) {
+            ctx.moveTo(pts[k + 1], pts[k + 2]);
+            k += 3;
+          } else {
+            ctx.lineTo(pts[k], pts[k + 1]);
+            k += 2;
+          }
         }
         ctx.stroke();
       }
@@ -398,24 +494,36 @@ export class WindStreamRenderer {
 
     const fullRedraw = viewChanged && !isInitialOrProjSwitch;
     if (!fullRedraw) {
-      // Fade existing trails using destination-in composite when camera is stationary.
       const prevOp = ctx.globalCompositeOperation;
       ctx.globalCompositeOperation = 'destination-in';
       ctx.fillStyle = `rgba(0, 0, 0, ${sampler.fadeAlpha})`;
       ctx.fillRect(0, 0, width, height);
       ctx.globalCompositeOperation = prevOp;
+      for (let b = 0; b < INTENSITY_BUCKETS; b++) {
+        this.segPools[b].length = 0;
+      }
     }
 
     const scale = proj.scale();
+    const [tx, ty] = proj.translate();
+    const rot = isOrthographic
+      ? buildD3RotationMatrixColMajor(proj.rotate())
+      : null;
+    const r00 = rot ? rot[0] : 0;
+    const r01 = rot ? rot[1] : 0;
+    const r02 = rot ? rot[2] : 0;
+    const r10 = rot ? rot[4] : 0;
+    const r11 = rot ? rot[5] : 0;
+    const r12 = rot ? rot[6] : 0;
+    const r20 = rot ? rot[8] : 0;
+    const r21 = rot ? rot[9] : 0;
+    const r22 = rot ? rot[10] : 0;
+
     // Target ~4.2 px/frame at streamMax across all zoom levels, keeping fast gales, jets & currents crisp
     const radScale = 4.2 / (Math.max(scale, 80) * Math.max(sampler.streamMax, 0.25));
-
-    const buckets: [number, number, number, number][][] = fullRedraw
-      ? []
-      : Array.from({ length: INTENSITY_BUCKETS }, () => []);
-
-    const maxSegJump = 28;
-    const center = cameraMoving ? proj.invert?.(proj.translate()) : null;
+    const maxSegJumpSq = 28 * 28;
+    const center =
+      !isOrthographic && cameraMoving ? proj.invert?.([tx, ty]) : null;
 
     for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
@@ -429,7 +537,34 @@ export class WindStreamRenderer {
 
       let curLon = p.lon;
       let curLat = p.lat;
-      let scr0 = fullRedraw ? null : proj([curLon, curLat]);
+      let scr0x = 0;
+      let scr0y = 0;
+      let scr0Ok = false;
+
+      if (!fullRedraw) {
+        if (isOrthographic) {
+          const lonRad = curLon * DEG2RAD;
+          const latRad = curLat * DEG2RAD;
+          const cosLat = Math.cos(latRad);
+          const ux = cosLat * Math.cos(lonRad);
+          const uy = cosLat * Math.sin(lonRad);
+          const uz = Math.sin(latRad);
+          const vx = r00 * ux + r10 * uy + r20 * uz;
+          if (vx >= 0.004) {
+            scr0x = tx + (r01 * ux + r11 * uy + r21 * uz) * scale;
+            scr0y = ty - (r02 * ux + r12 * uy + r22 * uz) * scale;
+            scr0Ok = true;
+          }
+        } else {
+          const scr0 = proj([curLon, curLat]);
+          if (scr0 && Number.isFinite(scr0[0]) && Number.isFinite(scr0[1])) {
+            scr0x = scr0[0];
+            scr0y = scr0[1];
+            scr0Ok = true;
+          }
+        }
+      }
+
       const [u0, v0, mag0, mask0] = sampler.sample(curLon, curLat);
       if (sampler.masked && mask0 < 0.42) {
         p.age = MAX_AGE;
@@ -480,22 +615,40 @@ export class WindStreamRenderer {
         lastBucket = bIdx;
 
         if (!fullRedraw) {
-          const scr1 = proj([nextLon, nextLat]);
-          if (
-            scr0 &&
-            scr1 &&
-            Number.isFinite(scr0[0]) &&
-            Number.isFinite(scr0[1]) &&
-            Number.isFinite(scr1[0]) &&
-            Number.isFinite(scr1[1])
-          ) {
-            const dx = scr1[0] - scr0[0];
-            const dy = scr1[1] - scr0[1];
-            if (dx * dx + dy * dy <= maxSegJump * maxSegJump) {
-              buckets[bIdx].push([scr0[0], scr0[1], scr1[0], scr1[1]]);
+          let scr1x = 0;
+          let scr1y = 0;
+          let scr1Ok = false;
+          if (isOrthographic) {
+            const lonRad = nextLon * DEG2RAD;
+            const latRad = nextLat * DEG2RAD;
+            const cLat = Math.cos(latRad);
+            const ux = cLat * Math.cos(lonRad);
+            const uy = cLat * Math.sin(lonRad);
+            const uz = Math.sin(latRad);
+            const vx = r00 * ux + r10 * uy + r20 * uz;
+            if (vx >= 0.004) {
+              scr1x = tx + (r01 * ux + r11 * uy + r21 * uz) * scale;
+              scr1y = ty - (r02 * ux + r12 * uy + r22 * uz) * scale;
+              scr1Ok = true;
+            }
+          } else {
+            const scr1 = proj([nextLon, nextLat]);
+            if (scr1 && Number.isFinite(scr1[0]) && Number.isFinite(scr1[1])) {
+              scr1x = scr1[0];
+              scr1y = scr1[1];
+              scr1Ok = true;
             }
           }
-          scr0 = scr1;
+          if (scr0Ok && scr1Ok) {
+            const dx = scr1x - scr0x;
+            const dy = scr1y - scr0y;
+            if (dx * dx + dy * dy <= maxSegJumpSq) {
+              this.segPools[bIdx].push(scr0x, scr0y, scr1x, scr1y);
+            }
+          }
+          scr0x = scr1x;
+          scr0y = scr1y;
+          scr0Ok = scr1Ok;
         }
       }
 
@@ -506,19 +659,35 @@ export class WindStreamRenderer {
       }
 
       if (fullRedraw) {
-        scr0 = proj([curLon, curLat]);
+        if (isOrthographic) {
+          const slot = i * TRAIL_LEN + this.trailHead[i];
+          const ux = this.trailX[slot];
+          const uy = this.trailY[slot];
+          const uz = this.trailZ[slot];
+          const vx = r00 * ux + r10 * uy + r20 * uz;
+          if (vx >= 0.004) {
+            scr0x = tx + (r01 * ux + r11 * uy + r21 * uz) * scale;
+            scr0y = ty - (r02 * ux + r12 * uy + r22 * uz) * scale;
+            scr0Ok = true;
+          }
+        } else {
+          const scr = proj([curLon, curLat]);
+          if (scr && Number.isFinite(scr[0]) && Number.isFinite(scr[1])) {
+            scr0x = scr[0];
+            scr0y = scr[1];
+            scr0Ok = true;
+          }
+        }
       }
 
       if (
-        !scr0 ||
-        !Number.isFinite(scr0[0]) ||
-        !Number.isFinite(scr0[1]) ||
-        scr0[0] < -40 ||
-        scr0[0] > width + 40 ||
-        scr0[1] < -40 ||
-        scr0[1] > height + 40
+        !scr0Ok ||
+        scr0x < -40 ||
+        scr0x > width + 40 ||
+        scr0y < -40 ||
+        scr0y > height + 40
       ) {
-        if (scr0 || this.frameCounter % 4 === 0) {
+        if (scr0Ok || this.frameCounter % 4 === 0) {
           p.age = MAX_AGE;
         }
       }
@@ -526,24 +695,46 @@ export class WindStreamRenderer {
 
     if (fullRedraw) {
       ctx.clearRect(0, 0, width, height);
-      this.drawStoredTrails(ctx, width, height, proj, isOrthographic, sampler);
+      this.drawStoredTrails(
+        ctx,
+        width,
+        height,
+        proj,
+        isOrthographic,
+        sampler,
+        scale,
+        tx,
+        ty,
+        r00,
+        r01,
+        r02,
+        r10,
+        r11,
+        r12,
+        r20,
+        r21,
+        r22,
+      );
     } else {
       ctx.save();
       ctx.beginPath();
-      d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+      if (isOrthographic) {
+        ctx.arc(tx, ty, scale + 1, 0, Math.PI * 2);
+      } else {
+        d3Geo.geoPath(proj, ctx)({ type: 'Sphere' });
+      }
       ctx.clip();
 
       ctx.lineWidth = sampler.lineWidth;
       ctx.lineCap = 'round';
       for (let i = 0; i < INTENSITY_BUCKETS; i++) {
-        const segs = buckets[i];
+        const segs = this.segPools[i];
         if (segs.length === 0) continue;
         ctx.beginPath();
         ctx.strokeStyle = styles[i];
-        for (let k = 0; k < segs.length; k++) {
-          const s = segs[k];
-          ctx.moveTo(s[0], s[1]);
-          ctx.lineTo(s[2], s[3]);
+        for (let k = 0; k < segs.length; k += 4) {
+          ctx.moveTo(segs[k], segs[k + 1]);
+          ctx.lineTo(segs[k + 2], segs[k + 3]);
         }
         ctx.stroke();
       }
