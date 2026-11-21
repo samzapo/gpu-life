@@ -4271,10 +4271,13 @@ function update() {
   }
 
   device.popErrorScope().then((error) => {
-    if (error && !window.location.search.includes('noTimestamp')) {
-      const url = new URL(window.location.href);
-      url.searchParams.set('noTimestamp', '');
-      window.location.replace(url.toString());
+    if (error) {
+      console.error('WebGPU validation error:', error.message);
+      if (!window.location.search.includes('noTimestamp')) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('noTimestamp', '');
+        window.location.replace(url.toString());
+      }
     }
   }).catch(() => { /* device.lost reports disconnection */ });
 

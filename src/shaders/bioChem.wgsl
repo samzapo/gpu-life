@@ -1467,7 +1467,7 @@ fn finalizeBioUnified(
         // 0D. Geochemical nucleation into crustal minerals (`0 -> 3`) when unassimilated
         let crystBioRes = attemptMineralCrystallize(
             pi, pos, atomicNum, valence, bondEase,
-            solar, upwell, oc, tHabK, landFrac, windNorm, curNorm, frameU, acc, bio,
+            solar, upwell, oc, tHabK, tSample.w, hydroSample, landFrac, windNorm, curNorm, frameU, acc, bio,
         );
         if (unpackPhase(crystBioRes.nextLifeState.w) == 3u) {
             return crystBioRes;

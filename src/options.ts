@@ -622,7 +622,8 @@ export const uvStrengthBinding = withTooltip(
   'Multiplier scaling how strongly live Earth UV radiation drives fixation, photodamage, mutagenesis, and photochemistry.',
 );
 export const rhColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'rhColors', {
+  pane.addBinding(earthParams, 'rhColors', {
+    index: 8,
     label: 'rhColors',
     ...opacitySliderParams,
   }),
@@ -630,7 +631,8 @@ export const rhColorsBinding = withTooltip(
   'Opacity (0%–100%) of live NOAA GFS 2m Relative Humidity shading across Earth.',
 );
 export const precipColorsBinding = withTooltip(
-  earthFolder.addBinding(earthParams, 'precipColors', {
+  pane.addBinding(earthParams, 'precipColors', {
+    index: 9,
     label: '3hpsColors',
     ...opacitySliderParams,
   }),
@@ -656,7 +658,7 @@ export const hydroStrengthBinding = withTooltip(
 );
 export const lifeOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'lifeOpacity', {
-    index: 8,
+    index: 10,
     label: 'lifeAlpha',
     ...opacitySliderParams,
   }),
@@ -665,7 +667,7 @@ export const lifeOpacityBinding = withTooltip(
 );
 export const mineralOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'mineralOpacity', {
-    index: 9,
+    index: 11,
     label: 'minAlpha',
     ...opacitySliderParams,
   }),
