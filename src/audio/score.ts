@@ -176,16 +176,16 @@ function emitStepEvents(
     }
   }
 
-  // 4. Tectonic Metallic Rim & Sulfide Sub Anvil
+  // 4. Tectonic Dark Tom & Sulfide Sub Anvil
   const ridgeActivity = Math.max(env.ridgeMask, env.elevKmNorm, obs.mineralSulfideRatio);
-  if (ridgeActivity > 0.20 && (beat === 3 || beat === 11 || (beat === 9 && ridgeActivity > 0.5))) {
+  if (ridgeActivity > 0.24 && (beat === 3 || beat === 11)) {
     out.push({
       kind: 'drum',
       offset,
       instrument: beat === 3 ? 15 : 3,
       lane: 4,
-      note: beat === 3 ? Math.max(24, bassRoot) : 60 + prog[chordIdx],
-      gain: Math.min(0.40, 0.15 + 0.26 * ridgeActivity),
+      note: beat === 3 ? Math.max(26, Math.min(46, bassRoot)) : Math.max(38, Math.min(54, bassRoot + 12)),
+      gain: Math.min(0.36, 0.14 + 0.22 * ridgeActivity),
     });
   }
 
@@ -259,18 +259,18 @@ function emitStepEvents(
       offset,
       voiceType: 'lead',
       lane: obs.dominantBioSp % 4,
-      note: Math.max(42, Math.min(80, leadRoot + 12 + degree)),
+      note: Math.max(40, Math.min(72, leadRoot + 12 + degree)),
       gain: (part === 'surge' || part === 'climax' ? 0.22 : 0.16) * Math.min(1.2, 0.5 + obs.avgEnergy * 0.7),
       durationSec: isComplex ? stepSec * 2.4 : stepSec * 1.4,
-      baseCutoffHz: 320 + 420 * (1 - env.nightFactor * 0.55),
-      envPeakHz: 1400 + 1800 * obs.consumerRatio + 900 * obs.complexRatio,
-      filterQ: isComplex ? 3.2 : 2.2,
-      subMix: isComplex ? 0.55 : 0.25,
+      baseCutoffHz: 280 + 380 * (1 - env.nightFactor * 0.55),
+      envPeakHz: 1100 + 1400 * obs.consumerRatio + 700 * obs.complexRatio,
+      filterQ: isComplex ? 2.8 : 2.0,
+      subMix: isComplex ? 0.58 : 0.28,
       detuneCents: isComplex ? 20 : 11,
     });
   }
 
-  // 8. Spatial Stereo Lanes across Left-to-Right Screen Regions (Chemistry Arps + Mineral Chimes/Anvils)
+  // 8. Spatial Stereo Lanes across Left-to-Right Screen Regions (Chemistry Arps + Warm Mineral Pulses)
   for (let l = 0; l < 4; l++) {
     const laneObs = obs.lanes[l];
 
@@ -281,14 +281,14 @@ function emitStepEvents(
         offset,
         voiceType: 'arp',
         lane: l,
-        note: Math.max(48, Math.min(86, leadRoot + 24 + deg)),
-        gain: 0.11 * laneObs.chemGain * (0.55 + 0.65 * obs.chemBondActivity),
-        durationSec: stepSec * 0.78,
-        baseCutoffHz: 420,
-        envPeakHz: Math.min(4200, 1200 + 2400 * (1 - env.nightFactor * 0.6) * obs.chemBondActivity),
-        filterQ: 2.0 + 3.5 * laneObs.acidDrive,
-        subMix: 0.15,
-        detuneCents: 10,
+        note: Math.max(43, Math.min(68, leadRoot + deg)),
+        gain: 0.13 * laneObs.chemGain * (0.55 + 0.65 * obs.chemBondActivity),
+        durationSec: stepSec * 0.95,
+        baseCutoffHz: 260,
+        envPeakHz: Math.min(1850, 780 + 1250 * (1 - env.nightFactor * 0.55) * obs.chemBondActivity),
+        filterQ: 1.8 + 2.4 * laneObs.acidDrive,
+        subMix: 0.32,
+        detuneCents: 11,
       });
     }
 
@@ -299,8 +299,8 @@ function emitStepEvents(
         offset,
         instrument: isSulfide ? 15 : 14,
         lane: l,
-        note: isSulfide ? bassRoot + 12 : leadRoot + 24 + (usePhrygian ? 1 : 7),
-        gain: (isSulfide ? 0.21 : 0.15) * laneObs.mineralGain,
+        note: isSulfide ? Math.max(26, Math.min(48, bassRoot)) : Math.max(40, Math.min(62, leadRoot + (usePhrygian ? 1 : 7))),
+        gain: (isSulfide ? 0.20 : 0.14) * laneObs.mineralGain,
       });
     }
   }

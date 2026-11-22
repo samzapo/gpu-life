@@ -2,7 +2,11 @@ import { CameraFlight, copyView } from './earth/cameraFlight';
 import { modeEnabled, saveMode } from './temporal/modes';
 import { GlobeTour, coordinates } from './earth/globeTour';
 import { TemporalGame } from './temporal/game';
-import { GlobeCyberSynth } from './audio/engine';
+import {
+  createSpectrogramSnapshot,
+  GlobeCyberSynth,
+} from './audio/engine';
+import { SynthSpectrogramOverlay } from './audio/spectrogram';
 import {
   observeScreenAudioState,
   type ScreenAudioObservation,
@@ -2639,6 +2643,8 @@ displayCamera();
 const cyberSynth = new GlobeCyberSynth();
 cyberSynth.setVolume(params.synthVol);
 cyberSynth.setEnabled(modeEnabled('music'), false);
+const synthSpectrogram = new SynthSpectrogramOverlay();
+const synthSpecSnapshot = createSpectrogramSnapshot();
 const musicToggleBtn = document.getElementById('music-toggle') as HTMLButtonElement | null;
 let lastAudioObserveMs = 0;
 let audioObserveInFlight = false;
@@ -2649,7 +2655,10 @@ let audioStageCount = 0;
 
 function syncMusicButtonUi(rms = 0) {
   if (!musicToggleBtn) return;
-  musicToggleBtn.setAttribute('aria-pressed', String(cyberSynth.isEnabled()));
+  const enabled = cyberSynth.isEnabled();
+  const running = cyberSynth.isRunning();
+  musicToggleBtn.setAttribute('aria-pressed', String(enabled));
+  musicToggleBtn.dataset.audioState = !enabled ? 'muted' : running ? 'running' : 'locked';
   musicToggleBtn.style.setProperty('--rms', Math.min(1, rms * 3.5).toFixed(3));
 }
 syncMusicButtonUi(0);
@@ -2662,16 +2671,21 @@ function setCyberSynthEnabled(on: boolean, fromGesture = false) {
 
 if (musicToggleBtn) {
   musicToggleBtn.onclick = () => {
-    setCyberSynthEnabled(!cyberSynth.isEnabled(), true);
+    if (cyberSynth.isEnabled() && !cyberSynth.isRunning()) {
+      setCyberSynthEnabled(true, true);
+    } else {
+      setCyberSynthEnabled(!cyberSynth.isEnabled(), true);
+    }
   };
 }
 
-for (const evType of ['pointerdown', 'click', 'keydown'] as const) {
+for (const evType of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchend', 'click', 'keydown'] as const) {
   window.addEventListener(
     evType,
-    () => {
+    (ev) => {
+      if (ev.target instanceof Element && ev.target.closest('#music-toggle')) return;
       if (cyberSynth.isEnabled() && cyberSynth.getState() !== 'running') {
-        void cyberSynth.unlock();
+        void cyberSynth.unlock().then(() => syncMusicButtonUi(0));
       }
     },
     { capture: true, passive: true },
@@ -4589,6 +4603,8 @@ function update() {
   tooltipManager.tick();
   observeGlobeAudioCenter(start);
   const rmsAudio = cyberSynth.tick(start);
+  cyberSynth.readSpectrogram(synthSpecSnapshot);
+  synthSpectrogram.render(synthSpecSnapshot, start);
   if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
 
   const checkValidation = frameCount <= 120 || (frameCount % 60 === 0);

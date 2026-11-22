@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { observeScreenAudioState } from '../src/audio/observer.ts';
 import { generateScoreEvents, lineageMotif } from '../src/audio/score.ts';
 import { SYNTH_RATE } from '../src/audio/synthBank.ts';
+import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '../src/audio/engine.ts';
+import { describeSynthEffects, SYNTH_EFFECT_SPECS } from '../src/audio/spectrogram.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
 
 function packMeta(phase, bioSp, graduated = 0) {
@@ -120,6 +122,7 @@ test('generateScoreEvents emits sorted cyberpunk kick, per-note filtered saw+sub
     prevOffset = ev.offset;
     assert.ok(ev.lane >= 0 && ev.lane <= 4);
     assert.ok(ev.gain > 0);
+    assert.ok(ev.note <= 72, `expected dark cyberpunk register without high tinks, got MIDI note ${ev.note}`);
     if (ev.kind === 'drum' && ev.instrument === 0) sawKick = true;
     if (ev.kind === 'drum' && (ev.instrument === 3 || ev.instrument === 15)) sawAnvilOrRim = true;
     if (ev.kind === 'synth' && ev.voiceType === 'bass') {
@@ -132,5 +135,135 @@ test('generateScoreEvents emits sorted cyberpunk kick, per-note filtered saw+sub
   assert.ok(sawFilteredBass, 'expected sequenced saw+sub bassline with filter envelope');
   assert.ok(sawAnvilOrRim, 'expected tectonic ridge/sulfide percussion');
 
+  const snap = createSpectrogramSnapshot();
+  snap.observation = obs;
+  const entries = describeSynthEffects(snap);
+  assert.equal(entries.length, SYNTH_EFFECT_SPECS.length);
+  for (const entry of entries) {
+    assert.ok(entry.spec.color.startsWith('#'));
+    assert.ok(entry.provenance.length > 10);
+  }
+
   assert.deepEqual(lineageMotif(9911, 3), lineageMotif(9911, 3));
+});
+
+test('GlobeCyberSynth restores masterGain after mute/unmute on already-running AudioContext and reads spectrogram', async () => {
+  const targetValues = [];
+  let ctxState = 'running';
+
+  class FakeAudioContext {
+    constructor() {
+      this.currentTime = 1.0;
+      this.sampleRate = 48000;
+      this.destination = { connect() {} };
+    }
+    get state() {
+      return ctxState;
+    }
+    addEventListener() {}
+    resume() {
+      ctxState = 'running';
+      return Promise.resolve();
+    }
+    createBuffer(channels, length, sampleRate) {
+      return {
+        numberOfChannels: channels,
+        length,
+        sampleRate,
+        getChannelData: () => new Float32Array(length),
+      };
+    }
+    createGain() {
+      const node = {
+        connect() {},
+        gain: {
+          value: 1,
+          setValueAtTime(v) { node.gain.value = v; },
+          linearRampToValueAtTime() {},
+          exponentialRampToValueAtTime() {},
+          cancelScheduledValues() {},
+          setTargetAtTime(v) {
+            node.gain.value = v;
+            targetValues.push(v);
+          },
+        },
+      };
+      return node;
+    }
+    createDynamicsCompressor() {
+      return {
+        connect() {},
+        threshold: { value: 0 },
+        knee: { value: 0 },
+        ratio: { value: 0 },
+        attack: { value: 0 },
+        release: { value: 0 },
+      };
+    }
+    createAnalyser() {
+      return {
+        connect() {},
+        fftSize: 256,
+        frequencyBinCount: 128,
+        smoothingTimeConstant: 0,
+        minDecibels: -86,
+        maxDecibels: -12,
+        getFloatTimeDomainData(arr) { arr.fill(0); },
+        getByteFrequencyData(arr) { arr.fill(96); },
+      };
+    }
+    createDelay() {
+      return { connect() {}, delayTime: { value: 0 } };
+    }
+    createBiquadFilter() {
+      return { connect() {}, type: 'lowpass', frequency: { value: 1000 } };
+    }
+    createStereoPanner() {
+      return { connect() {}, pan: { value: 0, setTargetAtTime() {} } };
+    }
+    createOscillator() {
+      return {
+        connect() {},
+        start() {},
+        stop() {},
+        type: 'sine',
+        frequency: { value: 0 },
+        detune: { value: 0 },
+      };
+    }
+    createWaveShaper() {
+      return { connect() {}, curve: null };
+    }
+  }
+
+  const prevWindow = globalThis.window;
+  globalThis.window = { AudioContext: FakeAudioContext };
+  try {
+    const synth = new GlobeCyberSynth();
+    synth.setVolume(0.8);
+    synth.setEnabled(true, false);
+    assert.equal(synth.isRunning(), false);
+
+    await synth.unlock();
+    assert.equal(synth.isRunning(), true);
+    assert.ok(Math.abs(targetValues.at(-1) - 0.8 * 0.85) < 1e-6);
+
+    synth.setEnabled(false, true);
+    assert.equal(synth.isRunning(), false);
+    assert.equal(targetValues.at(-1), 0);
+
+    synth.setEnabled(true, true);
+    await synth.unlock();
+    assert.equal(synth.isRunning(), true);
+    assert.ok(Math.abs(targetValues.at(-1) - 0.8 * 0.85) < 1e-6);
+
+    const snap = createSpectrogramSnapshot();
+    synth.readSpectrogram(snap);
+    assert.equal(snap.running, true);
+    assert.equal(snap.curves.length, 6);
+    assert.equal(snap.curves[0].length, SPECTROGRAM_BINS);
+    assert.ok(snap.bassLevel > 0);
+  } finally {
+    globalThis.window = prevWindow;
+  }
 });

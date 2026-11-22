@@ -82,6 +82,124 @@
   text-shadow: 0 0 8px rgba(255, 42, 133, 0.65);
 }
 
+#music-toggle[data-audio-state='locked'] {
+  border-style: dashed;
+  border-color: rgba(0, 240, 255, 0.65);
+}
+
+#synth-spec {
+  position: fixed;
+  z-index: 15;
+  top: max(2px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  height: 54px;
+  background: transparent;
+  border: none;
+  pointer-events: auto;
+}
+
+#synth-spec[hidden] {
+  display: none !important;
+}
+
+#synth-spec-canvas {
+  position: static;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  pointer-events: none;
+}
+
+#synth-spec-tooltip {
+  position: fixed;
+  z-index: 42;
+  top: calc(max(2px, env(safe-area-inset-top)) + 58px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 10px 14px 12px;
+  color: #e4f8ff;
+  background: var(--cyber-bg);
+  border: 1px solid var(--cyber-border);
+  box-shadow:
+    0 0 24px rgba(0, 240, 255, 0.18),
+    inset 0 0 16px rgba(255, 42, 133, 0.08);
+  backdrop-filter: blur(10px);
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  font:
+    500 11px/1.38 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  pointer-events: none;
+}
+
+#synth-spec-tooltip[hidden] {
+  display: none !important;
+}
+
+.synth-tip-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 7px;
+  border-bottom: 1px solid rgba(0, 240, 255, 0.22);
+  font-size: 11px;
+  letter-spacing: 0.07em;
+}
+
+.synth-tip-head strong {
+  color: var(--cyber-cyan);
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.45);
+}
+
+.synth-tip-status {
+  color: #f3c8ff;
+  font-size: 10px;
+}
+
+.synth-tip-list {
+  display: grid;
+  gap: 6px;
+}
+
+.synth-tip-row-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.synth-tip-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 2.5px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.synth-tip-name {
+  font-weight: 700;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.synth-tip-metric {
+  margin-left: auto;
+  color: #c7e6f5;
+  font-size: 10px;
+}
+
+.synth-tip-prov {
+  margin-left: 21px;
+  color: rgba(212, 234, 248, 0.8);
+  font-size: 10px;
+  line-height: 1.32;
+}
+
 #tour-caption {
   grid-column: 1 / -1;
   justify-self: start;
