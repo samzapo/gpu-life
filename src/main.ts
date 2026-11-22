@@ -3221,7 +3221,11 @@ webGpuNoticeCloseEl?.addEventListener('click', (ev) => {
 function showWebGpuNotice(reason: string) {
   game.unavailable(reason);
   if (webGpuNoticeTextEl) {
-    webGpuNoticeTextEl.textContent = `${reason} Showing 2D globe, wind/ocean currents & synth.`;
+    const isFirefox = /firefox|fxios/i.test(navigator.userAgent);
+    const hint = isFirefox
+      ? 'Open in Chrome, or in Firefox Nightly set about:config -> gfx.webgpu.ignore-blocklist = true (and dom.webgpu.enabled = true) then restart.'
+      : 'Open in Chrome/Edge 121+ (or enable WebGPU in your browser flags) for full particle simulation.';
+    webGpuNoticeTextEl.textContent = `${reason} ${hint} Showing 2D globe, wind/ocean currents & synth.`;
   }
   if (webGpuNoticeEl) {
     webGpuNoticeEl.hidden = false;
