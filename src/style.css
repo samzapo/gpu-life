@@ -57,12 +57,12 @@ canvas {
 #githubBtn {
   position: absolute;
   z-index: 10;
-  left: 10px;
-  top: 10px;
+  left: 8px;
+  top: 6px;
   background-image: url(./assets/github.png);
   background-size: cover;
-  width: 44px;
-  height: 44px;
+  width: 24px;
+  height: 24px;
   filter: drop-shadow(0 0 5px purple) drop-shadow(0 0 10px purple);
   transition: scale 0.25s ease;
   display: none;
@@ -261,7 +261,7 @@ canvas {
   position: fixed;
   left: 0;
   top: 0;
-  z-index: 60;
+  z-index: 120;
   pointer-events: none;
   max-width: min(300px, calc(100vw - 20px));
   padding: 8px 10px;
@@ -459,7 +459,7 @@ canvas {
 .config-modal {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: 130;
   display: flex;
   align-items: center;
   justify-content: center;
