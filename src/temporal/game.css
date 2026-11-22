@@ -93,13 +93,19 @@
 #synth-spec {
   position: fixed;
   z-index: 15;
-  top: calc(max(6px, env(safe-area-inset-top)) + 28px);
-  left: 10px;
-  right: 10px;
-  height: 50px;
+  top: max(6px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(33.333vw, calc(100vw - 24px));
+  height: 96px;
   background: transparent;
   border: none;
   pointer-events: auto;
+}
+
+#synth-spec.minimized {
+  width: auto;
+  height: 22px;
 }
 
 #synth-spec[hidden] {
@@ -113,6 +119,45 @@
   height: 100%;
   background: transparent;
   pointer-events: none;
+}
+
+#synth-spec.minimized #synth-spec-canvas {
+  display: none;
+}
+
+#synth-spec-toggle {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 2;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  color: rgba(0, 240, 255, 0.85);
+  background: rgba(5, 10, 20, 0.52);
+  border: 1px solid rgba(0, 240, 255, 0.34);
+  font:
+    600 10px/1 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+  transition: border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+#synth-spec-toggle:hover {
+  color: #ffffff;
+  border-color: var(--cyber-cyan);
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.35);
+}
+
+#synth-spec.minimized #synth-spec-toggle {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
 }
 
 #synth-spec-tooltip {

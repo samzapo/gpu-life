@@ -6,6 +6,7 @@ import {
 export interface SynthEffectSpec {
   id: 'bass' | 'acid' | 'chorus' | 'delay' | 'poly' | 'pulse';
   name: string;
+  rgb: readonly [number, number, number];
   color: string;
   coreColor: string;
   glow: string;
@@ -16,52 +17,75 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
   {
     id: 'pulse',
     name: 'Kick / Sidechain Pulse',
+    rgb: [56, 189, 248],
     color: '#38bdf8',
     coreColor: '#e0f2fe',
-    glow: 'rgba(56, 189, 248, 0.92)',
-    lineWidth: 1.4,
+    glow: 'rgba(56, 189, 248, 0.85)',
+    lineWidth: 1.05,
   },
   {
     id: 'bass',
     name: 'Sub Bass + Filter Pluck',
+    rgb: [255, 42, 133],
     color: '#ff2a85',
     coreColor: '#ffd6eb',
-    glow: 'rgba(255, 42, 133, 0.96)',
-    lineWidth: 1.9,
+    glow: 'rgba(255, 42, 133, 0.92)',
+    lineWidth: 1.25,
   },
   {
     id: 'acid',
     name: 'Acid Waveshaper Drive',
+    rgb: [255, 176, 0],
     color: '#ffb000',
     coreColor: '#fff3c4',
-    glow: 'rgba(255, 176, 0, 0.92)',
-    lineWidth: 1.5,
+    glow: 'rgba(255, 176, 0, 0.88)',
+    lineWidth: 1.1,
   },
   {
     id: 'chorus',
     name: 'Stereo LFO Chorus',
+    rgb: [0, 240, 255],
     color: '#00f0ff',
     coreColor: '#d9feff',
-    glow: 'rgba(0, 240, 255, 0.95)',
-    lineWidth: 1.6,
+    glow: 'rgba(0, 240, 255, 0.92)',
+    lineWidth: 1.15,
   },
   {
     id: 'delay',
     name: 'Hydro Dotted-8th Delay',
+    rgb: [46, 255, 181],
     color: '#2effb5',
     coreColor: '#d8ffef',
-    glow: 'rgba(46, 255, 181, 0.92)',
-    lineWidth: 1.45,
+    glow: 'rgba(46, 255, 181, 0.88)',
+    lineWidth: 1.1,
   },
   {
     id: 'poly',
     name: 'Bio/Chem Motif & Arps',
+    rgb: [192, 132, 252],
     color: '#c084fc',
     coreColor: '#f5e8ff',
-    glow: 'rgba(192, 132, 252, 0.94)',
-    lineWidth: 1.65,
+    glow: 'rgba(192, 132, 252, 0.90)',
+    lineWidth: 1.15,
   },
 ] as const;
+
+const INTENSITY_BUCKETS = 5;
+
+function buildStreamStyles(rgb: readonly [number, number, number]): string[] {
+  const styles: string[] = [];
+  for (let i = 0; i < INTENSITY_BUCKETS; i++) {
+    const scale = (95 + (160 * i) / (INTENSITY_BUCKETS - 1)) / 255;
+    const alpha = (0.34 + 0.58 * (i / (INTENSITY_BUCKETS - 1))).toFixed(2);
+    const r = Math.round(rgb[0] * scale);
+    const g = Math.round(rgb[1] * scale);
+    const b = Math.round(rgb[2] * scale);
+    styles.push(`rgba(${r}, ${g}, ${b}, ${alpha})`);
+  }
+  return styles;
+}
+
+const STREAM_BUCKET_STYLES: readonly string[][] = SYNTH_EFFECT_SPECS.map((s) => buildStreamStyles(s.rgb));
 
 export interface EffectProvenanceEntry {
   spec: SynthEffectSpec;
@@ -124,21 +148,26 @@ export class SynthSpectrogramOverlay {
   private container: HTMLElement | null;
   private canvas: HTMLCanvasElement | null;
   private ctx: CanvasRenderingContext2D | null;
+  private toggleBtn: HTMLButtonElement | null;
   private tooltip: HTMLElement | null;
   private hovered = false;
+  private minimized = false;
   private lastTooltipMs = 0;
   private lastBoundsMs = -1000;
-  private tipTopPx = 82;
+  private tipTopPx = 108;
+  private segPools: number[][] = Array.from({ length: INTENSITY_BUCKETS }, () => []);
 
   constructor(
     containerId = 'synth-spec',
     canvasId = 'synth-spec-canvas',
     tooltipId = 'synth-spec-tooltip',
+    toggleId = 'synth-spec-toggle',
   ) {
     this.container = document.getElementById(containerId);
     this.canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
     this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
     this.tooltip = document.getElementById(tooltipId);
+    this.toggleBtn = document.getElementById(toggleId) as HTMLButtonElement | null;
 
     if (this.container) {
       this.container.addEventListener('pointerenter', () => {
@@ -150,97 +179,75 @@ export class SynthSpectrogramOverlay {
         if (this.tooltip) this.tooltip.hidden = true;
       });
     }
+
+    if (this.toggleBtn) {
+      this.toggleBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.setMinimized(!this.minimized);
+      });
+    }
+    this.syncToggleUi();
+  }
+
+  isMinimized(): boolean {
+    return this.minimized;
+  }
+
+  setMinimized(min: boolean): void {
+    this.minimized = min;
+    this.syncToggleUi();
+    this.lastBoundsMs = -1000;
+  }
+
+  private syncToggleUi(): void {
+    if (!this.container || !this.toggleBtn) return;
+    this.container.classList.toggle('minimized', this.minimized);
+    this.toggleBtn.textContent = this.minimized ? '∿ +' : '−';
+    this.toggleBtn.setAttribute('aria-expanded', String(!this.minimized));
+    const label = this.minimized ? 'Expand synth spectrogram' : 'Minimize synth spectrogram';
+    this.toggleBtn.setAttribute('aria-label', label);
+    this.toggleBtn.title = label;
   }
 
   private syncClearanceBounds(nowMs: number): void {
     if (!this.container || nowMs - this.lastBoundsMs < 140) return;
     this.lastBoundsMs = nowMs;
 
-    let safeTop = 30;
-    const switchesEl = document.getElementById('globe-switches');
-    if (switchesEl) {
-      const buttons = switchesEl.querySelectorAll('.game-switch');
-      for (const btn of buttons) {
-        const r = btn.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-          safeTop = Math.max(safeTop, Math.ceil(r.bottom) + 6);
-        }
-      }
-    }
-    const githubEl = document.getElementById('githubBtn');
-    if (githubEl && getComputedStyle(githubEl).display !== 'none') {
-      const r = githubEl.getBoundingClientRect();
-      if (r.height > 0 && r.bottom < 80) {
+    const winW = Math.max(240, window.innerWidth || 1280);
+    const specW = this.minimized
+      ? (this.container.getBoundingClientRect().width || 68)
+      : Math.min(winW / 3, winW - 24);
+    const centerLeft = (winW - specW) * 0.5;
+    const centerRight = (winW + specW) * 0.5;
+
+    let safeTop = 6;
+    const checkOverlap = (el: Element | null) => {
+      if (!el) return;
+      if ((el as HTMLElement).hidden || getComputedStyle(el).display === 'none') return;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      const overlapsX = r.right + 8 > centerLeft && r.left - 8 < centerRight;
+      if (overlapsX && r.top < 120) {
         safeTop = Math.max(safeTop, Math.ceil(r.bottom) + 6);
       }
-    }
+    };
 
-    let safeLeft = 10;
-    const captionEl = document.getElementById('tour-caption');
-    if (captionEl && !captionEl.hidden) {
-      const cr = captionEl.getBoundingClientRect();
-      if (cr.width > 0 && cr.bottom > safeTop && cr.top < safeTop + 50) {
-        safeLeft = Math.max(safeLeft, Math.ceil(cr.right) + 10);
+    const switchesEl = document.getElementById('globe-switches');
+    if (switchesEl) {
+      for (const btn of switchesEl.querySelectorAll('.game-switch')) {
+        checkOverlap(btn);
       }
+      checkOverlap(document.getElementById('tour-caption'));
     }
-
-    let safeRight = 10;
-    const tpEl = document.querySelector('.tp-dfwv') as HTMLElement | null;
-    if (tpEl) {
-      const tr = tpEl.getBoundingClientRect();
-      if (tr.width > 0 && tr.bottom > safeTop) {
-        safeRight = Math.max(safeRight, Math.ceil(window.innerWidth - tr.left) + 10);
-      }
-    }
-
-    const specHeight = 48;
-    if (safeLeft + safeRight + 80 >= window.innerWidth) {
-      safeLeft = 10;
-      safeRight = 10;
-    }
+    checkOverlap(document.getElementById('githubBtn'));
+    checkOverlap(document.querySelector('.tp-dfwv'));
 
     this.container.style.top = `${safeTop}px`;
-    this.container.style.left = `${safeLeft}px`;
-    this.container.style.right = `${safeRight}px`;
-    this.container.style.height = `${specHeight}px`;
-    this.tipTopPx = safeTop + specHeight + 6;
+    const activeHeight = this.minimized ? 22 : 96;
+    this.tipTopPx = safeTop + activeHeight + 6;
     if (this.tooltip) {
       this.tooltip.style.top = `${this.tipTopPx}px`;
     }
-  }
-
-  private traceSmoothCurve(
-    ctx: CanvasRenderingContext2D,
-    curve: Float32Array,
-    cssW: number,
-    yBase: number,
-    ampSpan: number,
-  ): { peakX: number; peakY: number; peakAmp: number } {
-    ctx.beginPath();
-    let prevX = 0;
-    let peakAmp = curve[0] ?? 0;
-    let prevY = yBase - Math.max(0, Math.min(1, peakAmp)) * ampSpan;
-    let peakX = 0;
-    let peakY = prevY;
-    ctx.moveTo(prevX, prevY);
-
-    for (let i = 1; i < SPECTROGRAM_BINS; i++) {
-      const amp = Math.max(0, Math.min(1, curve[i] ?? 0));
-      const x = (i / (SPECTROGRAM_BINS - 1)) * cssW;
-      const y = yBase - amp * ampSpan;
-      if (amp > peakAmp) {
-        peakAmp = amp;
-        peakX = x;
-        peakY = y;
-      }
-      const midX = (prevX + x) * 0.5;
-      const midY = (prevY + y) * 0.5;
-      ctx.quadraticCurveTo(prevX, prevY, midX, midY);
-      prevX = x;
-      prevY = y;
-    }
-    ctx.lineTo(cssW, prevY);
-    return { peakX, peakY, peakAmp };
   }
 
   render(snap: SynthSpectrogramSnapshot, nowMs: number): void {
@@ -255,97 +262,127 @@ export class SynthSpectrogramOverlay {
 
     this.syncClearanceBounds(nowMs);
 
-    const cssW = Math.max(100, this.container.clientWidth || window.innerWidth - 20);
-    const cssH = Math.max(34, this.container.clientHeight || 48);
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const targetW = Math.round(cssW * dpr);
-    const targetH = Math.round(cssH * dpr);
+    if (!this.minimized) {
+      const cssW = Math.max(120, this.container.clientWidth || window.innerWidth / 3);
+      const cssH = Math.max(64, this.container.clientHeight || 96);
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const targetW = Math.round(cssW * dpr);
+      const targetH = Math.round(cssH * dpr);
 
-    if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
-      this.canvas.width = targetW;
-      this.canvas.height = targetH;
-    }
+      if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
+        this.canvas.width = targetW;
+        this.canvas.height = targetH;
+      }
 
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    // Strict current frame only: full transparent clear with zero temporal fade and no background
-    ctx.clearRect(0, 0, cssW, cssH);
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      // Zero fade trail, zero background: strictly current-frame streamline wave segments
+      ctx.clearRect(0, 0, cssW, cssH);
 
-    const yBase = cssH - 4;
-    const ampSpan = Math.max(12, cssH - 10);
-    const kickBoost = snap.running ? snap.sidechainDepth : 0;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.globalCompositeOperation = 'lighter';
+      const yBase = cssH - 6;
+      const ampSpan = Math.max(28, cssH - 14);
+      const kickBoost = snap.running ? snap.sidechainDepth : 0;
+      const flowShift = snap.running ? (nowMs * 0.022) : 0;
 
-    for (let sIdx = 0; sIdx < SYNTH_EFFECT_SPECS.length; sIdx++) {
-      const spec = SYNTH_EFFECT_SPECS[sIdx];
-      const curve = snap.curves[CURVE_INDEX_ORDER[sIdx]];
-      const crest = this.traceSmoothCurve(ctx, curve, cssW, yBase, ampSpan);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.globalCompositeOperation = 'lighter';
 
-      // Pass 1: Wide outer neon bloom halo
-      ctx.strokeStyle = spec.color;
-      ctx.shadowColor = spec.glow;
-      ctx.shadowBlur = snap.running ? 18 + kickBoost * 10 : 6;
-      ctx.lineWidth = spec.lineWidth + 5.0;
-      ctx.globalAlpha = snap.running ? 0.16 + kickBoost * 0.08 : 0.05;
-      ctx.stroke();
+      for (let sIdx = 0; sIdx < SYNTH_EFFECT_SPECS.length; sIdx++) {
+        const spec = SYNTH_EFFECT_SPECS[sIdx];
+        const curve = snap.curves[CURVE_INDEX_ORDER[sIdx]];
+        const bucketStyles = STREAM_BUCKET_STYLES[sIdx];
+        for (let b = 0; b < INTENSITY_BUCKETS; b++) this.segPools[b].length = 0;
 
-      // Pass 2: Mid glowing neon aura
-      ctx.shadowBlur = snap.running ? 9 + kickBoost * 4 : 4;
-      ctx.lineWidth = spec.lineWidth + 1.6;
-      ctx.globalAlpha = snap.running ? 0.46 : 0.14;
-      ctx.stroke();
+        let peakX = 0;
+        let peakY = yBase;
+        let peakAmp = 0;
 
-      // Pass 3: White-hot laser filament core
-      ctx.strokeStyle = spec.coreColor;
-      ctx.shadowColor = spec.color;
-      ctx.shadowBlur = snap.running ? 4 : 2;
-      ctx.lineWidth = Math.max(0.85, spec.lineWidth * 0.62);
-      ctx.globalAlpha = snap.running ? 0.96 : 0.34;
-      ctx.stroke();
+        // Wind/water streamline style: intensity-bucketed fine segments + gentle directional flow dashes
+        let prevX = 0;
+        let prevAmp = Math.max(0, Math.min(1, curve[0] ?? 0));
+        let prevY = yBase - prevAmp * ampSpan;
 
-      // Instantaneous spectral crest flare (strictly current frame peaks, no fade)
-      if (snap.running && crest.peakAmp > 0.16) {
-        const sparkR = 1.6 + crest.peakAmp * 1.9;
-        ctx.fillStyle = spec.coreColor;
-        ctx.shadowColor = spec.glow;
-        ctx.shadowBlur = 12;
-        ctx.globalAlpha = Math.min(1, 0.55 + crest.peakAmp * 0.45);
-        ctx.beginPath();
-        ctx.arc(crest.peakX, crest.peakY, sparkR, 0, Math.PI * 2);
-        ctx.fill();
+        for (let i = 1; i < SPECTROGRAM_BINS; i++) {
+          const amp = Math.max(0, Math.min(1, curve[i] ?? 0));
+          const x = (i / (SPECTROGRAM_BINS - 1)) * cssW;
+          const y = yBase - amp * ampSpan;
 
-        // Crisp vertical harmonic spark whisker downward from crest toward horizon
-        ctx.strokeStyle = spec.color;
+          if (amp > peakAmp) {
+            peakAmp = amp;
+            peakX = x;
+            peakY = y;
+          }
+
+          const segAmp = Math.max(prevAmp, amp);
+          // Subtle wind-streak cadence along each overlaid curve so dense overlapping effects read clearly
+          const dashPhase = (i * 0.72 + flowShift * (0.65 + sIdx * 0.14) + sIdx * 1.9) % 3.0;
+          const drawGap = snap.running && segAmp < 0.08 && dashPhase > 2.25;
+
+          if (!drawGap) {
+            const slopeBoost = Math.min(0.28, Math.abs(amp - prevAmp) * 1.6);
+            const energy = Math.min(1, segAmp * 0.92 + slopeBoost);
+            const bIdx = Math.min(
+              INTENSITY_BUCKETS - 1,
+              Math.floor((snap.running ? energy : 0.12) * (INTENSITY_BUCKETS - 1)),
+            );
+            this.segPools[bIdx].push(prevX, prevY, x, y);
+          }
+
+          prevX = x;
+          prevY = y;
+          prevAmp = amp;
+        }
+
+        // Render intensity buckets matching windLines.ts: delicate fine round-cap streamlines + glow on hot crests
+        ctx.lineWidth = spec.lineWidth;
+        for (let b = 0; b < INTENSITY_BUCKETS; b++) {
+          const segs = this.segPools[b];
+          if (segs.length === 0) continue;
+          ctx.beginPath();
+          ctx.strokeStyle = bucketStyles[b];
+          if (b >= INTENSITY_BUCKETS - 2 && snap.running) {
+            ctx.shadowColor = spec.glow;
+            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 8 + kickBoost * 5 : 4;
+          } else {
+            ctx.shadowBlur = 0;
+          }
+          for (let k = 0; k < segs.length; k += 4) {
+            ctx.moveTo(segs[k], segs[k + 1]);
+            ctx.lineTo(segs[k + 2], segs[k + 3]);
+          }
+          ctx.stroke();
+        }
+
+        // Crisp bright streamline head dot on the active peak crest (no fade trail)
+        if (snap.running && peakAmp > 0.14) {
+          ctx.fillStyle = spec.coreColor;
+          ctx.shadowColor = spec.glow;
+          ctx.shadowBlur = 9;
+          ctx.beginPath();
+          ctx.arc(peakX, peakY, 1.3 + peakAmp * 1.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Current-frame kick sidechain anchor ticks on edges
+      if (snap.running && kickBoost > 0.1) {
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
+        ctx.shadowColor = 'rgba(0, 240, 255, 0.95)';
         ctx.shadowBlur = 8;
-        ctx.lineWidth = 1.0;
-        ctx.globalAlpha = 0.45 * crest.peakAmp;
+        ctx.lineWidth = 1.2;
+        const tickSpan = Math.min(cssW * 0.14, 10 + kickBoost * 24);
         ctx.beginPath();
-        ctx.moveTo(crest.peakX, crest.peakY);
-        ctx.lineTo(crest.peakX, Math.min(yBase, crest.peakY + (yBase - crest.peakY) * 0.45));
+        ctx.moveTo(0, yBase);
+        ctx.lineTo(tickSpan, yBase);
+        ctx.moveTo(cssW, yBase);
+        ctx.lineTo(cssW - tickSpan, yBase);
         ctx.stroke();
       }
-    }
 
-    // Current-frame kick edge pulse ticks along baseline edges
-    if (snap.running && kickBoost > 0.08) {
-      ctx.strokeStyle = '#00f0ff';
-      ctx.shadowColor = 'rgba(0, 240, 255, 0.95)';
-      ctx.shadowBlur = 12;
-      ctx.lineWidth = 1.6;
-      ctx.globalAlpha = Math.min(0.85, kickBoost * 0.9);
-      const tickSpan = Math.min(cssW * 0.12, 16 + kickBoost * 42);
-      ctx.beginPath();
-      ctx.moveTo(0, yBase);
-      ctx.lineTo(tickSpan, yBase);
-      ctx.moveTo(cssW, yBase);
-      ctx.lineTo(cssW - tickSpan, yBase);
-      ctx.stroke();
+      ctx.restore();
     }
-
-    ctx.restore();
 
     if (this.hovered && this.tooltip) {
       this.tooltip.hidden = false;

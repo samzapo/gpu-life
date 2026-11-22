@@ -81,7 +81,7 @@ function updateMouseSphere(clientX: number, clientY: number) {
 
 function isUiTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn, #configModal, #globe-switches, #temporal-panel'));
+  return Boolean(target.closest('.tp-dfwv, #controls, #githubBtn, #configModal, #globe-switches, #temporal-panel, #synth-spec-toggle'));
 }
 
 function applyDragDelta(dx: number, dy: number, forcePan: boolean) {
