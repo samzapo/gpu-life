@@ -87,6 +87,7 @@ import {
   clearSkyUviGfs,
   cloudTransmission,
   uvCategoryLabel,
+  uvIndexColorRgb,
   type LocalUvSample,
   type UvGrid,
 } from './earth/uvData';
@@ -2861,6 +2862,13 @@ const tooltipManager = new TooltipManager({
   getLocalTemps: (u) => sampleLocalTempsAtUnit(u),
   getLocalUv: (u) => sampleLocalUvAtUnit(u),
   getLocalHydro: (u) => sampleLocalHydroAtUnit(u),
+  getEnvColorRgb: (kind, value) => {
+    if (kind === 'air') return airTempColorRgb(273.15 + value);
+    if (kind === 'sst') return sstColorRgb(273.15 + value);
+    if (kind === 'uv') return uvIndexColorRgb(value);
+    if (kind === 'rh') return rhColorRgb(value / 100);
+    return precip3hColorRgb(value);
+  },
   getMineralOpacity: () => earthParams.mineralOpacity,
   requestSnapshot: captureHoverSnapshot,
 });

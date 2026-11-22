@@ -41,6 +41,7 @@ export interface HoverInspectConfig {
   getLocalTemps?: (unitVec: [number, number, number]) => LocalTempsSample | null;
   getLocalUv?: (unitVec: [number, number, number]) => LocalUvSample | null;
   getLocalHydro?: (unitVec: [number, number, number]) => LocalHydroSample | null;
+  getEnvColorRgb?: (kind: 'air' | 'sst' | 'uv' | 'rh' | 'precip', value: number) => [number, number, number];
   getMineralOpacity?: () => number;
   requestSnapshot: () => Promise<HoverSimSnapshot | null>;
 }
@@ -107,10 +108,16 @@ export interface TooltipSelectedElement {
   color: [number, number, number];
 }
 
+export interface TooltipEnvChip {
+  label: string;
+  dotRgb?: [number, number, number];
+}
+
 export interface TooltipContent {
   theme: TooltipTheme;
   badge: string;
   tempTag?: string;
+  envChips?: TooltipEnvChip[];
   title: string;
   body: string;
   meta?: string;
@@ -652,6 +659,19 @@ export function analyzeReactionAt(
       airTempPart && uvPartChem
         ? `${airTempPart} · ${uvPartChem}`
         : airTempPart || uvPartChem || undefined;
+    const airEnvChips: TooltipEnvChip[] = [];
+    if (localTChem && airTempPart) {
+      airEnvChips.push({
+        label: airTempPart,
+        dotRgb: cfg.getEnvColorRgb?.('air', localTChem.airC),
+      });
+    }
+    if (localUvChem && uvPartChem) {
+      airEnvChips.push({
+        label: uvPartChem,
+        dotRgb: cfg.getEnvColorRgb?.('uv', localUvChem.uviNow),
+      });
+    }
 
     const bioActive =
       cfg.isBioLinked() &&
@@ -744,6 +764,7 @@ export function analyzeReactionAt(
         theme,
         badge,
         tempTag: airTempChip,
+        envChips: airEnvChips,
         title: `${badge === 'HALOGEN TOXIN' ? 'Toxic' : 'Catalyzed'} ${radicalSuffix}`,
         body,
         meta,
@@ -808,6 +829,7 @@ export function analyzeReactionAt(
         theme: 'chem',
         badge,
         tempTag: airTempChip,
+        envChips: airEnvChips,
         title,
         body,
         meta: `Shell [${el0.outerElectrons}/${el0.outerCapacity}] · Valence load ${atomLoad.toFixed(2)}/${el0.valence} · Nearby pairs: ${directInteract.length}`,
@@ -837,6 +859,7 @@ export function analyzeReactionAt(
         theme: comp >= 0.5 ? 'ocean' : 'chem',
         badge: inert ? 'NOBLE GAS' : comp >= 1.5 ? 'CRYOSPHERE ICE' : comp >= 0.5 ? 'AQUEOUS / HYDROSPHERE' : 'ATMOSPHERIC GAS',
         tempTag: airTempChip,
+        envChips: airEnvChips,
         title: `${selectedElement.name} (${sym0}) Atom`,
         body: inert
           ? `Inert ${sym0} (${el0.subshellLabel}) drifting across upper and surface wind layers (${mediumLabel}); permanently abiotic.`
@@ -869,6 +892,33 @@ export function analyzeReactionAt(
     : '';
   const surfTempTag =
     [surfTempPart, uvPartSurf, hydroPartSurf].filter(Boolean).join(' · ') || undefined;
+  const surfEnvChips: TooltipEnvChip[] = [];
+  if (localTSurf && surfTempPart) {
+    const useSst = !overLand && localTSurf.sstC !== null;
+    const tC = useSst ? (localTSurf.sstC as number) : localTSurf.sfcAirC;
+    surfEnvChips.push({
+      label: surfTempPart,
+      dotRgb: cfg.getEnvColorRgb?.(useSst ? 'sst' : 'air', tC),
+    });
+  }
+  if (localUvSurf && uvPartSurf) {
+    surfEnvChips.push({
+      label: uvPartSurf,
+      dotRgb: cfg.getEnvColorRgb?.('uv', localUvSurf.uviNow),
+    });
+  }
+  if (localHydroSurf) {
+    surfEnvChips.push({
+      label: `RH ${localHydroSurf.rhPct}%`,
+      dotRgb: cfg.getEnvColorRgb?.('rh', localHydroSurf.rhPct),
+    });
+    if (localHydroSurf.precip3hMm >= 0.05) {
+      surfEnvChips.push({
+        label: `3HPS ${localHydroSurf.precip3hMm.toFixed(1)}mm`,
+        dotRgb: cfg.getEnvColorRgb?.('precip', localHydroSurf.precip3hMm),
+      });
+    }
+  }
 
   // Inorganic Crust-Pinned Mineral (`bestPhase === 3`): cluster matching crystal vein & inspect risk/reward
   if (bestPhase === 3) {
@@ -985,6 +1035,7 @@ export function analyzeReactionAt(
       theme,
       badge,
       tempTag: surfTempTag,
+      envChips: surfEnvChips,
       title,
       body: `${stabilityStr}. ${encounterStr}${bioMineNote}`,
       meta: `Crystal #${bestIdx} (${sym0}) · ${habitatLabel} · Integrity ${avgInteg}% · Wind ${windMs.toFixed(0)} m/s · Current ${curMs.toFixed(2)} m/s · Nutr ${Math.round(avgNutr * 100)}% / Haz ${Math.round(avgHaz * 100)}%`,
@@ -1088,6 +1139,7 @@ export function analyzeReactionAt(
       theme,
       badge,
       tempTag: surfTempTag,
+      envChips: surfEnvChips,
       title,
       body,
       meta: `Lipid #${bestIdx} (${sym0}) · Host #${bestBioSp} · ${habitatTag} · Encap ${strategyGeneStr} · Shell E=${(ls[0] ?? 0).toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
@@ -1181,6 +1233,7 @@ export function analyzeReactionAt(
       theme,
       badge,
       tempTag: surfTempTag,
+      envChips: surfEnvChips,
       title,
       body: `${statusDesc}${gradDetail}${landDetail}${mineralNote}`,
       meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
@@ -1751,9 +1804,23 @@ export class TooltipManager {
           `</div>`
         : '';
 
+      const envHtml =
+        info.envChips && info.envChips.length > 0
+          ? `<div class="tip-temp">${info.envChips
+              .map((chip) => {
+                const dot = chip.dotRgb
+                  ? `<span class="tip-env-dot" style="background:rgb(${Math.round(Math.max(0, Math.min(255, chip.dotRgb[0])))},${Math.round(Math.max(0, Math.min(255, chip.dotRgb[1])))},${Math.round(Math.max(0, Math.min(255, chip.dotRgb[2])))})"></span>`
+                  : '';
+                return `<span class="tip-env-chip">${dot}<span>${escapeHtml(chip.label)}</span></span>`;
+              })
+              .join('')}</div>`
+          : info.tempTag
+            ? `<span class="tip-temp">${escapeHtml(info.tempTag)}</span>`
+            : '';
+
       const html =
         `<div class="tip-head"><span class="tip-badge tip-badge-${info.theme}">${escapeHtml(info.badge)}</span>` +
-        (info.tempTag ? `<span class="tip-temp">${escapeHtml(info.tempTag)}</span>` : '') +
+        envHtml +
         `</div>` +
         `<div class="tip-title">${escapeHtml(info.title)}</div>` +
         elHtml +
