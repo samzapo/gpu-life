@@ -76,8 +76,8 @@ function buildStreamStyles(rgb: readonly [number, number, number]): string[] {
   const styles: string[] = [];
   for (let i = 0; i < INTENSITY_BUCKETS; i++) {
     const t = i / (INTENSITY_BUCKETS - 1);
-    const scale = (145 + 110 * t) / 255;
-    const alpha = (0.56 + 0.42 * t).toFixed(2);
+    const scale = (120 + 100 * t) / 255;
+    const alpha = (0.34 + 0.44 * t).toFixed(2);
     const r = Math.min(255, Math.round(rgb[0] * scale));
     const g = Math.min(255, Math.round(rgb[1] * scale));
     const b = Math.min(255, Math.round(rgb[2] * scale));
@@ -308,7 +308,7 @@ export class SynthSpectrogramOverlay {
 
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalCompositeOperation = 'source-over';
 
       for (let sIdx = 0; sIdx < SYNTH_EFFECT_SPECS.length; sIdx++) {
         const spec = SYNTH_EFFECT_SPECS[sIdx];
@@ -316,13 +316,12 @@ export class SynthSpectrogramOverlay {
         const bucketStyles = STREAM_BUCKET_STYLES[sIdx];
         for (let b = 0; b < INTENSITY_BUCKETS; b++) this.segPools[b].length = 0;
 
-        // Wind/water streamline style: intensity-bucketed thicker colored segments + subtle directional flow dashes
         let prevX = 0;
-        let prevAmp = Math.max(0, Math.min(1, curve[0] ?? 0));
+        let prevAmp = Math.max(0, Math.min(1, (curve[0] ?? 0) * 0.72));
         let prevY = yBase - prevAmp * ampSpan;
 
         for (let i = 1; i < SPECTROGRAM_BINS; i++) {
-          const amp = Math.max(0, Math.min(1, curve[i] ?? 0));
+          const amp = Math.max(0, Math.min(1, (curve[i] ?? 0) * 0.72));
           const x = (i / (SPECTROGRAM_BINS - 1)) * cssW;
           const y = yBase - amp * ampSpan;
 
@@ -331,7 +330,7 @@ export class SynthSpectrogramOverlay {
           const drawGap = snap.running && segAmp < 0.08 && dashPhase > 2.25;
 
           if (!drawGap) {
-            const slopeBoost = Math.min(0.28, Math.abs(amp - prevAmp) * 1.6);
+            const slopeBoost = Math.min(0.24, Math.abs(amp - prevAmp) * 1.4);
             const energy = Math.min(1, segAmp * 0.92 + slopeBoost);
             const bIdx = Math.min(
               INTENSITY_BUCKETS - 1,
@@ -345,16 +344,16 @@ export class SynthSpectrogramOverlay {
           prevAmp = amp;
         }
 
-        // Render intensity buckets matching windLines.ts with thicker vibrant strokes and zero floating dots
+        // Render muted color-preserving segments without additive blowout
         ctx.lineWidth = spec.lineWidth;
         for (let b = 0; b < INTENSITY_BUCKETS; b++) {
           const segs = this.segPools[b];
           if (segs.length === 0) continue;
           ctx.beginPath();
           ctx.strokeStyle = bucketStyles[b];
-          if (b >= INTENSITY_BUCKETS - 3 && snap.running) {
+          if (b >= INTENSITY_BUCKETS - 2 && snap.running) {
             ctx.shadowColor = spec.glow;
-            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 11 + kickBoost * 6 : 6;
+            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 5 + kickBoost * 3 : 2.5;
           } else {
             ctx.shadowBlur = 0;
           }

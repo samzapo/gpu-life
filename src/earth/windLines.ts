@@ -82,21 +82,21 @@ function buildIntensityStyles(rgb: [number, number, number]): string[] {
 }
 
 function buildSynthIntensityStyles(isOcean: boolean): string[] {
-  // Gradient across intensity buckets: cool base into cyberpunk magenta/violet (wind) or cyan/mint (ocean)
+  // Muted atmospheric gradient: pale sea-aqua (ocean) and pearlescent lavender-mist (wind)
   const stops: readonly (readonly [number, number, number, number])[] = isOcean
     ? [
-        [75, 195, 255, 0.56],
-        [35, 225, 255, 0.72],
-        [0, 240, 255, 0.84],
-        [46, 255, 200, 0.92],
-        [185, 255, 238, 0.98],
+        [115, 200, 225, 0.38],
+        [135, 218, 236, 0.52],
+        [155, 232, 245, 0.64],
+        [168, 240, 235, 0.74],
+        [205, 248, 246, 0.82],
       ]
     : [
-        [155, 145, 255, 0.54],
-        [192, 132, 252, 0.70],
-        [235, 78, 195, 0.84],
-        [255, 42, 133, 0.92],
-        [255, 195, 232, 0.98],
+        [180, 178, 205, 0.36],
+        [198, 190, 222, 0.48],
+        [216, 198, 234, 0.60],
+        [232, 202, 234, 0.70],
+        [246, 225, 244, 0.78],
       ];
   return stops.map(([r, g, b, a]) => `rgba(${r}, ${g}, ${b}, ${a})`);
 }
@@ -720,17 +720,21 @@ export class WindStreamRenderer {
                 const nx = -dy * invLen;
                 const ny = dx * invLen;
                 const prevOff = this.prevWaveOff[i];
-                const waveFreq = 0.30 + 0.18 * (bIdx / (INTENSITY_BUCKETS - 1));
+                const waveFreq = 0.20 + 0.08 * (bIdx / (INTENSITY_BUCKETS - 1));
                 const speedFrac = Math.min(1, mag / Math.max(sampler.streamMax, 0.25));
-                const waveAmp =
-                  (0.85 + 2.5 * synthMod.bassEnergy + 2.2 * synthMod.kickPulse + 1.4 * synthMod.polyEnergy) *
-                  (0.35 + 0.65 * speedFrac);
+                // True surface distance amplitude in radians on unit sphere (~0.5 km to ~2.4 km) * view scale
+                const surfaceAmpRad =
+                  0.00008 +
+                  0.00016 * synthMod.bassEnergy +
+                  0.00012 * synthMod.kickPulse +
+                  0.00008 * synthMod.polyEnergy;
+                const waveAmp = Math.min(20, surfaceAmpRad * scale) * (0.28 + 0.72 * speedFrac);
                 const nextOff = Math.sin(p.age * waveFreq + i * 1.37 + synthMod.phase) * waveAmp;
                 this.prevWaveOff[i] = nextOff;
 
                 const drawBucket = Math.min(
                   INTENSITY_BUCKETS - 1,
-                  bIdx + (synthMod.kickPulse > 0.45 && speedFrac > 0.45 ? 1 : 0),
+                  bIdx + (synthMod.kickPulse > 0.65 && speedFrac > 0.55 ? 1 : 0),
                 );
                 this.segPools[drawBucket].push(
                   scr0x + nx * prevOff,
@@ -829,7 +833,7 @@ export class WindStreamRenderer {
           : styles;
       ctx.lineWidth =
         useSynthFx && synthMod
-          ? sampler.lineWidth + 0.45 * synthMod.bassEnergy + 0.65 * synthMod.kickPulse
+          ? sampler.lineWidth + 0.10 * synthMod.bassEnergy + 0.14 * synthMod.kickPulse
           : sampler.lineWidth;
       ctx.lineCap = 'round';
       for (let i = 0; i < INTENSITY_BUCKETS; i++) {
@@ -837,9 +841,9 @@ export class WindStreamRenderer {
         if (segs.length === 0) continue;
         ctx.beginPath();
         ctx.strokeStyle = activeStyles[i];
-        if (useSynthFx && synthMod && i >= INTENSITY_BUCKETS - 2) {
-          ctx.shadowColor = synthMod.isOcean ? 'rgba(0, 240, 255, 0.92)' : 'rgba(255, 42, 133, 0.92)';
-          ctx.shadowBlur = i === INTENSITY_BUCKETS - 1 ? 6 + synthMod.kickPulse * 7 : 3;
+        if (useSynthFx && synthMod && i === INTENSITY_BUCKETS - 1) {
+          ctx.shadowColor = synthMod.isOcean ? 'rgba(135, 225, 240, 0.42)' : 'rgba(225, 195, 232, 0.40)';
+          ctx.shadowBlur = 2.5 + synthMod.kickPulse * 2.0;
         } else {
           ctx.shadowBlur = 0;
         }

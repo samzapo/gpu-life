@@ -58,7 +58,7 @@ class StreamlineSynthProcessor extends AudioWorkletProcessor {
     const len = outL.length;
     const invSr = 1 / Math.max(8000, sampleRate);
     const TAU = Math.PI * 2;
-    const sat = 1.0 + this.drive * 1.8;
+    const sat = 1.0 + this.drive * 0.65;
 
     for (let n = 0; n < len; n++) {
       this.masterAmp += (this.targetMasterAmp - this.masterAmp) * 0.004;
@@ -94,7 +94,7 @@ class StreamlineSynthProcessor extends AudioWorkletProcessor {
         sumR += sig * rGain;
       }
 
-      const norm = 0.085 * this.masterAmp;
+      const norm = 0.042 * this.masterAmp;
       const sampleL = sumL * norm;
       const sampleR = sumR * norm;
       if (outR === outL) {

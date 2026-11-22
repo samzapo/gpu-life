@@ -241,12 +241,12 @@ export class GlobeCyberSynth {
           outputChannelCount: [2],
         });
         const workletGain = ctx.createGain();
-        workletGain.gain.value = 0.72;
+        workletGain.gain.value = 0.28;
         node.connect(workletGain);
         if (this.polyBus) workletGain.connect(this.polyBus);
         if (this.chorusMix) {
           const cSend = ctx.createGain();
-          cSend.gain.value = 0.35;
+          cSend.gain.value = 0.18;
           workletGain.connect(cSend);
           cSend.connect(this.chorusMix);
         }
