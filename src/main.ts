@@ -36,6 +36,8 @@ import projectionShader from './shaders/projection.wgsl?raw';
 import bgRenderShader from './shaders/bgRender.wgsl?raw';
 import lensTrackShader from './shaders/lensTrack.wgsl?raw';
 import lensOverlayShader from './shaders/lensOverlay.wgsl?raw';
+import slimeFieldShader from './shaders/slimeField.wgsl?raw';
+import slimeCompositeShader from './shaders/slimeComposite.wgsl?raw';
 import renderShader from './render.wgsl?raw';
 import {
   buildConfiguredD3Projection,
@@ -376,6 +378,15 @@ let bioUniformBuffer: GPUBuffer | undefined;
 let bgRenderPipeline: GPURenderPipeline | undefined;
 let mineralRenderPipeline: GPURenderPipeline | undefined;
 let renderPipeline: GPURenderPipeline | undefined;
+let slimeNodePipeline: GPURenderPipeline | undefined;
+let slimeBridgePipeline: GPURenderPipeline | undefined;
+let slimeCompositePipeline: GPURenderPipeline | undefined;
+let slimeFieldBindGroupLayout: GPUBindGroupLayout | undefined;
+let slimeFieldSampler: GPUSampler | undefined;
+let slimeFieldTexture: GPUTexture | undefined;
+let membraneFieldTexture: GPUTexture | undefined;
+let slimeFieldBindGroup: GPUBindGroup | undefined;
+let slimeCompositeBindGroup: GPUBindGroup | undefined;
 
 let worldRulesBuffer: GPUBuffer | undefined;
 let worldColoursBuffer: GPUBuffer | undefined;
@@ -3564,6 +3575,87 @@ document.addEventListener('visibilitychange', () => {
     primitive: { topology: 'triangle-strip' },
   });
 
+  slimeFieldBindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    ],
+  });
+  const slimeFieldPipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [slimeFieldBindGroupLayout],
+  });
+  const slimeFieldModule = device.createShaderModule({
+    code: `${structsShader}\n${projectionShader}\n${slimeFieldShader}`,
+  });
+  const slimeFieldTargets: GPUColorTargetState[] = [
+    {
+      format: 'rgba16float',
+      blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+      },
+    },
+    {
+      format: 'rgba16float',
+      blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+      },
+    },
+  ];
+  slimeNodePipeline = device.createRenderPipeline({
+    layout: slimeFieldPipelineLayout,
+    vertex: {
+      module: slimeFieldModule,
+      entryPoint: 'vertexNode',
+      buffers: particleVertexBuffers,
+    },
+    fragment: {
+      module: slimeFieldModule,
+      entryPoint: 'fragment',
+      targets: slimeFieldTargets,
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+  slimeBridgePipeline = device.createRenderPipeline({
+    layout: slimeFieldPipelineLayout,
+    vertex: {
+      module: slimeFieldModule,
+      entryPoint: 'vertexBridge',
+      buffers: particleVertexBuffers,
+    },
+    fragment: {
+      module: slimeFieldModule,
+      entryPoint: 'fragment',
+      targets: slimeFieldTargets,
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  const slimeCompositeModule = device.createShaderModule({
+    code: `${structsShader}\n${slimeCompositeShader}`,
+  });
+  slimeCompositePipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: slimeCompositeModule,
+      entryPoint: 'vertex',
+    },
+    fragment: {
+      module: slimeCompositeModule,
+      entryPoint: 'fragment',
+      targets: renderTargets,
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+  slimeFieldSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'clamp-to-edge',
+    addressModeV: 'clamp-to-edge',
+  });
+
   lensTrackUniformBuffer = device.createBuffer({
     size: 48,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -3880,10 +3972,87 @@ function render(commandEncoder: GPUCommandEncoder) {
     );
   }
 
+  const canvasTargetTex = context.getCurrentTexture();
+  const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
+  const showLife = earthParams.viewLayer !== 'air' && earthParams.lifeOpacity > 0.001;
+  const showMinerals = earthParams.mineralOpacity > 0.001;
+  const canRenderSlime =
+    showLife &&
+    !!slimeNodePipeline &&
+    !!slimeBridgePipeline &&
+    !!slimeCompositePipeline &&
+    !!slimeFieldBindGroup &&
+    !!slimeFieldSampler &&
+    !!particleBuffers &&
+    !!valenceBuffer &&
+    !!lifeStateBuffers;
+
+  if (canRenderSlime) {
+    const fieldW = Math.max(1, Math.floor(canvasTargetTex.width * 0.5));
+    const fieldH = Math.max(1, Math.floor(canvasTargetTex.height * 0.5));
+    if (
+      !slimeFieldTexture ||
+      !membraneFieldTexture ||
+      slimeFieldTexture.width !== fieldW ||
+      slimeFieldTexture.height !== fieldH ||
+      !slimeCompositeBindGroup
+    ) {
+      slimeFieldTexture?.destroy();
+      membraneFieldTexture?.destroy();
+      slimeFieldTexture = device.createTexture({
+        size: { width: fieldW, height: fieldH },
+        format: 'rgba16float',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        label: 'slimeFieldTexture',
+      });
+      membraneFieldTexture = device.createTexture({
+        size: { width: fieldW, height: fieldH },
+        format: 'rgba16float',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        label: 'membraneFieldTexture',
+      });
+      slimeCompositeBindGroup = device.createBindGroup({
+        layout: slimeCompositePipeline!.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer! } },
+          { binding: 1, resource: slimeFieldTexture.createView() },
+          { binding: 2, resource: membraneFieldTexture.createView() },
+          { binding: 3, resource: slimeFieldSampler! },
+        ],
+      });
+    }
+
+    const slimePass = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: slimeFieldTexture.createView(),
+          clearValue: [0, 0, 0, 0],
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+        {
+          view: membraneFieldTexture.createView(),
+          clearValue: [0, 0, 0, 0],
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    });
+    slimePass.setBindGroup(0, slimeFieldBindGroup!);
+    slimePass.setVertexBuffer(0, particleBuffers![alternate]);
+    slimePass.setVertexBuffer(1, valenceBuffer!);
+    slimePass.setVertexBuffer(2, lifeStateBuffers![alternate]);
+    slimePass.setPipeline(slimeNodePipeline!);
+    slimePass.draw(6, particleAmt, 0, 0);
+    slimePass.setPipeline(slimeBridgePipeline!);
+    slimePass.draw(12, particleAmt, 0, 0);
+    slimePass.end();
+  }
+
   const renderPassDescriptor: GPURenderPassDescriptor = {
     colorAttachments: [
       {
-        view: context.getCurrentTexture().createView(),
+        view: canvasTargetTex.createView(),
         clearValue: [0, 0, 0, 0],
         loadOp: 'clear',
         storeOp: 'store',
@@ -3896,9 +4065,6 @@ function render(commandEncoder: GPUCommandEncoder) {
     profileRender ? linkRenderTimestamp(device, renderPassDescriptor, 'render') : renderPassDescriptor,
   );
 
-  const showChem = earthParams.viewLayer !== 'ocean' && earthParams.chemOpacity > 0.001;
-  const showLife = earthParams.viewLayer !== 'air' && earthParams.lifeOpacity > 0.001;
-  const showMinerals = earthParams.mineralOpacity > 0.001;
   if (particleBuffers && valenceBuffer && lifeStateBuffers) {
     if (showMinerals && mineralRenderPipeline && mineralRenderBindGroup) {
       passEncoder.setPipeline(mineralRenderPipeline);
@@ -3907,6 +4073,11 @@ function render(commandEncoder: GPUCommandEncoder) {
       passEncoder.setVertexBuffer(2, lifeStateBuffers[alternate]);
       passEncoder.setBindGroup(0, mineralRenderBindGroup);
       passEncoder.draw(6, particleAmt, 0, 0);
+    }
+    if (canRenderSlime && slimeCompositePipeline && slimeCompositeBindGroup) {
+      passEncoder.setPipeline(slimeCompositePipeline);
+      passEncoder.setBindGroup(0, slimeCompositeBindGroup);
+      passEncoder.draw(3, 1, 0, 0);
     }
     if ((showChem || showLife) && renderPipeline && renderBindGroup) {
       passEncoder.setPipeline(renderPipeline);
@@ -4565,6 +4736,16 @@ function startWorld() {
       { binding: 4, resource: uvTexture.createView() },
     ],
   });
+  slimeFieldBindGroup = slimeFieldBindGroupLayout
+    ? device.createBindGroup({
+        layout: slimeFieldBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: watermanFwdTexture.createView() },
+          { binding: 2, resource: { buffer: worldColoursBuffer } },
+        ],
+      })
+    : undefined;
   syncEpisodeTracking();
   rebuildLensTrackBindGroups();
 }

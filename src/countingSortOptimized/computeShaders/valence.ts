@@ -36,18 +36,56 @@ fn getCellValence(
     }
 }
 
+fn getCellBioLink(
+    pi: u32,
+    cell: u32,
+    acc: ptr<function, BioLinkAccum>,
+) {
+    let startIdx = prefixSumIndices[cell];
+    let endIdx = prefixSumIndices[cell + 1u];
+    for (var i = startIdx; i < endIdx; i++) {
+        let ip = sorted[i];
+        if (ip.idx == pi || ip.phase != (*acc).myPhase) {
+            continue;
+        }
+        accumulateBioLinkNeighbor(ip.pos, ip.phase, lifeState[ip.idx], acc);
+    }
+}
+
 @compute @workgroup_size(${workgroupSize})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pi = global_id.x;
     if (pi >= arrayLength(&valenceOut)) {
         return;
     }
-    if (unpackPhase(lifeState[pi].w) != 0u) {
+    let myLs = lifeState[pi];
+    let myPhase = unpackPhase(myLs.w);
+    let p = input[pi];
+    let numCells = u32(sim.cellAmt);
+    let worldP = p.pos * sim.worldSize;
+
+    if (myPhase == 1u || myPhase == 2u) {
+        var acc = initBioLinkAccum(p.pos, p.orient, myLs, sim.rMax, sim.cellSize, sim.worldSize);
+        let rSearch = acc.rSearchAng * max(sim.worldSize, 0.25);
+        let cmin = vec3i(floor((worldP - rSearch) / sim.cellSize));
+        let cmax = vec3i(floor((worldP + rSearch) / sim.cellSize));
+        for (var cx = cmin.x; cx <= cmax.x; cx++) {
+            for (var cy = cmin.y; cy <= cmax.y; cy++) {
+                for (var cz = cmin.z; cz <= cmax.z; cz++) {
+                    let c = hash3i(vec3i(cx, cy, cz)) % numCells;
+                    getCellBioLink(pi, c, &acc);
+                }
+            }
+        }
+        valenceOut[pi] = finalizeBioLink(acc);
+        return;
+    }
+
+    if (myPhase != 0u) {
         valenceOut[pi] = vec4f(0.0);
         return;
     }
 
-    let p = input[pi];
     let sP = getSpeciesInfo(u32(p.colour));
     if (u32(sP.valence) == 0u) {
         valenceOut[pi] = vec4f(0.0);
@@ -55,10 +93,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var slotAcc = vec4f(0.0);
-    let worldP = p.pos * sim.worldSize;
     let cmin = vec3i(floor((worldP - sim.rMax) / sim.cellSize));
     let cmax = vec3i(floor((worldP + sim.rMax) / sim.cellSize));
-    let numCells = u32(sim.cellAmt);
 
     for (var cx = cmin.x; cx <= cmax.x; cx++) {
         for (var cy = cmin.y; cy <= cmax.y; cy++) {

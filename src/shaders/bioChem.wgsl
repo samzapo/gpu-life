@@ -1997,3 +1997,226 @@ fn finalizeBioUnified(
         vec4f(st, outMetaW),
     );
 }
+
+struct BioLinkAccum {
+    n: vec3f,
+    eEast: vec3f,
+    eNorth: vec3f,
+    b2: vec2f,
+    myPhase: u32,
+    mySp: u32,
+    myKin: f32,
+    rSearchAng: f32,
+    c0Tang: vec2f,
+    c0Dir: vec2f,
+    c0Sin: f32,
+    c1Tang: vec2f,
+    c1Dir: vec2f,
+    c1Sin: f32,
+    c1Score: f32,
+    c2Tang: vec2f,
+    c2Sin: f32,
+    c2Score: f32,
+    oppTang: vec2f,
+    oppScore: f32,
+}
+
+fn initBioLinkAccum(
+    pos: vec3f,
+    orient: vec3f,
+    myLs: vec4f,
+    simRMax: f32,
+    cellSize: f32,
+    worldSize: f32,
+) -> BioLinkAccum {
+    let n = normalize(pos);
+    let eEast = sphereEastBasis(n);
+    let eNorth = normalize(cross(n, eEast));
+    let uI = orthoBasis(n, orient);
+    let bI = cross(n, uI);
+    let b2Raw = vec2f(dot(bI, eEast), dot(bI, eNorth));
+    let b2 = select(vec2f(1.0, 0.0), normalize(b2Raw), dot(b2Raw, b2Raw) > 1e-8);
+    let R = max(worldSize, 0.25);
+    let phaseMul = select(0.54, 0.78, unpackPhase(myLs.w) == 2u);
+    let rSearch = min(max(cellSize * phaseMul, simRMax), 0.26 * R);
+    var acc: BioLinkAccum;
+    acc.n = n;
+    acc.eEast = eEast;
+    acc.eNorth = eNorth;
+    acc.b2 = b2;
+    acc.myPhase = unpackPhase(myLs.w);
+    acc.mySp = unpackBioSpecies(myLs.w);
+    acc.myKin = unpackKinPhase(myLs.w);
+    acc.rSearchAng = rSearch / R;
+    acc.c0Tang = vec2f(0.0);
+    acc.c0Dir = vec2f(0.0);
+    acc.c0Sin = 99.0;
+    acc.c1Tang = vec2f(0.0);
+    acc.c1Dir = vec2f(0.0);
+    acc.c1Sin = 99.0;
+    acc.c1Score = 99.0;
+    acc.c2Tang = vec2f(0.0);
+    acc.c2Sin = 99.0;
+    acc.c2Score = 99.0;
+    acc.oppTang = vec2f(0.0);
+    acc.oppScore = 99.0;
+    return acc;
+}
+
+fn insertSlimeSpanCandidate(
+    acc: ptr<function, BioLinkAccum>,
+    tang: vec2f,
+    dir2: vec2f,
+    sinA: f32,
+) {
+    if (sinA >= (*acc).rSearchAng) {
+        return;
+    }
+    if ((*acc).c0Sin < 90.0 && dot(dir2, (*acc).c0Dir) < 0.45) {
+        let midCut = (*acc).rSearchAng * 0.22;
+        if (sinA < (*acc).c1Sin) {
+            (*acc).c1Sin = sinA;
+            (*acc).c1Tang = tang;
+            (*acc).c1Dir = dir2;
+            (*acc).c1Score = sinA;
+        }
+        if (sinA >= midCut && sinA < (*acc).c2Sin) {
+            (*acc).c2Sin = sinA;
+            (*acc).c2Tang = tang;
+            (*acc).c2Score = sinA;
+        }
+    } else if ((*acc).c0Sin >= 90.0 || sinA < (*acc).oppScore) {
+        if (dot(dir2, (*acc).c0Dir) < 0.15) {
+            (*acc).oppScore = sinA;
+            (*acc).oppTang = tang;
+        }
+    }
+}
+
+fn accumulateBioLinkNeighbor(
+    ipPos: vec3f,
+    nbPhase: u32,
+    nbLs: vec4f,
+    acc: ptr<function, BioLinkAccum>,
+) {
+    if (nbPhase != (*acc).myPhase) {
+        return;
+    }
+    let dVec = ipPos - (*acc).n;
+    let chord2 = dot(dVec, dVec);
+    let maxChord2 = (*acc).rSearchAng * (*acc).rSearchAng;
+    if (chord2 <= 1e-11 || chord2 >= maxChord2) {
+        return;
+    }
+
+    let nbKin = unpackKinPhase(nbLs.w);
+    let kinDist = kinAngularDist((*acc).myKin, nbKin);
+    if ((*acc).myPhase == 1u) {
+        let nbSp = unpackBioSpecies(nbLs.w);
+        let sinEst = sqrt(chord2);
+        let sameBlob = (kinDist < 0.26) || (nbSp == (*acc).mySp && sinEst < (*acc).rSearchAng * 0.42);
+        if (!sameBlob) {
+            return;
+        }
+    } else {
+        // Phase 2: cohesive lipid membrane partners belonging to the same host organism
+        if (kinDist >= 0.34) {
+            return;
+        }
+    }
+
+    let tang = vec2f(dot(ipPos, (*acc).eEast), dot(ipPos, (*acc).eNorth));
+    let sin2 = dot(tang, tang);
+    if (sin2 <= 1e-11) {
+        return;
+    }
+    let sinA = sqrt(sin2);
+    if (sinA >= (*acc).rSearchAng) {
+        return;
+    }
+    let dir2 = tang / sinA;
+
+    if ((*acc).myPhase == 2u) {
+        // Track closest clockwise (+b2) and counter-clockwise (-b2) perimeter lipids
+        let side = dot(dir2, (*acc).b2);
+        let tangBias = 1.38 - 0.38 * abs(side);
+        let score = sinA * tangBias;
+        if (side <= 0.0) {
+            if (score < (*acc).c1Score) {
+                // Keep displaced non-optimal neighbor as opposing backup
+                if ((*acc).c1Score < 90.0 && (*acc).c1Sin < (*acc).oppScore) {
+                    (*acc).oppScore = (*acc).c1Sin;
+                    (*acc).oppTang = (*acc).c1Tang;
+                }
+                (*acc).c1Score = score;
+                (*acc).c1Sin = sinA;
+                (*acc).c1Tang = tang;
+                (*acc).c1Dir = dir2;
+            } else if (sinA < (*acc).oppScore) {
+                (*acc).oppScore = sinA;
+                (*acc).oppTang = tang;
+            }
+        } else {
+            if (score < (*acc).c2Score) {
+                if ((*acc).c2Score < 90.0 && (*acc).c2Sin < (*acc).oppScore) {
+                    (*acc).oppScore = (*acc).c2Sin;
+                    (*acc).oppTang = (*acc).c2Tang;
+                }
+                (*acc).c2Score = score;
+                (*acc).c2Sin = sinA;
+                (*acc).c2Tang = tang;
+            } else if (sinA < (*acc).oppScore) {
+                (*acc).oppScore = sinA;
+                (*acc).oppTang = tang;
+            }
+        }
+        return;
+    }
+
+    // Phase 1: nearest cohesive neighbor + second directionally distinct / stretched goo bridge
+    if (sinA < (*acc).c0Sin) {
+        let prevTang = (*acc).c0Tang;
+        let prevDir = (*acc).c0Dir;
+        let prevSin = (*acc).c0Sin;
+        (*acc).c0Sin = sinA;
+        (*acc).c0Tang = tang;
+        (*acc).c0Dir = dir2;
+        if (prevSin < 90.0) {
+            insertSlimeSpanCandidate(acc, prevTang, prevDir, prevSin);
+        }
+    } else {
+        insertSlimeSpanCandidate(acc, tang, dir2, sinA);
+    }
+}
+
+fn finalizeBioLink(acc: BioLinkAccum) -> vec4f {
+    if (acc.myPhase == 2u) {
+        var left = select(vec2f(0.0), acc.c1Tang, acc.c1Score < 90.0);
+        var right = select(vec2f(0.0), acc.c2Tang, acc.c2Score < 90.0);
+        if (acc.c1Score >= 90.0 && acc.c2Score < 90.0 && acc.oppScore < 90.0) {
+            let oppDir = normalize(acc.oppTang);
+            let rightDir = normalize(acc.c2Tang);
+            if (dot(oppDir, rightDir) < -0.15) {
+                left = acc.oppTang;
+            }
+        } else if (acc.c2Score >= 90.0 && acc.c1Score < 90.0 && acc.oppScore < 90.0) {
+            let oppDir = normalize(acc.oppTang);
+            let leftDir = normalize(acc.c1Tang);
+            if (dot(oppDir, leftDir) < -0.15) {
+                right = acc.oppTang;
+            }
+        }
+        return vec4f(left, right);
+    }
+
+    let first = select(vec2f(0.0), acc.c0Tang, acc.c0Sin < 90.0);
+    var second = vec2f(0.0);
+    if (acc.c2Sin < 90.0) {
+        second = acc.c2Tang;
+    } else if (acc.c1Sin < 90.0) {
+        second = acc.c1Tang;
+    } else if (acc.oppScore < 90.0) {
+        second = acc.oppTang;
+    }
+    return vec4f(first, second);
+}

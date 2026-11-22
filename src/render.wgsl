@@ -455,66 +455,64 @@ fn fragment(
         let bioCol = vec3f(colours[bIdx * 3u], colours[bIdx * 3u + 1u], colours[bIdx * 3u + 2u]);
         let energy = clamp(lifeState.x, 0.0, 1.45);
         let poi = clamp(lifeState.z, 0.0, 1.0);
-        let energyTone = clamp(0.72 + 0.35 * energy, 0.55, 1.25);
+        let graduated = unpackGraduated(lifeState.w);
+        let energyTone = clamp(0.78 + 0.28 * energy, 0.60, 1.20);
 
-        let wave = 0.045 * sin(uv.x * 11.0);
-        let tailOffset = 0.14 + wave;
-        let dTail = min(abs(uv.y - tailOffset), abs(uv.y + tailOffset));
-        let tailMaskX = smoothstep(-0.92, -0.84, uv.x) * (1.0 - smoothstep(0.12, 0.22, uv.x));
-        let tailAlpha = (1.0 - smoothstep(0.085 - delta * 0.5, 0.085 + delta * 0.5, dTail)) * tailMaskX;
-        let tailCol = min(vec3f(0.96, 0.74, 0.30) * energyTone, vec3f(1.0));
-
-        let dHead = length(uv - vec2f(0.36, 0.0));
-        let headAlpha = 1.0 - smoothstep(0.36 - delta, 0.36 + delta * 0.6, dHead);
-        let specCore = (1.0 - smoothstep(0.0, 0.24, dHead)) * 0.25;
-        var headCol = mix(vec3f(0.76, 0.96, 1.0), bioCol, 0.22) * energyTone + vec3f(specCore);
-        if (poi > 0.20) {
-            let rim = smoothstep(0.18, 0.36, dHead) * clamp((poi - 0.20) * 1.15, 0.0, 0.85);
-            headCol = mix(headCol, vec3f(0.92, 0.28, 0.98), rim);
-        }
-        headCol = min(headCol, vec3f(1.0));
-
-        let premulTail = tailCol * tailAlpha;
-        let premulHead = headCol * headAlpha;
-        let premulLip = premulHead + premulTail * (1.0 - headAlpha);
-        let lipAlpha = headAlpha + tailAlpha * (1.0 - headAlpha);
+        // Simplified clean capsule/bead node resting along the closed lipid membrane envelope
+        let beadQ = vec2f(uv.x * 1.35, uv.y * 0.92);
+        let dBead = length(beadQ);
+        let beadR = select(0.46, 0.52, graduated == 1u);
+        let lipAlpha = (1.0 - smoothstep(beadR - delta, beadR + delta * 0.6, dBead)) * select(0.78, 0.90, graduated == 1u);
         if (lipAlpha <= 0.002) {
             discard;
         }
-        return vec4f(premulLip * layerOpacity, lipAlpha * layerOpacity);
+        let baseLip = mix(vec3f(0.72, 0.95, 1.0), vec3f(1.0, 0.90, 0.54), select(0.0, 0.55, graduated == 1u));
+        var lipCol = mix(baseLip, bioCol, 0.16) * energyTone;
+        let innerGlow = (1.0 - smoothstep(0.0, beadR * 0.55, dBead)) * 0.22;
+        lipCol += vec3f(innerGlow);
+        if (poi > 0.20) {
+            let rim = smoothstep(beadR * 0.45, beadR, dBead) * clamp((poi - 0.20) * 1.15, 0.0, 0.85);
+            lipCol = mix(lipCol, vec3f(0.92, 0.28, 0.98), rim);
+        }
+        lipCol = min(lipCol, vec3f(1.0));
+        return vec4f(lipCol * lipAlpha * layerOpacity, lipAlpha * layerOpacity);
     }
 
     if (isBio) {
         let bIdx = nChem + min(u32(max(bioSpeciesF, 0.0) + 0.5), nBio - 1u);
         let bioCol = vec3f(colours[bIdx * 3u], colours[bIdx * 3u + 1u], colours[bIdx * 3u + 2u]);
-        let alpha = 1.0 - smoothstep(1.0 - delta, 1.0, d);
         let energy = clamp(lifeState.x, 0.0, 1.55);
         let vit = clamp(lifeState.y, 0.0, 1.0);
         let poi = clamp(lifeState.z, 0.0, 1.0);
         let graduated = unpackGraduated(lifeState.w);
-        let vitalityBright = clamp(0.675 + 0.48 * energy + 0.14 * vit + select(0.0, 0.10, graduated == 1u), 0.45, 1.42);
+
+        // Internal organelle nucleus & bioluminescent tracer inside the merged slime hull
+        let nucR = select(0.42, 0.48, graduated == 1u);
+        if (d > nucR + delta) {
+            discard;
+        }
+        let coreAlpha = (1.0 - smoothstep(nucR * 0.35, nucR + delta * 0.6, d)) * 0.62;
+        let vitalityBright = clamp(0.76 + 0.44 * energy + 0.14 * vit + select(0.0, 0.10, graduated == 1u), 0.52, 1.38);
         var lifeCol = min(bioCol * vitalityBright, vec3f(1.0));
         if (graduated == 1u) {
-            let nucBand = smoothstep(0.38, 0.50, d) * (1.0 - smoothstep(0.50, 0.62, d));
-            lifeCol = mix(lifeCol, vec3f(0.98, 0.88, 0.48), nucBand * 0.42);
+            let nucBand = smoothstep(0.18, 0.28, d) * (1.0 - smoothstep(0.28, 0.40, d));
+            lifeCol = mix(lifeCol, vec3f(0.98, 0.90, 0.52), nucBand * 0.55);
         }
-        // Subtle inner tracer dot revealing the conserved chemical element carried inside this organism
-        if (d < 0.28 + delta) {
-            let coreMix = (1.0 - smoothstep(0.18, 0.28 + delta, d)) * 0.42;
+        if (d < 0.22 + delta) {
+            let coreMix = (1.0 - smoothstep(0.10, 0.22 + delta, d)) * 0.48;
             lifeCol = mix(lifeCol, chemCol, coreMix);
         }
         if (poi > 0.15) {
-            let rim = smoothstep(0.62, 0.92, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
+            let rim = smoothstep(0.24, nucR, d) * clamp((poi - 0.15) * 1.15, 0.0, 0.85);
             lifeCol = mix(lifeCol, vec3f(0.88, 0.25, 0.96), rim);
         }
         if (vit > 0.25 || graduated == 1u || nightFactor > 0.15) {
-            let bioLum = nightFactor * 0.38 * clamp(energy, 0.3, 1.2);
-            let glowStrength = max(max(clamp((vit - 0.25) * 0.6, 0.0, 0.45), select(0.0, 0.34, graduated == 1u)), bioLum);
-            let glowRim = smoothstep(0.68, 0.95, d) * glowStrength;
-            let glowCol = mix(vec3f(0.32, 0.98, 0.78), vec3f(1.0, 0.86, 0.42), select(0.0, 0.65, graduated == 1u));
-            lifeCol = mix(lifeCol, glowCol, glowRim);
+            let bioLum = nightFactor * 0.42 * clamp(energy, 0.3, 1.2);
+            let glowStrength = max(max(clamp((vit - 0.25) * 0.6, 0.0, 0.45), select(0.0, 0.36, graduated == 1u)), bioLum);
+            let glowCol = mix(vec3f(0.32, 0.98, 0.78), vec3f(1.0, 0.88, 0.46), select(0.0, 0.65, graduated == 1u));
+            lifeCol = mix(lifeCol, glowCol, glowStrength * 0.55);
         }
-        let lifeA = alpha * layerOpacity;
+        let lifeA = coreAlpha * layerOpacity;
         return vec4f(lifeCol * lifeA, lifeA);
     }
 
