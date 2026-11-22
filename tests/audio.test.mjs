@@ -152,8 +152,13 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
   const targetValues = [];
   let ctxState = 'running';
 
+  let suspendCalls = 0;
+  let resumeCalls = 0;
+  const ctxOpts = [];
+
   class FakeAudioContext {
-    constructor() {
+    constructor(opts) {
+      ctxOpts.push(opts);
       this.currentTime = 1.0;
       this.sampleRate = 48000;
       this.destination = { connect() {} };
@@ -162,7 +167,13 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
       return ctxState;
     }
     addEventListener() {}
+    suspend() {
+      suspendCalls++;
+      ctxState = 'suspended';
+      return Promise.resolve();
+    }
     resume() {
+      resumeCalls++;
       ctxState = 'running';
       return Promise.resolve();
     }
@@ -238,7 +249,21 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
   }
 
   const prevWindow = globalThis.window;
-  globalThis.window = { AudioContext: FakeAudioContext };
+  const prevDocument = globalThis.document;
+  let fakeHidden = false;
+  globalThis.window = {
+    AudioContext: FakeAudioContext,
+    setTimeout: (fn) => {
+      fn();
+      return 1;
+    },
+    clearTimeout: () => {},
+  };
+  globalThis.document = {
+    get hidden() {
+      return fakeHidden;
+    },
+  };
   try {
     const synth = new GlobeCyberSynth();
     synth.setVolume(0.8);
@@ -246,6 +271,20 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
     assert.equal(synth.isRunning(), false);
 
     await synth.unlock();
+    assert.equal(ctxOpts[0]?.latencyHint, 'playback');
+    assert.equal(synth.isRunning(), true);
+    assert.ok(Math.abs(targetValues.at(-1) - 0.8 * 0.85) < 1e-6);
+
+    // Background tab hide -> suspends clean audio sink; return -> cycles & restores running state cleanly
+    fakeHidden = true;
+    synth.handleVisibilityChange(true);
+    assert.equal(suspendCalls, 1);
+    assert.equal(ctxState, 'suspended');
+
+    fakeHidden = false;
+    synth.handleVisibilityChange(false);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(resumeCalls >= 1);
     assert.equal(synth.isRunning(), true);
     assert.ok(Math.abs(targetValues.at(-1) - 0.8 * 0.85) < 1e-6);
 
@@ -281,6 +320,7 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
     assert.equal(snap.streamlineEnergy, 0);
   } finally {
     globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
   }
 });
 

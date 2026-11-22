@@ -2853,7 +2853,18 @@ function observeGlobeAudioCenter(nowMs: number) {
 document.addEventListener('visibilitychange', () => {
   camera.pauseClock();
   tour.pauseClock();
-  if (!document.hidden) cyberSynth.resetClock();
+  cyberSynth.handleVisibilityChange(document.hidden);
+});
+window.addEventListener('pagehide', () => {
+  camera.pauseClock();
+  tour.pauseClock();
+  cyberSynth.handleVisibilityChange(true);
+});
+window.addEventListener('pageshow', () => {
+  if (!document.hidden) cyberSynth.handleVisibilityChange(false);
+});
+window.addEventListener('focus', () => {
+  if (!document.hidden) cyberSynth.handleVisibilityChange(false);
 });
 
 const tooltipManager = new TooltipManager({

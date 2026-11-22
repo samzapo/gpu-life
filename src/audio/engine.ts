@@ -189,6 +189,9 @@ export class GlobeCyberSynth {
   private volume = 0.65;
   private unlocked = false;
   private armedOnGesture = false;
+  private bgSuspendTimer: number | null = null;
+  private wasHidden = false;
+  private resumeInFlight = false;
 
   private curBassCutoffHz = 900;
   private curChorusWidth = 0.42;
@@ -370,7 +373,7 @@ export class GlobeCyberSynth {
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctor) return;
     if (!this.ctx) {
-      const ctx = new Ctor({ latencyHint: 'interactive' });
+      const ctx = new Ctor({ latencyHint: 'playback' });
       this.ctx = ctx;
       this.buildGraph(ctx);
       this.drumBank = buildCyberDrumBank(ctx);
@@ -378,11 +381,9 @@ export class GlobeCyberSynth {
       this.originTime = ctx.currentTime;
       this.frameCursor = 0;
       ctx.addEventListener('statechange', () => {
-        if (this.ctx === ctx && ctx.state === 'running') {
+        if (this.ctx === ctx && ctx.state === 'running' && !this.wasHidden) {
           this.unlocked = true;
-          this.originTime = ctx.currentTime;
-          this.frameCursor = 0;
-          this.syncMasterGain();
+          this.resetClockSoft();
         }
       });
     }
@@ -536,11 +537,113 @@ export class GlobeCyberSynth {
 
   resetClock(): void {
     if (!this.ctx) return;
-    this.originTime = this.ctx.currentTime;
+    this.resetClockSoft();
+  }
+
+  private resetClockSoft(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    this.originTime = now;
     this.frameCursor = 0;
+    this.lastScheduleMs = -1000;
+
+    if (this.duckGain) {
+      this.duckGain.gain.cancelScheduledValues(now);
+      this.duckGain.gain.setValueAtTime(1.0, now);
+    }
+    if (this.delayFeedback) {
+      this.delayFeedback.gain.cancelScheduledValues(now);
+      this.delayFeedback.gain.setValueAtTime(0, now);
+      this.delayFeedback.gain.setTargetAtTime(this.curDelayFeedback, now + 0.08, 0.08);
+    }
+    if (this.streamWorkletNode) {
+      this.streamWorkletNode.port.postMessage({
+        resetState: true,
+        masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
+      });
+    }
+    if (this.masterGain) {
+      const target = this.enabled && this.unlocked && ctx.state === 'running' ? this.volume * 0.85 : 0;
+      this.masterGain.gain.cancelScheduledValues(now);
+      this.masterGain.gain.setValueAtTime(0, now);
+      if (target > 0.0001) {
+        this.masterGain.gain.setTargetAtTime(target, now + 0.025, 0.045);
+      }
+    }
+  }
+
+  handleVisibilityChange(hidden: boolean): void {
+    const ctx = this.ctx;
+    if (this.bgSuspendTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.bgSuspendTimer);
+      this.bgSuspendTimer = null;
+    }
+
+    if (hidden) {
+      this.wasHidden = true;
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      if (this.masterGain) {
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setTargetAtTime(0, now, 0.015);
+      }
+      if (this.streamWorkletNode) {
+        this.streamWorkletNode.port.postMessage({ masterAmp: 0 });
+      }
+      if (this.delayFeedback) {
+        this.delayFeedback.gain.cancelScheduledValues(now);
+        this.delayFeedback.gain.setTargetAtTime(0, now, 0.02);
+      }
+      if (typeof window !== 'undefined') {
+        this.bgSuspendTimer = window.setTimeout(() => {
+          this.bgSuspendTimer = null;
+          if (this.ctx === ctx && typeof document !== 'undefined' && document.hidden && ctx.state === 'running') {
+            void ctx.suspend().catch(() => {
+              /* ignore suspend errors */
+            });
+          }
+        }, 45);
+      }
+      return;
+    }
+
+    const returning = this.wasHidden;
+    this.wasHidden = false;
+    if (!ctx || !this.enabled || !this.unlocked || this.resumeInFlight) return;
+    if (!returning && ctx.state === 'running') return;
+
+    this.resumeInFlight = true;
+    void (async () => {
+      try {
+        // Cycle suspend -> resume when returning from background so Android/Chrome reallocates
+        // a clean hardware audio stream instead of keeping a throttled/glitchy ringbuffer.
+        if (ctx.state === 'running') {
+          try {
+            await ctx.suspend();
+          } catch {
+            /* ignore */
+          }
+        }
+        if ((ctx.state as string) !== 'running') {
+          try {
+            await ctx.resume();
+          } catch {
+            /* ignore until user gesture if policy blocks */
+          }
+        }
+        if (this.ctx === ctx && ctx.state === 'running' && (typeof document === 'undefined' || !document.hidden)) {
+          this.unlocked = true;
+          this.resetClockSoft();
+        }
+      } finally {
+        this.resumeInFlight = false;
+      }
+    })();
   }
 
   tick(nowMs: number): number {
+    if (typeof document !== 'undefined' && document.hidden) return 0;
     if (!this.enabled || !this.unlocked || !this.ctx || this.ctx.state !== 'running') {
       if (this.armedOnGesture && this.enabled && this.ctx?.state === 'running') {
         this.unlocked = true;
@@ -554,7 +657,13 @@ export class GlobeCyberSynth {
     if (nowMs - this.lastScheduleMs >= 45) {
       this.lastScheduleMs = nowMs;
       const now = this.ctx.currentTime;
-      const nowFrame = Math.max(0, Math.floor((now - this.originTime) * SYNTH_RATE));
+      let nowFrame = Math.max(0, Math.floor((now - this.originTime) * SYNTH_RATE));
+      if (nowFrame - this.frameCursor > SYNTH_RATE * 0.6) {
+        // Recover cleanly from timer stall/throttle without bursting stacked notes
+        this.originTime = now;
+        this.frameCursor = 0;
+        nowFrame = 0;
+      }
       if (this.frameCursor < nowFrame) {
         this.frameCursor = nowFrame;
       }

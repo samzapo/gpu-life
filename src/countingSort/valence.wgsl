@@ -48,7 +48,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let numCells = u32(sim.cellAmt);
 
     if (myPhase == 1u || myPhase == 2u) {
-        var acc = initBioLinkAccum(p.pos, p.orient, myLs, sim.rMax, sim.cellSize, sim.worldSize);
+        let prevVal = valenceOut[pi];
+        var acc = initBioLinkAccum(p.pos, p.orient, myLs, prevVal, sim.rMax, sim.cellSize, sim.worldSize);
         let rSearch = acc.rSearchAng * max(sim.worldSize, 0.25);
         let cmin = vec3i(floor((worldP - rSearch) / sim.cellSize));
         let cmax = vec3i(floor((worldP + rSearch) / sim.cellSize));

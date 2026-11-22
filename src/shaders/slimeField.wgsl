@@ -17,6 +17,7 @@ struct FieldVertexOut {
     @location(1) bioInfo: vec4f, // x: bioSpeciesF, y: energy, z: vit, w: poi
     @location(2) params: vec4f,  // x: phaseF, y: limbFade, z: gradF, w: gapRatioOrZero
     @location(3) bridgeMode: f32,
+    @location(4) linkFade: f32,
 }
 
 struct FieldFragOut {
@@ -31,6 +32,7 @@ fn deadFieldVert() -> FieldVertexOut {
     out.bioInfo = vec4f(0.0);
     out.params = vec4f(0.0);
     out.bridgeMode = 0.0;
+    out.linkFade = 0.0;
     return out;
 }
 
@@ -181,6 +183,7 @@ fn vertexNode(
     out.bioInfo = vec4f(f32(bioSp), energy, vit, poi);
     out.params = vec4f(f32(phase), limbFade, gradF, 0.0);
     out.bridgeMode = 0.0;
+    out.linkFade = 1.0;
     return out;
 }
 
@@ -196,9 +199,22 @@ fn vertexBridge(
 
     let slotIdx = vertexIndex / 6u;
     let cornerIdx = vertexIndex % 6u;
-    let link2D = select(particle.slots.xy, particle.slots.zw, slotIdx == 1u);
+    let rawSlot = select(particle.slots.xy, particle.slots.zw, slotIdx == 1u);
+    if (rawSlot.x < 1024.25) {
+        return deadFieldVert();
+    }
+    let slotMeta = u32(max(floor(rawSlot.x), 0.0));
+    if ((slotMeta & 1024u) == 0u) {
+        return deadFieldVert();
+    }
+    let fadeU = slotMeta & 15u;
+    if (fadeU == 0u) {
+        return deadFieldVert();
+    }
+    let linkFade = smoothstep(0.0, 1.0, f32(fadeU) / 8.0);
+    let link2D = vec2f(rawSlot.x - f32(slotMeta) - 0.5, rawSlot.y);
     let sin2 = dot(link2D, link2D);
-    if (sin2 <= 1e-11 || sin2 >= 0.96) {
+    if (sin2 <= 1e-11 || sin2 >= 0.025) {
         return deadFieldVert();
     }
 
@@ -305,6 +321,7 @@ fn vertexBridge(
     let pxWaistFloor = clamp(2.2 / max(rNodePx, 1.0), 0.0, 0.85);
     out.params = vec4f(f32(phase), limbFade, gradF, select(poi, gapRatio, phase == 1u));
     out.bridgeMode = 1.0 + pxWaistFloor;
+    out.linkFade = linkFade;
     return out;
 }
 
@@ -323,6 +340,7 @@ fn fragment(in: FieldVertexOut) -> FieldFragOut {
     let poi = clamp(in.bioInfo.w, 0.0, 1.0);
     let isBridge = in.bridgeMode > 0.5;
     let pxWaistFloor = max(in.bridgeMode - 1.0, 0.0);
+    let fadeScale = in.linkFade;
 
     if (!isLipid) {
         var w = 0.0;
@@ -349,7 +367,7 @@ fn fragment(in: FieldVertexOut) -> FieldFragOut {
             }
             let q = 1.0 - u * u;
             let bridgeAmp = mix(0.76, 0.72, farT);
-            w = q * q * bridgeAmp * limbFade;
+            w = q * q * bridgeAmp * limbFade * fadeScale;
         }
         let col = bioColorForParticle(bioSp, in.bioInfo.y, vit, poi, gradF);
         out.slime = vec4f(col * w, w);
@@ -372,7 +390,7 @@ fn fragment(in: FieldVertexOut) -> FieldFragOut {
         }
         let q = 1.0 - u * u;
         let gradBoost = mix(0.62, 0.78, gradF);
-        wm = q * q * gradBoost * limbFade;
+        wm = q * q * gradBoost * limbFade * fadeScale;
     }
 
     let hasBothFlag = mix(0.28, 1.0, gradF);

@@ -2006,25 +2006,44 @@ struct BioLinkAccum {
     myPhase: u32,
     mySp: u32,
     myKin: f32,
+    rConnectAng: f32,
     rSearchAng: f32,
+
+    // Previous frame persisted slot state for hysteresis & anti-flicker rate limiting
+    hasPrev0: bool,
+    prevFade0: u32,
+    prevCooldown0: u32,
+    prevTang0: vec2f,
+    prevDir0: vec2f,
+    prevLen0: f32,
+
+    hasPrev1: bool,
+    prevFade1: u32,
+    prevCooldown1: u32,
+    prevTang1: vec2f,
+    prevDir1: vec2f,
+    prevLen1: f32,
+
+    // Tracked partner continuations (within hysteresis rDisconnect = rSearchAng)
+    trackTang0: vec2f,
+    trackScore0: f32,
+    trackTang1: vec2f,
+    trackScore1: f32,
+
+    // Fresh exclusive single-blob candidates (within strict rConnectAng)
     c0Tang: vec2f,
     c0Dir: vec2f,
-    c0Sin: f32,
+    c0Score: f32,
     c1Tang: vec2f,
     c1Dir: vec2f,
-    c1Sin: f32,
     c1Score: f32,
-    c2Tang: vec2f,
-    c2Sin: f32,
-    c2Score: f32,
-    oppTang: vec2f,
-    oppScore: f32,
 }
 
 fn initBioLinkAccum(
     pos: vec3f,
     orient: vec3f,
     myLs: vec4f,
+    prevVal: vec4f,
     simRMax: f32,
     cellSize: f32,
     worldSize: f32,
@@ -2037,58 +2056,83 @@ fn initBioLinkAccum(
     let b2Raw = vec2f(dot(bI, eEast), dot(bI, eNorth));
     let b2 = select(vec2f(1.0, 0.0), normalize(b2Raw), dot(b2Raw, b2Raw) > 1e-8);
     let R = max(worldSize, 0.25);
-    let phaseMul = select(0.54, 0.78, unpackPhase(myLs.w) == 2u);
-    let rSearch = min(max(cellSize * phaseMul, simRMax), 0.26 * R);
+    let phase = unpackPhase(myLs.w);
+    let capFrac = select(0.19, 0.28, phase == 2u);
+    let surfCap = select(0.030, 0.046, phase == 2u);
+    let rConnect = min(max(cellSize * capFrac, simRMax * 0.34), surfCap);
+    let rDisconnect = rConnect * 1.24;
+
     var acc: BioLinkAccum;
     acc.n = n;
     acc.eEast = eEast;
     acc.eNorth = eNorth;
     acc.b2 = b2;
-    acc.myPhase = unpackPhase(myLs.w);
+    acc.myPhase = phase;
     acc.mySp = unpackBioSpecies(myLs.w);
     acc.myKin = unpackKinPhase(myLs.w);
-    acc.rSearchAng = rSearch / R;
+    acc.rConnectAng = rConnect / R;
+    acc.rSearchAng = rDisconnect / R;
+
+    // Decode slot 0 persisted state from prevVal.xy (tag bit 1024 prevents stale phase-0 valence reuse)
+    let m0 = u32(max(floor(prevVal.x), 0.0));
+    let isBioSlot0 = (m0 & 1024u) != 0u && prevVal.x >= 1024.25;
+    acc.prevFade0 = select(0u, min(m0 & 15u, 8u), isBioSlot0);
+    acc.prevCooldown0 = select(0u, min((m0 >> 4u) & 31u, 18u), isBioSlot0);
+    let candTang0 = select(vec2f(0.0), vec2f(prevVal.x - f32(m0) - 0.5, prevVal.y), isBioSlot0 && acc.prevFade0 > 0u);
+    let candLen0 = length(candTang0);
+    let validPrev0 = isBioSlot0 && (acc.prevFade0 > 0u) && (candLen0 <= acc.rSearchAng * 1.15);
+    acc.hasPrev0 = validPrev0;
+    if (!validPrev0) {
+        acc.prevFade0 = 0u;
+    }
+    acc.prevTang0 = select(vec2f(0.0), candTang0, validPrev0);
+    acc.prevLen0 = select(0.0, candLen0, validPrev0);
+    acc.prevDir0 = select(vec2f(0.0), candTang0 / candLen0, validPrev0 && candLen0 > 1e-6);
+
+    // Decode slot 1 persisted state from prevVal.zw
+    let m1 = u32(max(floor(prevVal.z), 0.0));
+    let isBioSlot1 = (m1 & 1024u) != 0u && prevVal.z >= 1024.25;
+    acc.prevFade1 = select(0u, min(m1 & 15u, 8u), isBioSlot1);
+    acc.prevCooldown1 = select(0u, min((m1 >> 4u) & 31u, 18u), isBioSlot1);
+    let candTang1 = select(vec2f(0.0), vec2f(prevVal.z - f32(m1) - 0.5, prevVal.w), isBioSlot1 && acc.prevFade1 > 0u);
+    let candLen1 = length(candTang1);
+    let validPrev1 = isBioSlot1 && (acc.prevFade1 > 0u) && (candLen1 <= acc.rSearchAng * 1.15);
+    acc.hasPrev1 = validPrev1;
+    if (!validPrev1) {
+        acc.prevFade1 = 0u;
+    }
+    acc.prevTang1 = select(vec2f(0.0), candTang1, validPrev1);
+    acc.prevLen1 = select(0.0, candLen1, validPrev1);
+    acc.prevDir1 = select(vec2f(0.0), candTang1 / candLen1, validPrev1 && candLen1 > 1e-6);
+
+    acc.trackTang0 = vec2f(0.0);
+    acc.trackScore0 = 99.0;
+    acc.trackTang1 = vec2f(0.0);
+    acc.trackScore1 = 99.0;
+
     acc.c0Tang = vec2f(0.0);
     acc.c0Dir = vec2f(0.0);
-    acc.c0Sin = 99.0;
+    acc.c0Score = 99.0;
     acc.c1Tang = vec2f(0.0);
     acc.c1Dir = vec2f(0.0);
-    acc.c1Sin = 99.0;
     acc.c1Score = 99.0;
-    acc.c2Tang = vec2f(0.0);
-    acc.c2Sin = 99.0;
-    acc.c2Score = 99.0;
-    acc.oppTang = vec2f(0.0);
-    acc.oppScore = 99.0;
     return acc;
 }
 
-fn insertSlimeSpanCandidate(
+fn insertSlimeSecondCandidate(
     acc: ptr<function, BioLinkAccum>,
     tang: vec2f,
     dir2: vec2f,
     sinA: f32,
 ) {
-    if (sinA >= (*acc).rSearchAng) {
+    if (sinA >= (*acc).rConnectAng) {
         return;
     }
-    if ((*acc).c0Sin < 90.0 && dot(dir2, (*acc).c0Dir) < 0.45) {
-        let midCut = (*acc).rSearchAng * 0.22;
-        if (sinA < (*acc).c1Sin) {
-            (*acc).c1Sin = sinA;
+    if ((*acc).c0Score < 90.0 && dot(dir2, (*acc).c0Dir) < 0.40) {
+        if (sinA < (*acc).c1Score) {
+            (*acc).c1Score = sinA;
             (*acc).c1Tang = tang;
             (*acc).c1Dir = dir2;
-            (*acc).c1Score = sinA;
-        }
-        if (sinA >= midCut && sinA < (*acc).c2Sin) {
-            (*acc).c2Sin = sinA;
-            (*acc).c2Tang = tang;
-            (*acc).c2Score = sinA;
-        }
-    } else if ((*acc).c0Sin >= 90.0 || sinA < (*acc).oppScore) {
-        if (dot(dir2, (*acc).c0Dir) < 0.15) {
-            (*acc).oppScore = sinA;
-            (*acc).oppTang = tang;
         }
     }
 }
@@ -2109,20 +2153,12 @@ fn accumulateBioLinkNeighbor(
         return;
     }
 
+    // Strict exclusive single-entity coherence: only members with matching kinPhase connect
     let nbKin = unpackKinPhase(nbLs.w);
     let kinDist = kinAngularDist((*acc).myKin, nbKin);
-    if ((*acc).myPhase == 1u) {
-        let nbSp = unpackBioSpecies(nbLs.w);
-        let sinEst = sqrt(chord2);
-        let sameBlob = (kinDist < 0.26) || (nbSp == (*acc).mySp && sinEst < (*acc).rSearchAng * 0.42);
-        if (!sameBlob) {
-            return;
-        }
-    } else {
-        // Phase 2: cohesive lipid membrane partners belonging to the same host organism
-        if (kinDist >= 0.34) {
-            return;
-        }
+    let maxKin = select(0.085, 0.11, (*acc).myPhase == 2u);
+    if (kinDist >= maxKin) {
+        return;
     }
 
     let tang = vec2f(dot(ipPos, (*acc).eEast), dot(ipPos, (*acc).eNorth));
@@ -2136,87 +2172,151 @@ fn accumulateBioLinkNeighbor(
     }
     let dir2 = tang / sinA;
 
+    // Check partner continuation for existing hysteresis tracks (within rSearchAng = rDisconnect)
+    if ((*acc).hasPrev0 && (*acc).prevLen0 > 1e-6) {
+        let dirMatch0 = dot(dir2, (*acc).prevDir0);
+        let lenDiff0 = abs(sinA - (*acc).prevLen0);
+        if (dirMatch0 > 0.72 && lenDiff0 < (*acc).rConnectAng * 0.65) {
+            let tScore0 = lenDiff0 + (1.0 - dirMatch0) * (*acc).rConnectAng;
+            if (tScore0 < (*acc).trackScore0) {
+                (*acc).trackScore0 = tScore0;
+                (*acc).trackTang0 = tang;
+            }
+        }
+    }
+    if ((*acc).hasPrev1 && (*acc).prevLen1 > 1e-6) {
+        let dirMatch1 = dot(dir2, (*acc).prevDir1);
+        let lenDiff1 = abs(sinA - (*acc).prevLen1);
+        if (dirMatch1 > 0.72 && lenDiff1 < (*acc).rConnectAng * 0.65) {
+            let tScore1 = lenDiff1 + (1.0 - dirMatch1) * (*acc).rConnectAng;
+            if (tScore1 < (*acc).trackScore1) {
+                (*acc).trackScore1 = tScore1;
+                (*acc).trackTang1 = tang;
+            }
+        }
+    }
+
+    // Only initiate NEW links inside the stricter exclusive connect radius
+    if (sinA >= (*acc).rConnectAng) {
+        return;
+    }
+
     if ((*acc).myPhase == 2u) {
         // Track closest clockwise (+b2) and counter-clockwise (-b2) perimeter lipids
         let side = dot(dir2, (*acc).b2);
-        let tangBias = 1.38 - 0.38 * abs(side);
+        let absSide = abs(side);
+        if (absSide < 0.20 && sinA > (*acc).rConnectAng * 0.50) {
+            return;
+        }
+        let tangBias = 1.85 - 0.85 * absSide;
         let score = sinA * tangBias;
         if (side <= 0.0) {
-            if (score < (*acc).c1Score) {
-                // Keep displaced non-optimal neighbor as opposing backup
-                if ((*acc).c1Score < 90.0 && (*acc).c1Sin < (*acc).oppScore) {
-                    (*acc).oppScore = (*acc).c1Sin;
-                    (*acc).oppTang = (*acc).c1Tang;
-                }
-                (*acc).c1Score = score;
-                (*acc).c1Sin = sinA;
-                (*acc).c1Tang = tang;
-                (*acc).c1Dir = dir2;
-            } else if (sinA < (*acc).oppScore) {
-                (*acc).oppScore = sinA;
-                (*acc).oppTang = tang;
+            if (score < (*acc).c0Score) {
+                (*acc).c0Score = score;
+                (*acc).c0Tang = tang;
+                (*acc).c0Dir = dir2;
             }
         } else {
-            if (score < (*acc).c2Score) {
-                if ((*acc).c2Score < 90.0 && (*acc).c2Sin < (*acc).oppScore) {
-                    (*acc).oppScore = (*acc).c2Sin;
-                    (*acc).oppTang = (*acc).c2Tang;
-                }
-                (*acc).c2Score = score;
-                (*acc).c2Sin = sinA;
-                (*acc).c2Tang = tang;
-            } else if (sinA < (*acc).oppScore) {
-                (*acc).oppScore = sinA;
-                (*acc).oppTang = tang;
+            if (score < (*acc).c1Score) {
+                (*acc).c1Score = score;
+                (*acc).c1Tang = tang;
+                (*acc).c1Dir = dir2;
             }
         }
         return;
     }
 
-    // Phase 1: nearest cohesive neighbor + second directionally distinct / stretched goo bridge
-    if (sinA < (*acc).c0Sin) {
+    // Phase 1: nearest exclusive same-blob neighbor + second distinct-angle neighbor inside rConnectAng
+    if (sinA < (*acc).c0Score) {
         let prevTang = (*acc).c0Tang;
         let prevDir = (*acc).c0Dir;
-        let prevSin = (*acc).c0Sin;
-        (*acc).c0Sin = sinA;
+        let prevSin = (*acc).c0Score;
+        (*acc).c0Score = sinA;
         (*acc).c0Tang = tang;
         (*acc).c0Dir = dir2;
         if (prevSin < 90.0) {
-            insertSlimeSpanCandidate(acc, prevTang, prevDir, prevSin);
+            insertSlimeSecondCandidate(acc, prevTang, prevDir, prevSin);
         }
     } else {
-        insertSlimeSpanCandidate(acc, tang, dir2, sinA);
+        insertSlimeSecondCandidate(acc, tang, dir2, sinA);
     }
 }
 
-fn finalizeBioLink(acc: BioLinkAccum) -> vec4f {
-    if (acc.myPhase == 2u) {
-        var left = select(vec2f(0.0), acc.c1Tang, acc.c1Score < 90.0);
-        var right = select(vec2f(0.0), acc.c2Tang, acc.c2Score < 90.0);
-        if (acc.c1Score >= 90.0 && acc.c2Score < 90.0 && acc.oppScore < 90.0) {
-            let oppDir = normalize(acc.oppTang);
-            let rightDir = normalize(acc.c2Tang);
-            if (dot(oppDir, rightDir) < -0.15) {
-                left = acc.oppTang;
-            }
-        } else if (acc.c2Score >= 90.0 && acc.c1Score < 90.0 && acc.oppScore < 90.0) {
-            let oppDir = normalize(acc.oppTang);
-            let leftDir = normalize(acc.c1Tang);
-            if (dot(oppDir, leftDir) < -0.15) {
-                right = acc.oppTang;
+fn stepBioLinkSlot(
+    hasPrev: bool,
+    prevFade: u32,
+    prevCooldown: u32,
+    prevTang: vec2f,
+    trackValid: bool,
+    trackTang: vec2f,
+    bestValid: bool,
+    bestTang: vec2f,
+) -> vec2f {
+    var fade = 0u;
+    var cooldown = prevCooldown;
+    var outTang = vec2f(0.0);
+
+    if (hasPrev) {
+        if (trackValid) {
+            fade = min(prevFade + 1u, 8u);
+            cooldown = select(0u, prevCooldown - 1u, prevCooldown > 0u);
+            outTang = trackTang;
+        } else if (prevCooldown > 0u && bestValid) {
+            fade = min(prevFade + 1u, 8u);
+            cooldown = prevCooldown - 1u;
+            outTang = bestTang;
+        } else {
+            fade = select(0u, prevFade - 1u, prevFade > 0u);
+            if (fade == 0u) {
+                cooldown = 18u;
+                outTang = vec2f(0.0);
+            } else {
+                cooldown = select(0u, prevCooldown - 1u, prevCooldown > 0u);
+                outTang = prevTang;
             }
         }
-        return vec4f(left, right);
+    } else {
+        if (prevCooldown > 0u) {
+            cooldown = prevCooldown - 1u;
+            fade = 0u;
+        } else if (bestValid) {
+            fade = 1u;
+            cooldown = 18u;
+            outTang = bestTang;
+        } else {
+            cooldown = 0u;
+            fade = 0u;
+        }
     }
 
-    let first = select(vec2f(0.0), acc.c0Tang, acc.c0Sin < 90.0);
-    var second = vec2f(0.0);
-    if (acc.c2Sin < 90.0) {
-        second = acc.c2Tang;
-    } else if (acc.c1Sin < 90.0) {
-        second = acc.c1Tang;
-    } else if (acc.oppScore < 90.0) {
-        second = acc.oppTang;
-    }
-    return vec4f(first, second);
+    let clampedCd = min(cooldown, 18u);
+    let clampedFade = min(fade, 8u);
+    let metaU = 1024u | (clampedCd << 4u) | clampedFade;
+    let encX = select(f32(metaU) + 0.5, f32(metaU) + clamp(outTang.x, -0.08, 0.08) + 0.5, clampedFade > 0u);
+    let encY = select(0.0, outTang.y, clampedFade > 0u);
+    return vec2f(encX, encY);
+}
+
+fn finalizeBioLink(acc: BioLinkAccum) -> vec4f {
+    let slot0 = stepBioLinkSlot(
+        acc.hasPrev0,
+        acc.prevFade0,
+        acc.prevCooldown0,
+        acc.prevTang0,
+        acc.trackScore0 < 90.0,
+        acc.trackTang0,
+        acc.c0Score < 90.0,
+        acc.c0Tang,
+    );
+    let slot1 = stepBioLinkSlot(
+        acc.hasPrev1,
+        acc.prevFade1,
+        acc.prevCooldown1,
+        acc.prevTang1,
+        acc.trackScore1 < 90.0,
+        acc.trackTang1,
+        acc.c1Score < 90.0,
+        acc.c1Tang,
+    );
+    return vec4f(slot0, slot1);
 }

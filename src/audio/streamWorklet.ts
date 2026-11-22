@@ -47,6 +47,11 @@ class StreamlineSynthProcessor extends AudioWorkletProcessor {
       if (typeof d.masterAmp === 'number') {
         this.targetMasterAmp = Math.max(0, Math.min(1, d.masterAmp));
       }
+      if (d.resetState) {
+        this.masterAmp = 0;
+        this.amps.fill(0);
+        this.phases.fill(0);
+      }
     };
   }
 
