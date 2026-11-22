@@ -20,8 +20,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [56, 189, 248],
     color: '#38bdf8',
     coreColor: '#e0f2fe',
-    glow: 'rgba(56, 189, 248, 0.85)',
-    lineWidth: 1.05,
+    glow: 'rgba(56, 189, 248, 0.90)',
+    lineWidth: 2.3,
   },
   {
     id: 'bass',
@@ -29,8 +29,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [255, 42, 133],
     color: '#ff2a85',
     coreColor: '#ffd6eb',
-    glow: 'rgba(255, 42, 133, 0.92)',
-    lineWidth: 1.25,
+    glow: 'rgba(255, 42, 133, 0.96)',
+    lineWidth: 2.9,
   },
   {
     id: 'acid',
@@ -38,8 +38,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [255, 176, 0],
     color: '#ffb000',
     coreColor: '#fff3c4',
-    glow: 'rgba(255, 176, 0, 0.88)',
-    lineWidth: 1.1,
+    glow: 'rgba(255, 176, 0, 0.92)',
+    lineWidth: 2.4,
   },
   {
     id: 'chorus',
@@ -47,8 +47,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [0, 240, 255],
     color: '#00f0ff',
     coreColor: '#d9feff',
-    glow: 'rgba(0, 240, 255, 0.92)',
-    lineWidth: 1.15,
+    glow: 'rgba(0, 240, 255, 0.95)',
+    lineWidth: 2.6,
   },
   {
     id: 'delay',
@@ -56,8 +56,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [46, 255, 181],
     color: '#2effb5',
     coreColor: '#d8ffef',
-    glow: 'rgba(46, 255, 181, 0.88)',
-    lineWidth: 1.1,
+    glow: 'rgba(46, 255, 181, 0.92)',
+    lineWidth: 2.4,
   },
   {
     id: 'poly',
@@ -65,8 +65,8 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
     rgb: [192, 132, 252],
     color: '#c084fc',
     coreColor: '#f5e8ff',
-    glow: 'rgba(192, 132, 252, 0.90)',
-    lineWidth: 1.15,
+    glow: 'rgba(192, 132, 252, 0.94)',
+    lineWidth: 2.5,
   },
 ] as const;
 
@@ -75,11 +75,12 @@ const INTENSITY_BUCKETS = 5;
 function buildStreamStyles(rgb: readonly [number, number, number]): string[] {
   const styles: string[] = [];
   for (let i = 0; i < INTENSITY_BUCKETS; i++) {
-    const scale = (95 + (160 * i) / (INTENSITY_BUCKETS - 1)) / 255;
-    const alpha = (0.34 + 0.58 * (i / (INTENSITY_BUCKETS - 1))).toFixed(2);
-    const r = Math.round(rgb[0] * scale);
-    const g = Math.round(rgb[1] * scale);
-    const b = Math.round(rgb[2] * scale);
+    const t = i / (INTENSITY_BUCKETS - 1);
+    const scale = (145 + 110 * t) / 255;
+    const alpha = (0.56 + 0.42 * t).toFixed(2);
+    const r = Math.min(255, Math.round(rgb[0] * scale));
+    const g = Math.min(255, Math.round(rgb[1] * scale));
+    const b = Math.min(255, Math.round(rgb[2] * scale));
     styles.push(`rgba(${r}, ${g}, ${b}, ${alpha})`);
   }
   return styles;
@@ -216,7 +217,7 @@ export class SynthSpectrogramOverlay {
     const winW = Math.max(240, window.innerWidth || 1280);
     const specW = this.minimized
       ? (this.container.getBoundingClientRect().width || 68)
-      : Math.min(winW / 3, winW - 24);
+      : Math.min(winW * 0.5, winW - 24);
     const centerLeft = (winW - specW) * 0.5;
     const centerRight = (winW + specW) * 0.5;
 
@@ -263,7 +264,7 @@ export class SynthSpectrogramOverlay {
     this.syncClearanceBounds(nowMs);
 
     if (!this.minimized) {
-      const cssW = Math.max(120, this.container.clientWidth || window.innerWidth / 3);
+      const cssW = Math.max(120, this.container.clientWidth || window.innerWidth * 0.5);
       const cssH = Math.max(64, this.container.clientHeight || 96);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const targetW = Math.round(cssW * dpr);
@@ -295,11 +296,7 @@ export class SynthSpectrogramOverlay {
         const bucketStyles = STREAM_BUCKET_STYLES[sIdx];
         for (let b = 0; b < INTENSITY_BUCKETS; b++) this.segPools[b].length = 0;
 
-        let peakX = 0;
-        let peakY = yBase;
-        let peakAmp = 0;
-
-        // Wind/water streamline style: intensity-bucketed fine segments + gentle directional flow dashes
+        // Wind/water streamline style: intensity-bucketed thicker colored segments + subtle directional flow dashes
         let prevX = 0;
         let prevAmp = Math.max(0, Math.min(1, curve[0] ?? 0));
         let prevY = yBase - prevAmp * ampSpan;
@@ -309,14 +306,7 @@ export class SynthSpectrogramOverlay {
           const x = (i / (SPECTROGRAM_BINS - 1)) * cssW;
           const y = yBase - amp * ampSpan;
 
-          if (amp > peakAmp) {
-            peakAmp = amp;
-            peakX = x;
-            peakY = y;
-          }
-
           const segAmp = Math.max(prevAmp, amp);
-          // Subtle wind-streak cadence along each overlaid curve so dense overlapping effects read clearly
           const dashPhase = (i * 0.72 + flowShift * (0.65 + sIdx * 0.14) + sIdx * 1.9) % 3.0;
           const drawGap = snap.running && segAmp < 0.08 && dashPhase > 2.25;
 
@@ -325,7 +315,7 @@ export class SynthSpectrogramOverlay {
             const energy = Math.min(1, segAmp * 0.92 + slopeBoost);
             const bIdx = Math.min(
               INTENSITY_BUCKETS - 1,
-              Math.floor((snap.running ? energy : 0.12) * (INTENSITY_BUCKETS - 1)),
+              Math.floor((snap.running ? energy : 0.25) * (INTENSITY_BUCKETS - 1)),
             );
             this.segPools[bIdx].push(prevX, prevY, x, y);
           }
@@ -335,16 +325,16 @@ export class SynthSpectrogramOverlay {
           prevAmp = amp;
         }
 
-        // Render intensity buckets matching windLines.ts: delicate fine round-cap streamlines + glow on hot crests
+        // Render intensity buckets matching windLines.ts with thicker vibrant strokes and zero floating dots
         ctx.lineWidth = spec.lineWidth;
         for (let b = 0; b < INTENSITY_BUCKETS; b++) {
           const segs = this.segPools[b];
           if (segs.length === 0) continue;
           ctx.beginPath();
           ctx.strokeStyle = bucketStyles[b];
-          if (b >= INTENSITY_BUCKETS - 2 && snap.running) {
+          if (b >= INTENSITY_BUCKETS - 3 && snap.running) {
             ctx.shadowColor = spec.glow;
-            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 8 + kickBoost * 5 : 4;
+            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 11 + kickBoost * 6 : 6;
           } else {
             ctx.shadowBlur = 0;
           }
@@ -353,16 +343,6 @@ export class SynthSpectrogramOverlay {
             ctx.lineTo(segs[k + 2], segs[k + 3]);
           }
           ctx.stroke();
-        }
-
-        // Crisp bright streamline head dot on the active peak crest (no fade trail)
-        if (snap.running && peakAmp > 0.14) {
-          ctx.fillStyle = spec.coreColor;
-          ctx.shadowColor = spec.glow;
-          ctx.shadowBlur = 9;
-          ctx.beginPath();
-          ctx.arc(peakX, peakY, 1.3 + peakAmp * 1.2, 0, Math.PI * 2);
-          ctx.fill();
         }
       }
 
