@@ -40,6 +40,10 @@ export interface SynthSpectrogramSnapshot {
   delayFeedback: number;
   acidDrive: number;
   sidechainDepth: number;
+  downbeatPulse: number;
+  offbeatPulse: number;
+  lowBassPhase: number;
+  lowBassEnergy: number;
   streamlinesEnabled: boolean;
   streamlineEnergy: number;
   /** 6 distinct effect rows × SPECTROGRAM_BINS normalized [0..1] current spectral amplitudes */
@@ -73,6 +77,10 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
     delayFeedback: 0.24,
     acidDrive: 0.18,
     sidechainDepth: 0,
+    downbeatPulse: 0,
+    offbeatPulse: 0,
+    lowBassPhase: 0,
+    lowBassEnergy: 0,
     streamlinesEnabled: true,
     streamlineEnergy: 0,
     curves: [
@@ -601,6 +609,10 @@ export class GlobeCyberSynth {
       out.polyLevel = 0;
       out.pulseLevel = 0;
       out.sidechainDepth = 0;
+      out.downbeatPulse = 0;
+      out.offbeatPulse = 0;
+      out.lowBassPhase = 0;
+      out.lowBassEnergy = 0;
       for (let c = 0; c < out.curves.length; c++) out.curves[c].fill(0);
       return;
     }
@@ -633,6 +645,25 @@ export class GlobeCyberSynth {
     const duckVal = this.duckGain ? this.duckGain.gain.value : 1;
     out.sidechainDepth = Math.max(0, Math.min(1, (1 - duckVal) / 0.62));
     out.rms = Math.max(out.pulseLevel * 0.6, out.bassLevel * 0.5);
+
+    // Pure low-tempo BPM beat timing + low-end bass energy (< ~220 Hz)
+    const elapsedSec = Math.max(0, this.ctx.currentTime - this.originTime);
+    const beatCount = (elapsedSec * SYNTH_BPM) / 60;
+    const qPhase = beatCount % 1;
+    const barBeat = Math.floor(beatCount) % 4;
+    const downEmphasis = barBeat === 0 || barBeat === 2 ? 1.0 : 0.62;
+    out.downbeatPulse = Math.exp(-qPhase * 4.2) * downEmphasis;
+
+    const offPhase = (beatCount + 0.5) % 1;
+    const offBeatIdx = Math.floor(beatCount + 0.5) % 4;
+    const backEmphasis = offBeatIdx === 1 || offBeatIdx === 3 ? 1.0 : 0.68;
+    out.offbeatPulse = Math.exp(-offPhase * 4.6) * backEmphasis;
+
+    out.lowBassPhase = beatCount * Math.PI;
+    let subSum = 0;
+    const subBins = 16;
+    for (let i = 0; i < subBins; i++) subSum += out.curves[0][i] ?? 0;
+    out.lowBassEnergy = Math.max(0, Math.min(1, (subSum / subBins) * 1.35));
   }
 
   private applyDspModulation(now: number): void {

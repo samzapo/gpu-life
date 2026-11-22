@@ -14,12 +14,14 @@ export interface StreamFieldSampler {
 
 export interface SynthStreamModulation {
   enabled: boolean;
+  /** Low-tempo BPM-synced phase in radians */
   phase: number;
-  kickPulse: number;
+  /** 0..1 sharp beat envelope (Ocean = downbeat 1 & 3 kick, Wind = 2 & 4 / offbeat bounce) */
+  beatPulse: number;
+  /** 0..1 low-frequency sub/bass amplitude */
   bassEnergy: number;
-  acidDrive: number;
-  chorusSpread: number;
-  polyEnergy: number;
+  /** 0..1 normalized lowpass bass cutoff opening */
+  cutoffNorm: number;
   isOcean: boolean;
 }
 
@@ -82,21 +84,21 @@ function buildIntensityStyles(rgb: [number, number, number]): string[] {
 }
 
 function buildSynthIntensityStyles(isOcean: boolean): string[] {
-  // Muted atmospheric gradient: pale sea-aqua (ocean) and pearlescent lavender-mist (wind)
+  // Colorful yet refined counterpoint palettes: deep aqua -> cyan-mint (ocean) vs indigo-violet -> orchid-magenta (wind)
   const stops: readonly (readonly [number, number, number, number])[] = isOcean
     ? [
-        [115, 200, 225, 0.38],
-        [135, 218, 236, 0.52],
-        [155, 232, 245, 0.64],
-        [168, 240, 235, 0.74],
-        [205, 248, 246, 0.82],
+        [45, 175, 230, 0.46],
+        [30, 205, 240, 0.60],
+        [20, 230, 235, 0.74],
+        [55, 245, 200, 0.84],
+        [145, 255, 230, 0.92],
       ]
     : [
-        [180, 178, 205, 0.36],
-        [198, 190, 222, 0.48],
-        [216, 198, 234, 0.60],
-        [232, 202, 234, 0.70],
-        [246, 225, 244, 0.78],
+        [145, 130, 235, 0.44],
+        [178, 122, 242, 0.58],
+        [218, 96, 212, 0.72],
+        [245, 72, 165, 0.84],
+        [255, 165, 215, 0.92],
       ];
   return stops.map(([r, g, b, a]) => `rgba(${r}, ${g}, ${b}, ${a})`);
 }
@@ -720,22 +722,21 @@ export class WindStreamRenderer {
                 const nx = -dy * invLen;
                 const ny = dx * invLen;
                 const prevOff = this.prevWaveOff[i];
-                const waveFreq = 0.20 + 0.08 * (bIdx / (INTENSITY_BUCKETS - 1));
                 const speedFrac = Math.min(1, mag / Math.max(sampler.streamMax, 0.25));
-                // True surface distance amplitude in radians on unit sphere (~0.5 km to ~2.4 km) * view scale
+                const waveFreq = 0.20 + 0.08 * synthMod.cutoffNorm;
+                const cutoffWeight = 0.55 + 0.45 * synthMod.cutoffNorm;
+                // Double previous surface distance (~0.9 km to ~5.6 km on Earth's surface) * scale,
+                // driven purely by BPM bass beat pulse, sub-bass energy, and filter cutoff
                 const surfaceAmpRad =
-                  0.00008 +
-                  0.00016 * synthMod.bassEnergy +
-                  0.00012 * synthMod.kickPulse +
-                  0.00008 * synthMod.polyEnergy;
-                const waveAmp = Math.min(20, surfaceAmpRad * scale) * (0.28 + 0.72 * speedFrac);
+                  0.00014 +
+                  0.00044 * synthMod.beatPulse * cutoffWeight +
+                  0.00030 * synthMod.bassEnergy;
+                const waveAmp = Math.min(36, surfaceAmpRad * scale) * (0.30 + 0.70 * speedFrac);
                 const nextOff = Math.sin(p.age * waveFreq + i * 1.37 + synthMod.phase) * waveAmp;
                 this.prevWaveOff[i] = nextOff;
 
-                const drawBucket = Math.min(
-                  INTENSITY_BUCKETS - 1,
-                  bIdx + (synthMod.kickPulse > 0.65 && speedFrac > 0.55 ? 1 : 0),
-                );
+                const pulseBoost = synthMod.beatPulse * cutoffWeight > 0.42 && speedFrac > 0.30 ? 1 : 0;
+                const drawBucket = Math.min(INTENSITY_BUCKETS - 1, bIdx + pulseBoost);
                 this.segPools[drawBucket].push(
                   scr0x + nx * prevOff,
                   scr0y + ny * prevOff,
@@ -833,7 +834,7 @@ export class WindStreamRenderer {
           : styles;
       ctx.lineWidth =
         useSynthFx && synthMod
-          ? sampler.lineWidth + 0.10 * synthMod.bassEnergy + 0.14 * synthMod.kickPulse
+          ? sampler.lineWidth + 0.16 * synthMod.bassEnergy + 0.42 * synthMod.beatPulse * (0.55 + 0.45 * synthMod.cutoffNorm)
           : sampler.lineWidth;
       ctx.lineCap = 'round';
       for (let i = 0; i < INTENSITY_BUCKETS; i++) {
@@ -842,8 +843,8 @@ export class WindStreamRenderer {
         ctx.beginPath();
         ctx.strokeStyle = activeStyles[i];
         if (useSynthFx && synthMod && i === INTENSITY_BUCKETS - 1) {
-          ctx.shadowColor = synthMod.isOcean ? 'rgba(135, 225, 240, 0.42)' : 'rgba(225, 195, 232, 0.40)';
-          ctx.shadowBlur = 2.5 + synthMod.kickPulse * 2.0;
+          ctx.shadowColor = synthMod.isOcean ? 'rgba(40, 235, 225, 0.62)' : 'rgba(245, 72, 165, 0.60)';
+          ctx.shadowBlur = 3.5 + synthMod.beatPulse * 4.5;
         } else {
           ctx.shadowBlur = 0;
         }

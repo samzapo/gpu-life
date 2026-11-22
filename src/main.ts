@@ -4596,7 +4596,7 @@ function update() {
     cyberSynth.isRunning() &&
     cyberSynth.isStreamlinesEnabled() &&
     !document.hidden;
-  const streamPhase = start * 0.011;
+  const bassCutoffNorm = Math.max(0, Math.min(1, (synthSpecSnapshot.bassCutoffHz - 220) / 1800));
 
   if (oceanCtx && currentOceanGrid) {
     const oceanTint: [number, number, number] =
@@ -4613,12 +4613,10 @@ function update() {
       streamModActive
         ? {
             enabled: true,
-            phase: streamPhase,
-            kickPulse: synthSpecSnapshot.sidechainDepth,
-            bassEnergy: synthSpecSnapshot.bassLevel,
-            acidDrive: synthSpecSnapshot.acidDrive,
-            chorusSpread: synthSpecSnapshot.chorusLevel,
-            polyEnergy: synthSpecSnapshot.polyLevel,
+            phase: synthSpecSnapshot.lowBassPhase,
+            beatPulse: synthSpecSnapshot.downbeatPulse,
+            bassEnergy: synthSpecSnapshot.lowBassEnergy,
+            cutoffNorm: bassCutoffNorm,
             isOcean: true,
           }
         : undefined,
@@ -4641,12 +4639,10 @@ function update() {
       streamModActive
         ? {
             enabled: true,
-            phase: streamPhase * 1.18,
-            kickPulse: synthSpecSnapshot.sidechainDepth,
-            bassEnergy: synthSpecSnapshot.bassLevel,
-            acidDrive: synthSpecSnapshot.acidDrive,
-            chorusSpread: synthSpecSnapshot.chorusLevel,
-            polyEnergy: synthSpecSnapshot.polyLevel,
+            phase: synthSpecSnapshot.lowBassPhase + Math.PI * 0.5,
+            beatPulse: synthSpecSnapshot.offbeatPulse,
+            bassEnergy: synthSpecSnapshot.lowBassEnergy,
+            cutoffNorm: bassCutoffNorm,
             isOcean: false,
           }
         : undefined,
