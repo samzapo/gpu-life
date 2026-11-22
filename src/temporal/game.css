@@ -100,7 +100,7 @@
   height: 96px;
   background: transparent;
   border: none;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 #synth-spec.minimized {
@@ -118,7 +118,7 @@
   width: 100%;
   height: 100%;
   background: transparent;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 #synth-spec.minimized #synth-spec-canvas {
@@ -133,6 +133,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  pointer-events: auto;
 }
 
 #synth-stream-toggle {
@@ -234,6 +235,45 @@
 
 #synth-spec-tooltip[hidden] {
   display: none !important;
+}
+
+#webgpu-notice[hidden] {
+  display: none !important;
+}
+
+#webgpu-notice {
+  position: fixed;
+  z-index: 125;
+  bottom: max(74px, calc(env(safe-area-inset-bottom) + 64px));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(460px, calc(100vw - 24px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  color: #ffe4ef;
+  background: rgba(16, 8, 22, 0.92);
+  border: 1px solid rgba(255, 42, 133, 0.65);
+  box-shadow:
+    0 0 22px rgba(255, 42, 133, 0.25),
+    inset 0 0 12px rgba(0, 240, 255, 0.08);
+  backdrop-filter: blur(8px);
+  font:
+    500 11px/1.35 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+
+#webgpu-notice-close {
+  flex: none;
+  background: transparent;
+  border: 1px solid rgba(255, 42, 133, 0.45);
+  color: #ffb6d6;
+  width: 22px;
+  height: 22px;
+  line-height: 18px;
+  cursor: pointer;
 }
 
 .synth-tip-head {

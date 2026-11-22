@@ -110,6 +110,10 @@ const timestamps: Record<
   }
 > = {};
 
+export function isTimestampActive(): boolean {
+  return canTimestamp;
+}
+
 export async function requestTimestamps(adapter: GPUAdapter) {
   canTimestamp = adapter.features.has('timestamp-query');
   canSubgroups = adapter.features.has('subgroups');
@@ -120,12 +124,20 @@ export async function requestTimestamps(adapter: GPUAdapter) {
     canTimestamp = false;
   }
 
-  const device = await adapter.requestDevice({
-    requiredFeatures: [
-      ...(canTimestamp ? ['timestamp-query' as GPUFeatureName] : []),
-      ...(canSubgroups ? ['subgroups' as GPUFeatureName] : [])
-    ]
-  })
+  let device: GPUDevice;
+  const requiredFeatures: GPUFeatureName[] = [
+    ...(canTimestamp ? ['timestamp-query' as GPUFeatureName] : []),
+    ...(canSubgroups ? ['subgroups' as GPUFeatureName] : []),
+  ];
+  try {
+    device = await adapter.requestDevice(
+      requiredFeatures.length ? { requiredFeatures } : undefined,
+    );
+  } catch {
+    canTimestamp = false;
+    canSubgroups = false;
+    device = await adapter.requestDevice();
+  }
 
   if (!device.features.has('timestamp-query')) {
     canTimestamp = false;
@@ -135,7 +147,6 @@ export async function requestTimestamps(adapter: GPUAdapter) {
   }
 
   return device;
-
 }
 
 export function setupTimestamp(device: GPUDevice, name: string) {

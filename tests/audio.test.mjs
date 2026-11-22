@@ -6,6 +6,7 @@ import { SYNTH_RATE } from '../src/audio/synthBank.ts';
 import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '../src/audio/engine.ts';
 import { describeSynthEffects, SYNTH_EFFECT_SPECS } from '../src/audio/spectrogram.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
+import { CONFIG_STORAGE_KEY, invalidateLegacyBrowserCaches, loadCachedConfig } from '../src/config.ts';
 
 function packMeta(phase, bioSp, graduated = 0) {
   if (phase === 0) return 0;
@@ -279,6 +280,40 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
     assert.equal(snap.streamlinesEnabled, false);
     assert.equal(snap.streamlineEnergy, 0);
   } finally {
+    globalThis.window = prevWindow;
+  }
+});
+
+test('invalidateLegacyBrowserCaches removes stale v1/v2 config entries on epoch upgrade', () => {
+  const store = new Map([
+    ['complexLife:config:v1', '{"seed":"old1"}'],
+    ['complexLife:config:v2', '{"seed":"old2"}'],
+    ['complexLife:otherOld', 'stale'],
+    ['unrelatedKey', 'keep'],
+  ]);
+  const prevWindow = globalThis.window;
+  globalThis.window = {
+    localStorage: {
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+      get length() { return store.size; },
+      key: (i) => Array.from(store.keys())[i] ?? null,
+    },
+  };
+  const origKeys = Object.keys;
+  Object.keys = (obj) => (obj === globalThis.window.localStorage ? Array.from(store.keys()) : origKeys(obj));
+  try {
+    invalidateLegacyBrowserCaches();
+    assert.equal(CONFIG_STORAGE_KEY, 'complexLife:config:v3');
+    assert.equal(loadCachedConfig(), null);
+    assert.equal(store.has('complexLife:config:v1'), false);
+    assert.equal(store.has('complexLife:config:v2'), false);
+    assert.equal(store.has('complexLife:otherOld'), false);
+    assert.equal(store.get('complexLife:cacheEpoch'), '3');
+    assert.equal(store.get('unrelatedKey'), 'keep');
+  } finally {
+    Object.keys = origKeys;
     globalThis.window = prevWindow;
   }
 });

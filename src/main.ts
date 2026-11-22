@@ -108,6 +108,7 @@ import {
 } from './earth/windLines';
 import {
   hslToRgb,
+  isTimestampActive,
   linkRenderTimestamp,
   readTimestamp,
   requestTimestamps,
@@ -395,6 +396,7 @@ let watermanInvTexture: GPUTexture | undefined;
 let bgCacheTexture: GPUTexture | undefined;
 let bgCacheKey = '';
 let bgDataVersion = 0;
+let bgCanCopyDst = true;
 
 let bgBindGroup: GPUBindGroup | undefined;
 let mineralRenderBindGroup: GPUBindGroup | undefined;
@@ -2748,14 +2750,32 @@ function sampleCenterEnvForAudio(): ScreenEnvObservation {
 
 function observeGlobeAudioCenter(nowMs: number) {
   if (
-    audioObserveInFlight ||
     !cyberSynth.isEnabled() ||
     cyberSynth.getState() !== 'running' ||
-    !device ||
-    !particleBuffers ||
-    !lifeStateBuffers ||
     nowMs - lastAudioObserveMs < 260
   ) {
+    return;
+  }
+  if (!device || !particleBuffers || !lifeStateBuffers) {
+    lastAudioObserveMs = nowMs;
+    const envCopy = sampleCenterEnvForAudio();
+    const obs = observeScreenAudioState(
+      new Float32Array(0),
+      new Float32Array(0),
+      0,
+      elements,
+      copyView(viewState),
+      d3Proj,
+      envCopy,
+      computeBioSeedHash(params.seed, oceanSeed),
+      document.hidden,
+    );
+    obs.intensity = Math.max(0.24, Math.min(1, 0.25 + 0.32 * envCopy.windSpeedNorm + 0.22 * envCopy.oceanSpeedNorm + 0.18 * envCopy.ridgeMask));
+    lastAudioObservation = obs;
+    cyberSynth.setObservation(obs);
+    return;
+  }
+  if (audioObserveInFlight) {
     return;
   }
   lastAudioObserveMs = nowMs;
@@ -3190,60 +3210,163 @@ function syncCanvasDimensions() {
   }
 }
 
+const webGpuNoticeEl = document.getElementById('webgpu-notice') as HTMLElement | null;
+const webGpuNoticeTextEl = document.getElementById('webgpu-notice-text') as HTMLElement | null;
+const webGpuNoticeCloseEl = document.getElementById('webgpu-notice-close') as HTMLButtonElement | null;
+webGpuNoticeCloseEl?.addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  if (webGpuNoticeEl) webGpuNoticeEl.hidden = true;
+});
+
+function showWebGpuNotice(reason: string) {
+  game.unavailable(reason);
+  if (webGpuNoticeTextEl) {
+    webGpuNoticeTextEl.textContent = `${reason} Showing 2D globe, wind/ocean currents & synth.`;
+  }
+  if (webGpuNoticeEl) {
+    webGpuNoticeEl.hidden = false;
+  }
+}
+
 const windBootPromise = loadFallbackWind().catch(() => null);
 const oceanBootPromise = loadOceanCurrents().catch(() => null);
 const uvBootPromise = loadCpcUvBaseline().catch(() => null);
 
+syncCanvasDimensions();
+updateProjectionState();
+drawScaleBar(WIND_LEVELS.surface.scaleMax);
+refreshHudVisibility();
+bindConfigPersistence(() => {
+  if (!suppressPaneEvents) scheduleSaveConfig();
+});
+configPersistenceReady = true;
+syncUrlStateNow();
+
+loadEarthFeatures()
+  .then((feats) => {
+    earthFeatures = feats;
+    mapDirty = true;
+  })
+  .catch(() => {
+    // Non-fatal if coastline JSON fails to load
+  });
+
+void Promise.all([oceanBootPromise, uvBootPromise, windBootPromise]).then(
+  ([loadedOcean, loadedUv, loadedWind]) => {
+    if (loadedWind) {
+      currentWindGrid = loadedWind;
+      if (device) uploadWindToGpu(loadedWind);
+      refreshHudBadges(loadedWind);
+    }
+    if (loadedOcean) {
+      currentOceanGrid = loadedOcean;
+      if (device) uploadOceanToGpu(loadedOcean);
+      refreshOceanHud(loadedOcean);
+    } else {
+      earthParams.oceanStatus = 'Ocean data unavailable';
+      oceanStatusBinding.refresh();
+    }
+    if (loadedUv) {
+      currentUvGrid = loadedUv;
+      if (device) {
+        uploadUvToGpu();
+        uploadTerrainToGpu();
+      }
+    }
+  },
+);
+loadSurfaceWind();
+window.setInterval(() => {
+  if (uvUtcOverrideMs === null && device) {
+    uploadUvToGpu();
+  }
+}, 45_000);
+window.setInterval(() => {
+  if (!document.hidden) {
+    void backgroundRefreshWeather();
+  }
+}, GFS_AUTO_REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (uvUtcOverrideMs === null && device) {
+      uploadUvToGpu();
+    }
+    void backgroundRefreshWeather();
+  }
+});
+
 (async () => {
-  loadEarthFeatures()
-    .then((feats) => {
-      earthFeatures = feats;
-      mapDirty = true;
-    })
-    .catch(() => {
-      // Non-fatal if coastline JSON fails to load
+  try {
+    if (!navigator.gpu) {
+      showWebGpuNotice('This browser does not expose WebGPU.');
+      return;
+    }
+    const tryAdapter = async (opts?: GPURequestAdapterOptions) => {
+      try {
+        return await navigator.gpu.requestAdapter(opts);
+      } catch {
+        return null;
+      }
+    };
+    let adapter =
+      (await tryAdapter({ featureLevel: 'compatibility' })) ??
+      (await tryAdapter({ powerPreference: 'high-performance' })) ??
+      (await tryAdapter());
+    for (let retry = 0; retry < 4 && !adapter; retry++) {
+      await new Promise((r) => setTimeout(r, 200));
+      adapter =
+        (await tryAdapter({ featureLevel: 'compatibility' })) ??
+        (await tryAdapter());
+    }
+    if (!adapter) {
+      showWebGpuNotice('WebGPU GPU adapter unavailable on this browser.');
+      return;
+    }
+
+    device = await requestTimestamps(adapter);
+    device.lost.then(() => {
+      deviceLost = true;
+      showWebGpuNotice('GPU connection lost. Reload to restart simulation.');
     });
 
-  if (!navigator.gpu) { game.unavailable('This globe requires a WebGPU-enabled browser.'); return; }
-  let adapter = await navigator.gpu.requestAdapter({
-    featureLevel: 'compatibility',
-  });
-  for (let retry = 0; retry < 5 && !adapter; retry++) {
-    await new Promise((r) => setTimeout(r, 200));
-    adapter = await navigator.gpu.requestAdapter({
-      featureLevel: 'compatibility',
-    });
-  }
-  if (!adapter) { game.unavailable('WebGPU is unavailable on this device.'); return; }
+    if (device?.features.has('subgroups')) {
+      engines['prefixSum'] = prefixSum;
+    }
 
-  device = await requestTimestamps(adapter);
-  device.lost.then(() => { deviceLost = true; game.unavailable('GPU connection lost. Reload to start a new globe.'); });
+    if (params.engine in engines) {
+      engine = params.engine;
+    } else {
+      engine = 'linkedList';
+      params.engine = engine;
+    }
+    setEngineDisplay(engine);
+    engineSelect.refresh();
 
-  if (device?.features.has('subgroups')) {
-    engines['prefixSum'] = prefixSum;
-  }
+    bgContext = bgCanvas.getContext('webgpu') ?? undefined;
+    context = canvas.getContext('webgpu') ?? undefined;
+    if (!bgContext || !context) {
+      showWebGpuNotice('Unable to initialize WebGPU canvas contexts.');
+      return;
+    }
 
-  if (params.engine in engines) {
-    engine = params.engine;
-  } else {
-    engine = 'linkedList';
-    params.engine = engine;
-  }
-  setEngineDisplay(engine);
-  engineSelect.refresh();
-
-  bgContext = bgCanvas.getContext('webgpu') ?? undefined;
-  context = canvas.getContext('webgpu') ?? undefined;
-  if (!bgContext || !context) return;
-
-  const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-  bgContext.configure({
-    device,
-    format: presentationFormat,
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
-    alphaMode: 'opaque',
-  });
-  context.configure({ device, format: presentationFormat, alphaMode: 'premultiplied' });
+    const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+    try {
+      bgContext.configure({
+        device,
+        format: presentationFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+        alphaMode: 'opaque',
+      });
+      bgCanCopyDst = true;
+    } catch {
+      bgContext.configure({
+        device,
+        format: presentationFormat,
+        alphaMode: 'opaque',
+      });
+      bgCanCopyDst = false;
+    }
+    context.configure({ device, format: presentationFormat, alphaMode: 'premultiplied' });
 
   uniformBuffer = device.createBuffer({
     size: uniformsFloats * 4,
@@ -3516,9 +3639,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   updateProjectionState();
   setupTimestamp(device, 'render');
 
-  drawScaleBar(WIND_LEVELS.surface.scaleMax);
-  refreshHudVisibility();
-
   const [loadedOcean, loadedUv, loadedWind] = await Promise.all([
     oceanBootPromise,
     uvBootPromise,
@@ -3533,9 +3653,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     currentOceanGrid = loadedOcean;
     uploadOceanToGpu(loadedOcean);
     refreshOceanHud(loadedOcean);
-  } else {
-    earthParams.oceanStatus = 'Ocean data unavailable';
-    oceanStatusBinding.refresh();
   }
   if (loadedUv) {
     currentUvGrid = loadedUv;
@@ -3544,24 +3661,6 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
   }
 
   startWorld();
-  window.setInterval(() => {
-    if (uvUtcOverrideMs === null) {
-      uploadUvToGpu();
-    }
-  }, 45_000);
-  window.setInterval(() => {
-    if (!document.hidden) {
-      void backgroundRefreshWeather();
-    }
-  }, GFS_AUTO_REFRESH_MS);
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      if (uvUtcOverrideMs === null) {
-        uploadUvToGpu();
-      }
-      void backgroundRefreshWeather();
-    }
-  });
   bindOptions(
     device,
     simData,
@@ -3570,12 +3669,10 @@ const uvBootPromise = loadCpcUvBaseline().catch(() => null);
     oceanSimBuffer,
     syncBioUniformState,
   );
-  bindConfigPersistence(() => {
-    if (!suppressPaneEvents) scheduleSaveConfig();
-  });
-  configPersistenceReady = true;
-  syncUrlStateNow();
-  loadSurfaceWind();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'WebGPU initialization failed.';
+    showWebGpuNotice(msg);
+  }
 })();
 
 let activeWorldRefs: UnifiedEngineRefs | undefined;
@@ -3701,44 +3798,11 @@ function render(commandEncoder: GPUCommandEncoder) {
   }
 
   const bgTargetTex = bgContext.getCurrentTexture();
-  if (
-    !bgCacheTexture ||
-    bgCacheTexture.width !== bgTargetTex.width ||
-    bgCacheTexture.height !== bgTargetTex.height
-  ) {
-    bgCacheTexture?.destroy();
-    bgCacheTexture = device.createTexture({
-      size: { width: bgTargetTex.width, height: bgTargetTex.height },
-      format: navigator.gpu.getPreferredCanvasFormat(),
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-      label: 'bgCacheTexture',
-    });
-    bgCacheKey = '';
-  }
-
-  const lens = tooltipManager.getLensState();
-  const nextBgKey = [
-    bgTargetTex.width,
-    bgTargetTex.height,
-    viewSignature,
-    bgDataVersion,
-    earthParams.viewLayer,
-    earthParams.terrainOpacity.toFixed(3),
-    earthParams.nightShading.toFixed(3),
-    earthParams.oceanColors.toFixed(3),
-    earthParams.windColors.toFixed(3),
-    earthParams.tempColors.toFixed(3),
-    earthParams.uvColors.toFixed(3),
-    earthParams.rhColors.toFixed(3),
-    earthParams.precipColors.toFixed(3),
-    lens.active ? `${Math.round(lens.x)},${Math.round(lens.y)},${lens.mag.toFixed(2)}` : '0',
-  ].join('|');
-
-  if (nextBgKey !== bgCacheKey) {
+  if (!bgCanCopyDst) {
     const bgPass = commandEncoder.beginRenderPass({
       colorAttachments: [
         {
-          view: bgCacheTexture.createView(),
+          view: bgTargetTex.createView(),
           clearValue: [0, 0, 0.0196, 1],
           loadOp: 'clear',
           storeOp: 'store',
@@ -3749,14 +3813,64 @@ function render(commandEncoder: GPUCommandEncoder) {
     bgPass.setBindGroup(0, bgBindGroup);
     bgPass.draw(3, 1, 0, 0);
     bgPass.end();
-    bgCacheKey = nextBgKey;
-  }
+  } else {
+    if (
+      !bgCacheTexture ||
+      bgCacheTexture.width !== bgTargetTex.width ||
+      bgCacheTexture.height !== bgTargetTex.height
+    ) {
+      bgCacheTexture?.destroy();
+      bgCacheTexture = device.createTexture({
+        size: { width: bgTargetTex.width, height: bgTargetTex.height },
+        format: navigator.gpu.getPreferredCanvasFormat(),
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        label: 'bgCacheTexture',
+      });
+      bgCacheKey = '';
+    }
 
-  commandEncoder.copyTextureToTexture(
-    { texture: bgCacheTexture },
-    { texture: bgTargetTex },
-    { width: bgTargetTex.width, height: bgTargetTex.height, depthOrArrayLayers: 1 },
-  );
+    const lens = tooltipManager.getLensState();
+    const nextBgKey = [
+      bgTargetTex.width,
+      bgTargetTex.height,
+      viewSignature,
+      bgDataVersion,
+      earthParams.viewLayer,
+      earthParams.terrainOpacity.toFixed(3),
+      earthParams.nightShading.toFixed(3),
+      earthParams.oceanColors.toFixed(3),
+      earthParams.windColors.toFixed(3),
+      earthParams.tempColors.toFixed(3),
+      earthParams.uvColors.toFixed(3),
+      earthParams.rhColors.toFixed(3),
+      earthParams.precipColors.toFixed(3),
+      lens.active ? `${Math.round(lens.x)},${Math.round(lens.y)},${lens.mag.toFixed(2)}` : '0',
+    ].join('|');
+
+    if (nextBgKey !== bgCacheKey) {
+      const bgPass = commandEncoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: bgCacheTexture.createView(),
+            clearValue: [0, 0, 0.0196, 1],
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      bgPass.setPipeline(bgRenderPipeline);
+      bgPass.setBindGroup(0, bgBindGroup);
+      bgPass.draw(3, 1, 0, 0);
+      bgPass.end();
+      bgCacheKey = nextBgKey;
+    }
+
+    commandEncoder.copyTextureToTexture(
+      { texture: bgCacheTexture },
+      { texture: bgTargetTex },
+      { width: bgTargetTex.width, height: bgTargetTex.height, depthOrArrayLayers: 1 },
+    );
+  }
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     colorAttachments: [
@@ -4519,7 +4633,7 @@ function writeUniforms() {
 
 function update() {
   requestAnimationFrame(update);
-  if (!device || !context || !bgContext || !particleBuffers || deviceLost) return;
+  const gpuReady = Boolean(device && context && bgContext && particleBuffers && !deviceLost);
 
   const start = performance.now();
   const frameDtMs = lastTime > 0 ? start - lastTime : 16.67;
@@ -4545,6 +4659,8 @@ function update() {
   }
 
   if (
+    gpuReady &&
+    device &&
     viewState.projectionId === 'waterman' &&
     watermanDirty &&
     watermanFwdTexture &&
@@ -4654,6 +4770,14 @@ function update() {
 
   cyberSynth.updateStreamlineTelemetry(start, windStreamBands, oceanStreamBands);
 
+  if (!gpuReady || !device) {
+    const cpuTime = performance.now() - start;
+    globalPerformanceParams.cpu = cpuTime;
+    updateTotal();
+    fpsc++;
+    return;
+  }
+
   const checkValidation = frameCount <= 120 || (frameCount % 60 === 0);
   if (checkValidation) {
     device.pushErrorScope('validation');
@@ -4700,7 +4824,7 @@ function update() {
     device.popErrorScope().then((error) => {
       if (error) {
         console.error('WebGPU validation error:', error.message);
-        if (!window.location.search.includes('noTimestamp')) {
+        if (isTimestampActive() && !window.location.search.includes('noTimestamp')) {
           const url = new URL(window.location.href);
           url.searchParams.set('noTimestamp', '');
           window.location.replace(url.toString());

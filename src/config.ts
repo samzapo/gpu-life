@@ -2,9 +2,43 @@ import {
   parseNullschoolHash,
   PROJECTIONS,
   type ProjectionId,
-} from './earth/projections';
+} from './earth/projections.ts';
 
-export const CONFIG_STORAGE_KEY = 'complexLife:config:v2';
+export const CONFIG_STORAGE_KEY = 'complexLife:config:v3';
+const CONFIG_CACHE_EPOCH_KEY = 'complexLife:cacheEpoch';
+const CURRENT_CACHE_EPOCH = '3';
+const LEGACY_CONFIG_KEYS = ['complexLife:config:v1', 'complexLife:config:v2'] as const;
+
+let cacheInvalidationRan = false;
+
+export function invalidateLegacyBrowserCaches(): void {
+  if (cacheInvalidationRan || typeof window === 'undefined') return;
+  cacheInvalidationRan = true;
+  try {
+    for (const legacyKey of LEGACY_CONFIG_KEYS) {
+      window.localStorage.removeItem(legacyKey);
+    }
+    const prevEpoch = window.localStorage.getItem(CONFIG_CACHE_EPOCH_KEY);
+    if (prevEpoch !== CURRENT_CACHE_EPOCH) {
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith('complexLife:') && key !== CONFIG_CACHE_EPOCH_KEY) {
+          window.localStorage.removeItem(key);
+        }
+      }
+      window.localStorage.setItem(CONFIG_CACHE_EPOCH_KEY, CURRENT_CACHE_EPOCH);
+      if ('caches' in window && typeof window.caches?.keys === 'function') {
+        void window.caches
+          .keys()
+          .then((names) => Promise.all(names.map((n) => window.caches.delete(n))))
+          .catch(() => {
+            /* ignore CacheStorage errors */
+          });
+      }
+    }
+  } catch {
+    // Ignore storage quota or private browsing errors
+  }
+}
 
 export const FACTORY_DEFAULTS = {
   engine: 'prefixSum',
@@ -259,6 +293,7 @@ export interface SimConfigV1 {
 }
 
 export function loadCachedConfig(): SimConfigV1 | null {
+  invalidateLegacyBrowserCaches();
   try {
     const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY);
     if (!raw) return null;

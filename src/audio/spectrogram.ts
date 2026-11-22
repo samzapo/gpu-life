@@ -199,6 +199,11 @@ export class SynthSpectrogramOverlay {
       });
     }
     this.syncToggleUi();
+    this.syncClearanceBounds(0);
+    window.addEventListener('resize', () => {
+      this.lastBoundsMs = -1000;
+      this.syncClearanceBounds(performance.now());
+    });
   }
 
   onStreamlinesToggle(cb: (enabled: boolean) => void): void {
@@ -235,20 +240,20 @@ export class SynthSpectrogramOverlay {
     this.lastBoundsMs = nowMs;
 
     const winW = Math.max(240, window.innerWidth || 1280);
-    const specW = this.minimized
+    let specW = this.minimized
       ? (this.container.getBoundingClientRect().width || 68)
       : Math.min(winW * 0.5, winW - 24);
-    const centerLeft = (winW - specW) * 0.5;
-    const centerRight = (winW + specW) * 0.5;
+    let centerLeft = (winW - specW) * 0.5;
+    let centerRight = (winW + specW) * 0.5;
 
     let safeTop = 6;
-    const checkOverlap = (el: Element | null) => {
+    const checkOverlap = (el: Element | null, maxBottom = 140) => {
       if (!el) return;
       if ((el as HTMLElement).hidden || getComputedStyle(el).display === 'none') return;
       const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return;
+      if (r.width <= 0 || r.height <= 0 || r.bottom > maxBottom) return;
       const overlapsX = r.right + 8 > centerLeft && r.left - 8 < centerRight;
-      if (overlapsX && r.top < 120) {
+      if (overlapsX && r.top < 140) {
         safeTop = Math.max(safeTop, Math.ceil(r.bottom) + 6);
       }
     };
@@ -261,7 +266,31 @@ export class SynthSpectrogramOverlay {
       checkOverlap(document.getElementById('tour-caption'));
     }
     checkOverlap(document.getElementById('githubBtn'));
-    checkOverlap(document.querySelector('.tp-dfwv'));
+
+    const tpEl = document.querySelector('.tp-dfwv');
+    if (tpEl && getComputedStyle(tpEl).display !== 'none') {
+      const tr = tpEl.getBoundingClientRect();
+      if (tr.width > 0 && tr.height > 0) {
+        if (tr.bottom <= 72) {
+          checkOverlap(tpEl, 72);
+        } else if (tr.left - 8 < centerRight && tr.bottom > safeTop) {
+          // Keep right edge strictly left of an expanded Display panel so toggles remain clickable
+          const maxRight = Math.max(centerLeft + 110, tr.left - 8);
+          specW = Math.min(specW, Math.max(96, maxRight - 10));
+          const maxLeft = Math.max(10, maxRight - specW);
+          centerLeft = Math.min(centerLeft, maxLeft);
+          centerRight = centerLeft + specW;
+          this.container.style.left = `${Math.round(centerLeft)}px`;
+          this.container.style.transform = 'none';
+          if (!this.minimized) this.container.style.width = `${Math.round(specW)}px`;
+        }
+      }
+    }
+    if (!tpEl || tpEl.getBoundingClientRect().bottom <= 72 || tpEl.getBoundingClientRect().left - 8 >= (winW + specW) * 0.5) {
+      this.container.style.left = '50%';
+      this.container.style.transform = 'translateX(-50%)';
+      if (!this.minimized) this.container.style.width = '';
+    }
 
     this.container.style.top = `${safeTop}px`;
     const activeHeight = this.minimized ? 22 : 96;
