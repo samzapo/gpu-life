@@ -3222,9 +3222,13 @@ function showWebGpuNotice(reason: string) {
   game.unavailable(reason);
   if (webGpuNoticeTextEl) {
     const isFirefox = /firefox|fxios/i.test(navigator.userAgent);
+    const isChromium = /chrome|chromium|edg/i.test(navigator.userAgent);
+    const hasGpuApi = typeof navigator !== 'undefined' && 'gpu' in navigator && Boolean(navigator.gpu);
     const hint = isFirefox
       ? 'Open in Chrome, or in Firefox Nightly set about:config -> gfx.webgpu.ignore-blocklist = true (and dom.webgpu.enabled = true) then restart.'
-      : 'Open in Chrome/Edge 121+ (or enable WebGPU in your browser flags) for full particle simulation.';
+      : isChromium && hasGpuApi
+        ? 'Chrome blocked the WebGPU GPU adapter (check chrome://gpu, disable Android Advanced Protection for Chrome, or enable chrome://flags/#enable-unsafe-webgpu).'
+        : 'Open in Chrome/Edge 121+ with hardware acceleration (or enable WebGPU in browser flags).';
     webGpuNoticeTextEl.textContent = `${reason} ${hint} Showing 2D globe, wind/ocean currents & synth.`;
   }
   if (webGpuNoticeEl) {
