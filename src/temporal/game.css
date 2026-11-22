@@ -125,11 +125,57 @@
   display: none;
 }
 
-#synth-spec-toggle {
+.synth-spec-controls {
   position: absolute;
   top: 2px;
   right: 2px;
   z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#synth-stream-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  background: rgba(5, 10, 20, 0.56);
+  border: 1px solid rgba(0, 240, 255, 0.42);
+  cursor: pointer;
+  position: relative;
+  clip-path: polygon(3px 0, 100% 0, 100% calc(100% - 3px), calc(100% - 3px) 100%, 0 100%, 0 3px);
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+#synth-stream-toggle:hover {
+  border-color: var(--cyber-cyan);
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
+}
+
+#synth-stream-toggle:checked {
+  border-color: var(--cyber-magenta);
+  background: rgba(34, 8, 42, 0.85);
+  box-shadow:
+    0 0 8px rgba(255, 42, 133, 0.45),
+    inset 0 0 6px rgba(0, 240, 255, 0.25);
+}
+
+#synth-stream-toggle:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #00f0ff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+  filter: drop-shadow(0 0 3px rgba(0, 240, 255, 0.8));
+}
+
+#synth-spec-toggle {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
@@ -151,8 +197,11 @@
   box-shadow: 0 0 10px rgba(0, 240, 255, 0.35);
 }
 
-#synth-spec.minimized #synth-spec-toggle {
+#synth-spec.minimized .synth-spec-controls {
   position: static;
+}
+
+#synth-spec.minimized #synth-spec-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;

@@ -150,6 +150,8 @@ export class SynthSpectrogramOverlay {
   private canvas: HTMLCanvasElement | null;
   private ctx: CanvasRenderingContext2D | null;
   private toggleBtn: HTMLButtonElement | null;
+  private streamCheckbox: HTMLInputElement | null;
+  private streamToggleCb: ((enabled: boolean) => void) | null = null;
   private tooltip: HTMLElement | null;
   private hovered = false;
   private minimized = false;
@@ -163,12 +165,14 @@ export class SynthSpectrogramOverlay {
     canvasId = 'synth-spec-canvas',
     tooltipId = 'synth-spec-tooltip',
     toggleId = 'synth-spec-toggle',
+    streamCheckboxId = 'synth-stream-toggle',
   ) {
     this.container = document.getElementById(containerId);
     this.canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
     this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
     this.tooltip = document.getElementById(tooltipId);
     this.toggleBtn = document.getElementById(toggleId) as HTMLButtonElement | null;
+    this.streamCheckbox = document.getElementById(streamCheckboxId) as HTMLInputElement | null;
 
     if (this.container) {
       this.container.addEventListener('pointerenter', () => {
@@ -181,6 +185,13 @@ export class SynthSpectrogramOverlay {
       });
     }
 
+    if (this.streamCheckbox) {
+      this.streamCheckbox.addEventListener('change', () => {
+        this.streamToggleCb?.(this.streamCheckbox?.checked ?? false);
+      });
+      this.streamCheckbox.addEventListener('click', (ev) => ev.stopPropagation());
+    }
+
     if (this.toggleBtn) {
       this.toggleBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -188,6 +199,15 @@ export class SynthSpectrogramOverlay {
       });
     }
     this.syncToggleUi();
+  }
+
+  onStreamlinesToggle(cb: (enabled: boolean) => void): void {
+    this.streamToggleCb = cb;
+    cb(this.isStreamlinesEnabled());
+  }
+
+  isStreamlinesEnabled(): boolean {
+    return this.streamCheckbox ? this.streamCheckbox.checked : true;
   }
 
   isMinimized(): boolean {
@@ -425,6 +445,32 @@ export class SynthSpectrogramOverlay {
       row.append(top, prov);
       list.appendChild(row);
     }
+
+    const streamRow = document.createElement('div');
+    streamRow.className = 'synth-tip-row';
+    const streamTop = document.createElement('div');
+    streamTop.className = 'synth-tip-row-top';
+    const streamSwatch = document.createElement('i');
+    streamSwatch.className = 'synth-tip-swatch';
+    streamSwatch.style.background = 'linear-gradient(90deg, #ff2a85, #00f0ff)';
+    streamSwatch.style.boxShadow = '0 0 8px rgba(0, 240, 255, 0.8)';
+    const streamName = document.createElement('span');
+    streamName.className = 'synth-tip-name';
+    streamName.style.color = snap.streamlinesEnabled ? '#00f0ff' : '#94a3b8';
+    streamName.textContent = 'Wind & Ocean Streamlines';
+    const streamMetric = document.createElement('span');
+    streamMetric.className = 'synth-tip-metric';
+    streamMetric.textContent = snap.streamlinesEnabled
+      ? `ON · ${Math.round(snap.streamlineEnergy * 100)}% energy`
+      : 'OFF (unchecked)';
+    streamTop.append(streamSwatch, streamName, streamMetric);
+    const streamProv = document.createElement('div');
+    streamProv.className = 'synth-tip-prov';
+    streamProv.textContent =
+      '16-band AudioWorklet harmonic resonator + live wave ripple modulation along all visible wind & ocean lines.';
+    streamRow.append(streamTop, streamProv);
+    list.appendChild(streamRow);
+
     this.tooltip.appendChild(list);
   }
 }

@@ -2646,6 +2646,11 @@ cyberSynth.setVolume(params.synthVol);
 cyberSynth.setEnabled(modeEnabled('music'), false);
 const synthSpectrogram = new SynthSpectrogramOverlay();
 const synthSpecSnapshot = createSpectrogramSnapshot();
+const windStreamBands = new Float32Array(8);
+const oceanStreamBands = new Float32Array(8);
+synthSpectrogram.onStreamlinesToggle((enabled) => {
+  cyberSynth.setStreamlinesEnabled(enabled);
+});
 const musicToggleBtn = document.getElementById('music-toggle') as HTMLButtonElement | null;
 let lastAudioObserveMs = 0;
 let audioObserveInFlight = false;
@@ -4580,6 +4585,19 @@ function update() {
 
   syncStreamCanvasOpacity();
 
+  tooltipManager.tick();
+  observeGlobeAudioCenter(start);
+  const rmsAudio = cyberSynth.tick(start);
+  cyberSynth.readSpectrogram(synthSpecSnapshot);
+  synthSpectrogram.render(synthSpecSnapshot, start);
+  if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
+
+  const streamModActive =
+    cyberSynth.isRunning() &&
+    cyberSynth.isStreamlinesEnabled() &&
+    !document.hidden;
+  const streamPhase = start * 0.011;
+
   if (oceanCtx && currentOceanGrid) {
     const oceanTint: [number, number, number] =
       showAir && earthParams.windLines > 0.01 ? [115, 235, 255] : [235, 250, 255];
@@ -4592,7 +4610,22 @@ function update() {
       viewSignature,
       showOcean && earthParams.oceanLines > 0.001,
       cameraMoving,
+      streamModActive
+        ? {
+            enabled: true,
+            phase: streamPhase,
+            kickPulse: synthSpecSnapshot.sidechainDepth,
+            bassEnergy: synthSpecSnapshot.bassLevel,
+            acidDrive: synthSpecSnapshot.acidDrive,
+            chorusSpread: synthSpecSnapshot.chorusLevel,
+            polyEnergy: synthSpecSnapshot.polyLevel,
+            isOcean: true,
+          }
+        : undefined,
+      oceanStreamBands,
     );
+  } else {
+    oceanStreamBands.fill(0);
   }
 
   if (windCtx) {
@@ -4605,15 +4638,25 @@ function update() {
       viewSignature,
       showAir && earthParams.windLines > 0.001,
       cameraMoving,
+      streamModActive
+        ? {
+            enabled: true,
+            phase: streamPhase * 1.18,
+            kickPulse: synthSpecSnapshot.sidechainDepth,
+            bassEnergy: synthSpecSnapshot.bassLevel,
+            acidDrive: synthSpecSnapshot.acidDrive,
+            chorusSpread: synthSpecSnapshot.chorusLevel,
+            polyEnergy: synthSpecSnapshot.polyLevel,
+            isOcean: false,
+          }
+        : undefined,
+      windStreamBands,
     );
+  } else {
+    windStreamBands.fill(0);
   }
 
-  tooltipManager.tick();
-  observeGlobeAudioCenter(start);
-  const rmsAudio = cyberSynth.tick(start);
-  cyberSynth.readSpectrogram(synthSpecSnapshot);
-  synthSpectrogram.render(synthSpecSnapshot, start);
-  if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
+  cyberSynth.updateStreamlineTelemetry(start, windStreamBands, oceanStreamBands);
 
   const checkValidation = frameCount <= 120 || (frameCount % 60 === 0);
   if (checkValidation) {

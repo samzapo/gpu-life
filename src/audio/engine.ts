@@ -9,6 +9,7 @@ import {
   type ScreenAudioObservation,
 } from './observer.ts';
 import { cyberSection, generateScoreEvents, type ScheduledAudioEvent } from './score.ts';
+import { STREAMLINE_WORKLET_NAME, STREAMLINE_WORKLET_SOURCE } from './streamWorklet.ts';
 
 interface AudioLaneNodes {
   input: GainNode;
@@ -39,6 +40,8 @@ export interface SynthSpectrogramSnapshot {
   delayFeedback: number;
   acidDrive: number;
   sidechainDepth: number;
+  streamlinesEnabled: boolean;
+  streamlineEnergy: number;
   /** 6 distinct effect rows × SPECTROGRAM_BINS normalized [0..1] current spectral amplitudes */
   curves: [
     Float32Array,
@@ -70,6 +73,8 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
     delayFeedback: 0.24,
     acidDrive: 0.18,
     sidechainDepth: 0,
+    streamlinesEnabled: true,
+    streamlineEnergy: 0,
     curves: [
       new Float32Array(SPECTROGRAM_BINS),
       new Float32Array(SPECTROGRAM_BINS),
@@ -182,8 +187,29 @@ export class GlobeCyberSynth {
   private curDelayFeedback = 0.24;
   private curAcidDrive = 0.18;
 
+  private streamlinesEnabled = true;
+  private streamWorkletNode: AudioWorkletNode | null = null;
+  private streamWorkletLoading = false;
+  private streamBands16 = new Float32Array(16);
+  private streamFreqs16 = new Float32Array(16);
+  private streamEnergyAvg = 0;
+  private lastStreamSendMs = -1000;
+
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  isStreamlinesEnabled(): boolean {
+    return this.streamlinesEnabled;
+  }
+
+  setStreamlinesEnabled(on: boolean): void {
+    this.streamlinesEnabled = on;
+    if (this.streamWorkletNode) {
+      this.streamWorkletNode.port.postMessage({
+        masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
+      });
+    }
   }
 
   isRunning(): boolean {
@@ -198,10 +224,102 @@ export class GlobeCyberSynth {
     return this.ctx ? this.ctx.state : 'uninitialized';
   }
 
+  private initStreamWorklet(ctx: AudioContext): void {
+    if (this.streamWorkletLoading || this.streamWorkletNode || !ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') {
+      return;
+    }
+    this.streamWorkletLoading = true;
+    const blob = new Blob([STREAMLINE_WORKLET_SOURCE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    void ctx.audioWorklet
+      .addModule(url)
+      .then(() => {
+        if (this.ctx !== ctx) return;
+        const node = new AudioWorkletNode(ctx, STREAMLINE_WORKLET_NAME, {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+        });
+        const workletGain = ctx.createGain();
+        workletGain.gain.value = 0.72;
+        node.connect(workletGain);
+        if (this.polyBus) workletGain.connect(this.polyBus);
+        if (this.chorusMix) {
+          const cSend = ctx.createGain();
+          cSend.gain.value = 0.35;
+          workletGain.connect(cSend);
+          cSend.connect(this.chorusMix);
+        }
+        if (this.duckGain) workletGain.connect(this.duckGain);
+        this.streamWorkletNode = node;
+        node.port.postMessage({
+          masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
+          drive: this.curAcidDrive,
+        });
+      })
+      .catch(() => {
+        // Gracefully degrade if AudioWorklet is unavailable
+      })
+      .finally(() => {
+        this.streamWorkletLoading = false;
+        URL.revokeObjectURL(url);
+      });
+  }
+
+  updateStreamlineTelemetry(nowMs: number, windBands?: Float32Array, oceanBands?: Float32Array): void {
+    if (!this.streamlinesEnabled || !this.isRunning()) {
+      if (this.streamWorkletNode && nowMs - this.lastStreamSendMs >= 120) {
+        this.lastStreamSendMs = nowMs;
+        this.streamWorkletNode.port.postMessage({ masterAmp: 0 });
+      }
+      this.streamEnergyAvg = 0;
+      return;
+    }
+
+    let sum = 0;
+    for (let i = 0; i < 8; i++) {
+      const w = windBands ? Math.max(0, Math.min(1, windBands[i] || 0)) : 0;
+      const o = oceanBands ? Math.max(0, Math.min(1, oceanBands[i] || 0)) : 0;
+      this.streamBands16[i] = w;
+      this.streamBands16[8 + i] = o;
+      sum += w + o;
+    }
+    this.streamEnergyAvg = Math.min(1, sum / 16);
+
+    if (!this.streamWorkletNode || nowMs - this.lastStreamSendMs < 65) return;
+    this.lastStreamSendMs = nowMs;
+
+    const obs = this.obs;
+    const env = obs.env;
+    const darkBias = obs.halogenStress * 0.45 + env.nightFactor * 0.45 + obs.mineralSulfideRatio * 0.35;
+    const usePhrygian = darkBias > 0.36;
+    const bar = Math.floor(this.frameCursor / ((SYNTH_RATE * 60) / SYNTH_BPM / 4 * 16));
+    const prog = usePhrygian ? [0, 5, 1, 8] : [0, 5, 8, 10];
+    const rootMidi = 50 + prog[Math.floor(bar / 2) % prog.length] + (env.nightFactor > 0.55 ? -12 : 0);
+
+    const windDegrees = usePhrygian ? [0, 1, 7, 10, 12, 13, 19, 22] : [0, 3, 7, 10, 12, 15, 19, 22];
+    const oceanDegrees = usePhrygian ? [-12, -5, -11, 0, 1, 7, 8, 12] : [-12, -5, 0, 3, 7, 10, 12, 15];
+    for (let i = 0; i < 8; i++) {
+      this.streamFreqs16[i] = midiToHz(Math.max(36, Math.min(80, rootMidi + windDegrees[i])));
+      this.streamFreqs16[8 + i] = midiToHz(Math.max(28, Math.min(72, rootMidi + oceanDegrees[i])));
+    }
+
+    this.streamWorkletNode.port.postMessage({
+      bands: this.streamBands16,
+      freqs: this.streamFreqs16,
+      drive: this.curAcidDrive,
+      masterAmp: 1,
+    });
+  }
+
   private syncMasterGain(): void {
     if (!this.masterGain || !this.ctx) return;
-    const target = this.enabled && this.ctx.state === 'running' ? this.volume * 0.85 : 0;
+    const active = this.enabled && this.ctx.state === 'running';
+    const target = active ? this.volume * 0.85 : 0;
     this.masterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02);
+    this.streamWorkletNode?.port.postMessage({
+      masterAmp: active && this.unlocked && this.streamlinesEnabled ? 1 : 0,
+    });
   }
 
   setVolume(vol: number): void {
@@ -248,6 +366,7 @@ export class GlobeCyberSynth {
       this.ctx = ctx;
       this.buildGraph(ctx);
       this.drumBank = buildCyberDrumBank(ctx);
+      this.initStreamWorklet(ctx);
       this.originTime = ctx.currentTime;
       this.frameCursor = 0;
       ctx.addEventListener('statechange', () => {
@@ -467,6 +586,8 @@ export class GlobeCyberSynth {
     out.chorusWidth = this.curChorusWidth;
     out.delayFeedback = this.curDelayFeedback;
     out.acidDrive = this.curAcidDrive;
+    out.streamlinesEnabled = this.streamlinesEnabled;
+    out.streamlineEnergy = this.streamEnergyAvg;
 
     const currentStep = Math.floor(this.frameCursor / ((SYNTH_RATE * 60) / SYNTH_BPM / 4));
     out.section = cyberSection(Math.floor(currentStep / 16));

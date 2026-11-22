@@ -263,6 +263,21 @@ test('GlobeCyberSynth restores masterGain after mute/unmute on already-running A
     assert.equal(snap.curves.length, 6);
     assert.equal(snap.curves[0].length, SPECTROGRAM_BINS);
     assert.ok(snap.bassLevel > 0);
+    assert.equal(snap.streamlinesEnabled, true);
+
+    synth.updateStreamlineTelemetry(
+      2000,
+      new Float32Array([0.4, 0.6, 0.2, 0.8, 0.5, 0.3, 0.7, 0.9]),
+      new Float32Array([0.3, 0.5, 0.1, 0.4, 0.6, 0.2, 0.5, 0.8]),
+    );
+    synth.readSpectrogram(snap);
+    assert.ok(snap.streamlineEnergy > 0.3);
+
+    synth.setStreamlinesEnabled(false);
+    synth.updateStreamlineTelemetry(2100);
+    synth.readSpectrogram(snap);
+    assert.equal(snap.streamlinesEnabled, false);
+    assert.equal(snap.streamlineEnergy, 0);
   } finally {
     globalThis.window = prevWindow;
   }

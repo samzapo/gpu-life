@@ -12,6 +12,17 @@ export interface StreamFieldSampler {
   sampleInto: (lonDeg: number, latDeg: number, out: [number, number, number, number]) => void;
 }
 
+export interface SynthStreamModulation {
+  enabled: boolean;
+  phase: number;
+  kickPulse: number;
+  bassEnergy: number;
+  acidDrive: number;
+  chorusSpread: number;
+  polyEnergy: number;
+  isOcean: boolean;
+}
+
 export function windGridToSampler(grid: WindGrid): StreamFieldSampler {
   const spec = WIND_LEVELS[grid.level];
   return {
@@ -70,6 +81,29 @@ function buildIntensityStyles(rgb: [number, number, number]): string[] {
   return out;
 }
 
+function buildSynthIntensityStyles(isOcean: boolean): string[] {
+  // Gradient across intensity buckets: cool base into cyberpunk magenta/violet (wind) or cyan/mint (ocean)
+  const stops: readonly (readonly [number, number, number, number])[] = isOcean
+    ? [
+        [75, 195, 255, 0.56],
+        [35, 225, 255, 0.72],
+        [0, 240, 255, 0.84],
+        [46, 255, 200, 0.92],
+        [185, 255, 238, 0.98],
+      ]
+    : [
+        [155, 145, 255, 0.54],
+        [192, 132, 252, 0.70],
+        [235, 78, 195, 0.84],
+        [255, 42, 133, 0.92],
+        [255, 195, 232, 0.98],
+      ];
+  return stops.map(([r, g, b, a]) => `rgba(${r}, ${g}, ${b}, ${a})`);
+}
+
+const SYNTH_WIND_STYLES = buildSynthIntensityStyles(false);
+const SYNTH_OCEAN_STYLES = buildSynthIntensityStyles(true);
+
 function buildBandIntensityStyles(rgb: [number, number, number]): string[][] {
   const alphas = [0.36, 0.86];
   return alphas.map((alpha) => {
@@ -104,6 +138,9 @@ export class WindStreamRenderer {
   private trailBucket = new Uint8Array(MAX_PARTICLES * TRAIL_LEN);
   private trailHead = new Uint8Array(MAX_PARTICLES);
   private trailCount = new Uint8Array(MAX_PARTICLES);
+  private prevWaveOff = new Float32Array(MAX_PARTICLES);
+  private bandSums = new Float32Array(8);
+  private bandCounts = new Uint16Array(8);
 
   private polyPools: number[][][] = Array.from({ length: FADE_BANDS }, () =>
     Array.from({ length: REPROJECT_BUCKETS }, () => []),
@@ -126,6 +163,7 @@ export class WindStreamRenderer {
     this.particles.length = 0;
     this.trailHead.fill(0);
     this.trailCount.fill(0);
+    this.prevWaveOff.fill(0);
     this.viewKey = '';
   }
 
@@ -182,6 +220,7 @@ export class WindStreamRenderer {
   ): void {
     this.trailHead[index] = 0;
     this.trailCount[index] = 0;
+    this.prevWaveOff[index] = 0;
     const inv = proj.invert;
     if (inv) {
       const maxTries = sampler.masked ? 12 : 5;
@@ -456,12 +495,21 @@ export class WindStreamRenderer {
     viewSignature: string,
     active: boolean,
     cameraMoving = false,
+    synthMod?: SynthStreamModulation,
+    outBands?: Float32Array,
   ): void {
     if (!active) {
       if (this.particles.length > 0) {
         this.clear(ctx, width, height);
       }
+      if (outBands && outBands.length >= 8) outBands.fill(0);
       return;
+    }
+
+    const useSynthFx = Boolean(synthMod?.enabled);
+    if (outBands) {
+      this.bandSums.fill(0);
+      this.bandCounts.fill(0);
     }
 
     const sampler =
@@ -659,8 +707,40 @@ export class WindStreamRenderer {
           if (scr0Ok && scr1Ok) {
             const dx = scr1x - scr0x;
             const dy = scr1y - scr0y;
-            if (dx * dx + dy * dy <= maxSegJumpSq) {
-              this.segPools[bIdx].push(scr0x, scr0y, scr1x, scr1y);
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq <= maxSegJumpSq) {
+              if (outBands && scr1x >= 0 && scr1x <= width) {
+                const band = Math.max(0, Math.min(7, Math.floor((scr1x / Math.max(width, 1)) * 8)));
+                this.bandSums[band] += Math.min(1, mag / Math.max(sampler.streamMax, 0.25));
+                this.bandCounts[band]++;
+              }
+
+              if (useSynthFx && synthMod && lenSq > 0.04) {
+                const invLen = 1 / Math.sqrt(lenSq);
+                const nx = -dy * invLen;
+                const ny = dx * invLen;
+                const prevOff = this.prevWaveOff[i];
+                const waveFreq = 0.30 + 0.18 * (bIdx / (INTENSITY_BUCKETS - 1));
+                const speedFrac = Math.min(1, mag / Math.max(sampler.streamMax, 0.25));
+                const waveAmp =
+                  (0.85 + 2.5 * synthMod.bassEnergy + 2.2 * synthMod.kickPulse + 1.4 * synthMod.polyEnergy) *
+                  (0.35 + 0.65 * speedFrac);
+                const nextOff = Math.sin(p.age * waveFreq + i * 1.37 + synthMod.phase) * waveAmp;
+                this.prevWaveOff[i] = nextOff;
+
+                const drawBucket = Math.min(
+                  INTENSITY_BUCKETS - 1,
+                  bIdx + (synthMod.kickPulse > 0.45 && speedFrac > 0.45 ? 1 : 0),
+                );
+                this.segPools[drawBucket].push(
+                  scr0x + nx * prevOff,
+                  scr0y + ny * prevOff,
+                  scr1x + nx * nextOff,
+                  scr1y + ny * nextOff,
+                );
+              } else {
+                this.segPools[bIdx].push(scr0x, scr0y, scr1x, scr1y);
+              }
             }
           }
           scr0x = scr1x;
@@ -741,21 +821,43 @@ export class WindStreamRenderer {
         ctx.clip();
       }
 
-      ctx.lineWidth = sampler.lineWidth;
+      const activeStyles =
+        useSynthFx && synthMod
+          ? synthMod.isOcean
+            ? SYNTH_OCEAN_STYLES
+            : SYNTH_WIND_STYLES
+          : styles;
+      ctx.lineWidth =
+        useSynthFx && synthMod
+          ? sampler.lineWidth + 0.45 * synthMod.bassEnergy + 0.65 * synthMod.kickPulse
+          : sampler.lineWidth;
       ctx.lineCap = 'round';
       for (let i = 0; i < INTENSITY_BUCKETS; i++) {
         const segs = this.segPools[i];
         if (segs.length === 0) continue;
         ctx.beginPath();
-        ctx.strokeStyle = styles[i];
+        ctx.strokeStyle = activeStyles[i];
+        if (useSynthFx && synthMod && i >= INTENSITY_BUCKETS - 2) {
+          ctx.shadowColor = synthMod.isOcean ? 'rgba(0, 240, 255, 0.92)' : 'rgba(255, 42, 133, 0.92)';
+          ctx.shadowBlur = i === INTENSITY_BUCKETS - 1 ? 6 + synthMod.kickPulse * 7 : 3;
+        } else {
+          ctx.shadowBlur = 0;
+        }
         for (let k = 0; k < segs.length; k += 4) {
           ctx.moveTo(segs[k], segs[k + 1]);
           ctx.lineTo(segs[k + 2], segs[k + 3]);
         }
         ctx.stroke();
       }
+      ctx.shadowBlur = 0;
       if (!isOrthographic) {
         ctx.restore();
+      }
+    }
+    if (outBands && outBands.length >= 8) {
+      for (let b = 0; b < 8; b++) {
+        outBands[b] =
+          this.bandCounts[b] > 0 ? Math.min(1, (this.bandSums[b] / this.bandCounts[b]) * 1.45) : 0;
       }
     }
     this.frameCounter++;

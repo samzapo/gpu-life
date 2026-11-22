@@ -1,12 +1,21 @@
 <div id="synth-spec" aria-label="Synth Spectrogram">
   <canvas id="synth-spec-canvas"></canvas>
-  <button
-    id="synth-spec-toggle"
-    type="button"
-    aria-expanded="true"
-    aria-label="Minimize synth spectrogram"
-    title="Minimize synth spectrogram"
-  >−</button>
+  <div class="synth-spec-controls">
+    <input
+      id="synth-stream-toggle"
+      type="checkbox"
+      checked
+      aria-label="Toggle wind and water streamline synth effect"
+      title="Toggle wind &amp; water streamline synth effect"
+    />
+    <button
+      id="synth-spec-toggle"
+      type="button"
+      aria-expanded="true"
+      aria-label="Minimize synth spectrogram"
+      title="Minimize synth spectrogram"
+    >−</button>
+  </div>
 </div>
 <div id="synth-spec-tooltip" role="tooltip" hidden></div>
 
