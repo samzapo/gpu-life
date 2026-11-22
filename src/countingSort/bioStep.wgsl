@@ -40,8 +40,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);
 
     if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
+        let zeroGrads = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, p._pad, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, zeroGrads, initBioUnifiedAccum(), bio,
         );
         lifeStateOut[pi] = resOff.nextLifeState;
         bioForceOut[pi] = resOff.bioForce;
@@ -81,7 +82,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let nbV = valence[ip.idx];
                     let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
                     let nbLife = lifeStateIn[ip.idx];
-                    let nbVel = input[ip.idx].vel;
+                    let nbPart = input[ip.idx];
                     accumulateBioUnifiedNeighbor(
                         p.pos,
                         p.vel,
@@ -91,7 +92,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         myAtomLoad,
                         curLife,
                         ip.pos,
-                        nbVel,
+                        nbPart.vel,
                         ip.colour,
                         ip.phase,
                         ip.bioSpecies,
@@ -99,6 +100,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         nbAtomLoad,
                         nbAtomicNum,
                         nbValence,
+                        nbPart._pad,
                         oc,
                         bio,
                         &acc,
@@ -108,6 +110,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
+    let envGrads = sampleBioEnvGrads(p.pos, oceanTex, tempTex, uvTex, hydroTex, myPhase);
     let res = finalizeBioUnified(
         pi,
         p.pos,
@@ -116,12 +119,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         myValence,
         myAtomLoad,
         curLife,
+        p._pad,
         windRaw,
         oc,
         tSample,
         uvSample,
         hydroSample,
         terrainSample,
+        envGrads,
         acc,
         bio,
     );

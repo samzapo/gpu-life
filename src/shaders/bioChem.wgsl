@@ -180,23 +180,127 @@ fn elemRedoxWeight(atomicNum: u32) -> f32 {
     return 0.0;
 }
 
-// Computes photosynthetic/evaporative UV irradiance (.x) and live UV-B/A mutagenesis & photodamage stress (.y)
-// from NOAA CPC noontime UVI + live GFS Ozone (TOZNE) + Cloud Cover (TCDC) + UTC Solar Zenith `(uviNow, uviNoon, ozoneDU, cloudFrac)`.
+// Computes photosynthetic/evaporative irradiance (.x) and UV-B/A photodamage stress (.y)
+// directly from real live CPC + GFS UVI (`uviNow = uvSample.x`) with zero synthetic night-noon leakage.
 fn evalUvSolarAndStress(uvSample: vec4f, localUvScale: f32) -> vec2f {
     let sc = clamp(localUvScale, 0.0, 2.0);
     if (sc <= 0.001) {
         return vec2f(0.68, 0.0);
     }
     let uviNow = clamp(uvSample.x, 0.0, 24.0);
-    let uviNoon = clamp(uvSample.y, 0.0, 24.0);
-    let effUvi = 0.42 * uviNoon + 0.58 * uviNow;
-    let normU = effUvi / 10.0;
-    // Michaelis-Menten P-I saturation: polar winter (~0 UVI) stays dormant; cloudy high-lats stay modest; sunlit tropics saturate ~1.14
-    let solarRaw = clamp(0.05 + 1.56 * (normU / (normU + 0.48)), 0.05, 1.14);
     let blend = min(sc, 1.5);
-    let solar = mix(0.68, solarRaw, clamp(blend, 0.0, 1.0));
+    let normU = uviNow / 3.8;
+    // Direct Michaelis-Menten P-I curve from measured uviNow: true night (uviNow == 0) has 0.0 solar;
+    // temperate/cloudy day (uviNow 2..5) yields lush 0.48..0.73 productivity; tropics saturate cleanly.
+    let solarRaw = select(0.0, clamp((normU / (normU + 0.55)) * 1.18, 0.0, 1.25), uviNow > 0.001);
+    let solar = solarRaw * blend;
     let uvStress = smoothstep(5.5, 15.5, uviNow) * blend;
     return vec2f(solar, uvStress);
+}
+
+const BIO_NICHE_TAG: u32 = 2097152u; // 1u << 21u
+
+fn hasValidBioNiche(padVal: f32) -> bool {
+    if (padVal < 2097151.5) {
+        return false;
+    }
+    let u = u32(round(padVal));
+    return (u & BIO_NICHE_TAG) != 0u;
+}
+
+fn unpackPrefOc(padVal: f32) -> f32 {
+    return f32(u32(round(padVal)) & 15u) / 15.0;
+}
+
+fn unpackPrefTempK(padVal: f32) -> f32 {
+    let q = (u32(round(padVal)) >> 4u) & 15u;
+    return 258.15 + (f32(q) / 15.0) * 55.0;
+}
+
+fn unpackPrefSolar(padVal: f32) -> f32 {
+    let q = (u32(round(padVal)) >> 8u) & 15u;
+    return f32(q) / 15.0;
+}
+
+fn unpackRootGene(padVal: f32) -> f32 {
+    let q = (u32(round(padVal)) >> 12u) & 15u;
+    return f32(q) / 15.0;
+}
+
+fn packBioNiche(
+    prefOc: f32,
+    prefTempK: f32,
+    prefSolar: f32,
+    rootGene: f32,
+    rootNow: f32,
+    isProducer: bool,
+) -> f32 {
+    let qOc = u32(clamp(round(clamp(prefOc, 0.0, 1.0) * 15.0), 0.0, 15.0));
+    let qT = u32(clamp(round(clamp((prefTempK - 258.15) / 55.0, 0.0, 1.0) * 15.0), 0.0, 15.0));
+    let qS = u32(clamp(round(clamp(prefSolar, 0.0, 1.0) * 15.0), 0.0, 15.0));
+    let qRg = u32(clamp(round(clamp(rootGene, 0.0, 1.0) * 15.0), 0.0, 15.0));
+    let qRn = u32(clamp(round(clamp(rootNow, 0.0, 1.0) * 15.0), 0.0, 15.0));
+    let prBit = select(0u, 1u, isProducer);
+    let packed = BIO_NICHE_TAG | qOc | (qT << 4u) | (qS << 8u) | (qRg << 12u) | (qRn << 16u) | (prBit << 20u);
+    return f32(packed);
+}
+
+struct BioEnvGrads {
+    gradOc: vec3f,
+    gradTemp: vec3f,
+    gradSolar: vec3f,
+    gradMoist: vec3f,
+}
+
+fn sampleBioEnvGrads(
+    pos: vec3f,
+    oceanTex: texture_2d<f32>,
+    tempTex: texture_2d<f32>,
+    uvTex: texture_2d<f32>,
+    hydroTex: texture_2d<f32>,
+    myPhase: u32,
+) -> BioEnvGrads {
+    var g = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
+    if (myPhase != 1u) {
+        return g;
+    }
+    let n = normalize(pos);
+    let eE = sphereEastBasis(n);
+    let eN = normalize(cross(n, eE));
+    let eps = 0.016;
+    let pEp = normalize(n + eE * eps);
+    let pEm = normalize(n - eE * eps);
+    let pNp = normalize(n + eN * eps);
+    let pNm = normalize(n - eN * eps);
+
+    let oEp = sampleOceanTexture(oceanTex, pEp).w;
+    let oEm = sampleOceanTexture(oceanTex, pEm).w;
+    let oNp = sampleOceanTexture(oceanTex, pNp).w;
+    let oNm = sampleOceanTexture(oceanTex, pNm).w;
+    g.gradOc = eE * ((oEp - oEm) / (2.0 * eps)) + eN * ((oNp - oNm) / (2.0 * eps));
+
+    let tEp = effectiveSurfaceTempK(sampleTempTexture(tempTex, pEp), oEp);
+    let tEm = effectiveSurfaceTempK(sampleTempTexture(tempTex, pEm), oEm);
+    let tNp = effectiveSurfaceTempK(sampleTempTexture(tempTex, pNp), oNp);
+    let tNm = effectiveSurfaceTempK(sampleTempTexture(tempTex, pNm), oNm);
+    g.gradTemp = eE * ((tEp - tEm) / (2.0 * eps)) + eN * ((tNp - tNm) / (2.0 * eps));
+
+    let sEp = clamp(sampleUvTexture(uvTex, pEp).x, 0.0, 24.0);
+    let sEm = clamp(sampleUvTexture(uvTex, pEm).x, 0.0, 24.0);
+    let sNp = clamp(sampleUvTexture(uvTex, pNp).x, 0.0, 24.0);
+    let sNm = clamp(sampleUvTexture(uvTex, pNm).x, 0.0, 24.0);
+    g.gradSolar = eE * ((sEp - sEm) / (2.0 * eps)) + eN * ((sNp - sNm) / (2.0 * eps));
+
+    let hEp = sampleHydroTexture(hydroTex, pEp);
+    let hEm = sampleHydroTexture(hydroTex, pEm);
+    let hNp = sampleHydroTexture(hydroTex, pNp);
+    let hNm = sampleHydroTexture(hydroTex, pNm);
+    let mEp = hEp.x + 0.18 * smoothstep(0.2, 5.0, hEp.y);
+    let mEm = hEm.x + 0.18 * smoothstep(0.2, 5.0, hEm.y);
+    let mNp = hNp.x + 0.18 * smoothstep(0.2, 5.0, hNp.y);
+    let mNm = hNm.x + 0.18 * smoothstep(0.2, 5.0, hNm.y);
+    g.gradMoist = eE * ((mEp - mEm) / (2.0 * eps)) + eN * ((mNp - mNm) / (2.0 * eps));
+    return g;
 }
 
 fn evalCoastalUpwelling(oc: vec4f) -> f32 {
@@ -527,6 +631,14 @@ struct BioUnifiedAccum {
     nearWaterFluid: f32,
     nearOxygenGas: f32,
     nearCarbonFeed: f32,
+    // Inherited niche preference & rooted-vs-mobile trait consensus
+    nicheOcSum: f32,
+    nicheTempSum: f32,
+    nicheSolarSum: f32,
+    nicheRootSum: f32,
+    nicheWeight: f32,
+    bestFixNiche: f32,
+    bestAdjNiche: f32,
 }
 
 fn initBioUnifiedAccum() -> BioUnifiedAccum {
@@ -557,6 +669,7 @@ fn accumulateBioUnifiedNeighbor(
     nbAtomLoad: f32,
     nbAtomicNum: u32,
     nbValence: u32,
+    nbPad: f32,
     oc: vec4f,
     bio: BioLink,
     acc: ptr<function, BioUnifiedAccum>,
@@ -862,6 +975,7 @@ fn accumulateBioUnifiedNeighbor(
             (*acc).bestAdjW = adjScore;
             (*acc).bestAdjSp = nbSp;
             (*acc).bestAdjKin = nbKin;
+            (*acc).bestAdjNiche = nbPad;
         }
 
         // Check if nearby living blob particle can fix free biogenic C/H/O/S atom
@@ -878,6 +992,7 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).bestFixSp = nbSp;
                 (*acc).bestFixKin = nbKin;
                 (*acc).bestFixGene = nbGene;
+                (*acc).bestFixNiche = nbPad;
             }
         }
 
@@ -949,6 +1064,13 @@ fn accumulateBioUnifiedNeighbor(
         (*acc).blobGeneSum += f32(nbGene);
         (*acc).blobCentroid += bw * nbPos;
         (*acc).blobCentW += bw;
+        if (hasValidBioNiche(nbPad)) {
+            (*acc).nicheOcSum += bw * unpackPrefOc(nbPad);
+            (*acc).nicheTempSum += bw * unpackPrefTempK(nbPad);
+            (*acc).nicheSolarSum += bw * unpackPrefSolar(nbPad);
+            (*acc).nicheRootSum += bw * unpackRootGene(nbPad);
+            (*acc).nicheWeight += bw;
+        }
         return;
     }
 
@@ -1349,12 +1471,14 @@ fn finalizeBioUnified(
     valence: u32,
     atomLoad: f32,
     curLifeState: vec4f,
+    myPad: f32,
     windRaw: vec3f,
     oc: vec4f,
     tSample: vec4f,
     uvSample: vec4f,
     hydroSample: vec2f,
     terrainSample: vec4f,
+    envGrads: BioEnvGrads,
     acc: BioUnifiedAccum,
     bio: BioLink,
 ) -> BioStepResult {
@@ -1591,37 +1715,45 @@ fn finalizeBioUnified(
         }
 
         // 0B. Transmembrane nutrient import into encapsulated protocells OR naked autotrophic fixation (`0 -> 1`)
+        // (No arbitrary colony-size cap: only extreme physical steric saturation blocks import.)
+        let stericHeadroom = clamp(1.0 - acc.nearTotalBio / 220.0, 0.0, 1.0);
         if (acc.nearLipidCount >= 1.0 && adjCount >= 1.0) {
-            let cap = (22.0 + 3.2 * acc.nearLipidCount + 1.2 * f32(adjGene)) * select(1.0, 1.95, hostGrad);
-            let encapHeadroom = clamp(1.0 - adjCount / cap, 0.0, 1.0);
-            if (encapHeadroom > 0.02 && max(adjAvgE, avgLipidE) > 0.52) {
+            if (stericHeadroom > 0.02 && max(adjAvgE, avgLipidE) > 0.50) {
                 let fixPow = clamp(max(acc.nearFixer, acc.nearLipidCount * 0.6), 0.4, 3.0);
                 let pImport = clamp(
-                    0.32 * select(1.0, 1.25, hostGrad) * q10Bio * solar * envMedia * fixPow * encapHeadroom * bondEase * dtBio,
+                    0.32 * select(1.0, 1.25, hostGrad) * q10Bio * max(solar, 0.08) * envMedia * fixPow * stericHeadroom * bondEase * dtBio,
                     0.0,
                     0.10,
                 );
                 if (hashFloat(pi, frameU, 10u) < pImport) {
                     let hostSp = min(select(acc.bestAdjSp, acc.bestFixSp, acc.bestFixW > 0.0), nBio - 1u);
                     let hostKin = select(acc.bestAdjKin, acc.bestFixKin, acc.bestFixW > 0.0);
+                    let hostNiche = select(acc.bestAdjNiche, acc.bestFixNiche, acc.bestFixW > 0.0);
                     var nextSp = hostSp;
                     if (nBio > 1u && hashFloat(pi, frameU, 11u) < encapNoveltyDrive(adjGene, adjColors)) {
                         nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
                     }
                     let childGene = mutateEncapGene(adjGene, pi, frameU, 17u, 0.06);
                     let childGrad = select(0u, 1u, hostGrad && (acc.nearLipidCount >= 1.0 || acc.adjGradCount >= 3.0));
+                    let childTraits = getBioSpeciesTraits(nChem, nBio, nextSp);
+                    let defRoot = clamp(0.56 + 0.55 * (childTraits.x - childTraits.w * 0.65), 0.08, 0.95);
+                    let childPrefOc = select(oc.w, unpackPrefOc(hostNiche), hasValidBioNiche(hostNiche));
+                    let childPrefT = select(tHabK, unpackPrefTempK(hostNiche), hasValidBioNiche(hostNiche));
+                    let childPrefSol = select(clamp(uvSample.y / 12.0, 0.0, 1.0), unpackPrefSolar(hostNiche), hasValidBioNiche(hostNiche));
+                    let childRoot = select(defRoot, unpackRootGene(hostNiche), hasValidBioNiche(hostNiche));
+                    let childIsProd = childTraits.x >= childTraits.w * 0.72;
+                    let childPad = packBioNiche(childPrefOc, childPrefT, childPrefSol, childRoot, select(0.0, childRoot, childIsProd), childIsProd);
                     return BioStepResult(
                         vec4f(0.68, 0.06, 0.0, packLifeMetaGrad(1u, nextSp, hostKin, childGene, childGrad)),
-                        vec4f(-outwardDir * 2.2, 0.9),
+                        vec4f(-outwardDir * 2.2, childPad),
                     );
                 }
             }
         } else if (acc.nearFixer > 0.0) {
-            let crowdHeadroom = clamp(1.0 - acc.nearTotalBio / 34.0, 0.0, 1.0);
-            if (crowdHeadroom > 0.01) {
+            if (stericHeadroom > 0.02) {
                 let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
                 let pFix = clamp(
-                    0.36 * q10Bio * solar * envMedia * min(acc.nearFixer, 3.0) * elemAffinity * crowdHeadroom * bondEase * dtBio,
+                    0.36 * q10Bio * max(solar, 0.06) * envMedia * min(acc.nearFixer, 3.0) * elemAffinity * stericHeadroom * bondEase * dtBio,
                     0.0,
                     0.10,
                 );
@@ -1632,27 +1764,41 @@ fn finalizeBioUnified(
                         nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
                     }
                     let childGene = mutateEncapGene(acc.bestFixGene, pi, frameU, 17u, 0.05);
+                    let childTraits = getBioSpeciesTraits(nChem, nBio, nextSp);
+                    let defRoot = clamp(0.56 + 0.55 * (childTraits.x - childTraits.w * 0.65), 0.08, 0.95);
+                    let parentNiche = acc.bestFixNiche;
+                    let childPrefOc = select(oc.w, unpackPrefOc(parentNiche), hasValidBioNiche(parentNiche));
+                    let childPrefT = select(tHabK, unpackPrefTempK(parentNiche), hasValidBioNiche(parentNiche));
+                    let childPrefSol = select(clamp(uvSample.y / 12.0, 0.0, 1.0), unpackPrefSolar(parentNiche), hasValidBioNiche(parentNiche));
+                    let childRoot = select(defRoot, unpackRootGene(parentNiche), hasValidBioNiche(parentNiche));
+                    let childIsProd = childTraits.x >= childTraits.w * 0.72;
+                    let childPad = packBioNiche(childPrefOc, childPrefT, childPrefSol, childRoot, select(0.0, childRoot, childIsProd), childIsProd);
                     return BioStepResult(
                         vec4f(0.66, 0.06, 0.0, packLifeMeta(1u, nextSp, acc.bestFixKin, childGene)),
-                        vec4f(0.0, 0.0, 0.0, 0.9),
+                        vec4f(0.0, 0.0, 0.0, childPad),
                     );
                 }
             }
         }
 
-        // 0C. Abiogenesis / spore floor in sparse sunlit water OR warm humid tropical/temperate land
-        let wetLandSpore = (oc.w < 0.46) && (rainWash > 0.14 || landHydration > 0.50) && (tHabK > 281.0) && (elevKm < 3.4);
+        // 0C. Abiogenesis / spore floor in sunlit water OR moist cool/warm vegetated land
+        let wetLandSpore = (oc.w < 0.46) && (rainWash > 0.12 || landHydration > 0.45) && (tHabK > 274.5) && (elevKm < 3.6);
         if (acc.nearTotalBio < 1.5 && acc.nearLipidCount < 0.5 && (oc.w >= 0.46 || wetLandSpore)) {
-            let siteFertility = select(0.50 + upwell, clamp(0.55 + 0.75 * landHydration, 0.4, 1.4), wetLandSpore);
-            let pSpore = clamp(0.0032 * q10Bio * solar * siteFertility * dtBio, 0.0, 0.0060);
+            let siteFertility = select(0.50 + upwell, clamp(0.45 + 0.85 * landHydration, 0.25, 1.45), wetLandSpore);
+            let pSpore = clamp(0.0034 * q10Bio * max(solar, 0.04) * siteFertility * dtBio, 0.0, 0.0065);
             if (hashFloat(pi, frameU, 13u) < pSpore) {
                 let randSp = u32(floor(hashFloat(pi, frameU, 14u) * f32(nBio))) % nBio;
-                let sp = select(randSp, pickCohesiveProducerSpecies(nChem, nBio, pi, frameU, 14u), wetLandSpore || hashFloat(pi, frameU, 18u) < 0.55);
+                let sp = select(randSp, pickCohesiveProducerSpecies(nChem, nBio, pi, frameU, 14u), wetLandSpore || hashFloat(pi, frameU, 18u) < 0.62);
                 let freshKin = hashFloat(pi, frameU, 15u) * TWO_PI;
                 let freshGene = u32(floor(hashFloat(pi, frameU, 16u) * 16.0)) & 15u;
+                let spTraits = getBioSpeciesTraits(nChem, nBio, sp);
+                let rootJitter = (hashFloat(pi, frameU, 34u) - 0.5) * 0.56;
+                let rootGene0 = clamp(0.56 + 0.55 * (spTraits.x - spTraits.w * 0.65) + rootJitter, 0.04, 0.96);
+                let isProd0 = spTraits.x >= spTraits.w * 0.72;
+                let sporePad = packBioNiche(oc.w, tHabK, clamp(uvSample.y / 12.0, 0.0, 1.0), rootGene0, select(0.0, rootGene0, isProd0), isProd0);
                 return BioStepResult(
                     vec4f(0.68, 0.06, 0.0, packLifeMeta(1u, sp, freshKin, freshGene)),
-                    vec4f(0.0, 0.0, 0.0, -0.4),
+                    vec4f(0.0, 0.0, 0.0, sporePad),
                 );
             }
         }
@@ -1778,10 +1924,10 @@ fn finalizeBioUnified(
     );
 
     let motility = clamp(avgSelfSpeed / 0.45, 0.0, 1.5);
-    let lightExposure = clamp(1.16 - 0.008 * acc.nearTotalBio, 0.64, 1.0);
+    let lightExposure = clamp(1.12 - 0.0025 * acc.nearTotalBio, 0.70, 1.0);
 
     let autoCap = clamp(
-        (0.42 + 0.90 * avgCoh) * (0.50 + 0.85 * avgSolarFrac) * lightExposure / (1.0 + 0.45 * motility),
+        (0.42 + 0.90 * avgCoh) * (0.50 + 0.85 * avgSolarFrac) * lightExposure / (1.0 + 0.42 * motility),
         0.12,
         1.55,
     );
@@ -1796,6 +1942,45 @@ fn finalizeBioUnified(
         1.40,
     );
     let haloTol = clamp(0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh, 0.0, 1.0);
+
+    // Evolved Zone Niche & Rooted-vs-Mobile Producer Style (stored in p._pad across frames)
+    let consumerDrive = max(predCap, decompCap * 0.82) * (1.0 + 0.55 * clamp(avgAsym - avgCoh, 0.0, 0.65));
+    let isProducer = (autoCap >= consumerDrive * 1.25) && (avgSolarFrac >= 0.28);
+    let initPrefSol = clamp(uvSample.y / 12.0, 0.0, 1.0);
+    let rootVar = (hashFloat(pi, 0u, 36u) - 0.5) * 0.44;
+    let initRoot = clamp(0.56 + 0.55 * (avgCoh - avgAsym * 0.65) + rootVar, 0.05, 0.96);
+    var prefOc = select(oc.w, unpackPrefOc(myPad), hasValidBioNiche(myPad));
+    var prefTempK = select(tHabK, unpackPrefTempK(myPad), hasValidBioNiche(myPad));
+    var prefSolar = select(initPrefSol, unpackPrefSolar(myPad), hasValidBioNiche(myPad));
+    var rootGene = select(initRoot, unpackRootGene(myPad), hasValidBioNiche(myPad));
+
+    if (acc.nicheWeight > 0.05) {
+        let nw = acc.nicheWeight;
+        let consOc = acc.nicheOcSum / nw;
+        let consTemp = acc.nicheTempSum / nw;
+        let consSol = acc.nicheSolarSum / nw;
+        let consRoot = acc.nicheRootSum / nw;
+        let nAlpha = clamp(1.8 * dtBio, 0.0, 0.22);
+        prefOc = mix(prefOc, consOc, nAlpha);
+        prefTempK = mix(prefTempK, consTemp, nAlpha);
+        prefSolar = mix(prefSolar, consSol, nAlpha);
+        rootGene = mix(rootGene, consRoot, nAlpha);
+    }
+
+    // Slow somatic acclimation toward places where the organism thrives + occasional trait drift
+    if (curLifeState.x > 0.72 && curLifeState.z < 0.25) {
+        let acclimAlpha = clamp(0.08 * dtBio, 0.0, 0.035);
+        prefOc = mix(prefOc, oc.w, acclimAlpha);
+        prefTempK = mix(prefTempK, tHabK, acclimAlpha);
+        prefSolar = mix(prefSolar, initPrefSol, acclimAlpha);
+    }
+    // Rooted autotrophs anchor on habitable land, coastal shelves/upwelling reefs, or mineral substrates
+    let landAnchor = landFrac * smoothstep(268.0, 276.0, tHabK);
+    let coastShelfAnchor = smoothstep(0.30, 0.56, oc.w) * clamp(max(upwell * 0.85, 1.0 - smoothstep(0.55, 0.92, oc.w)), 0.0, 1.0);
+    let mineralShelfAnchor = clamp(acc.nearMineralCount * 0.50, 0.0, 1.0);
+    let anchorSubstrate = clamp(max(landAnchor, max(coastShelfAnchor, mineralShelfAnchor)), 0.0, 1.0);
+    let holdfastRaw = clamp((rootGene - 0.42) / 0.45, 0.0, 1.0);
+    let holdfast = select(0.0, holdfastRaw * anchorSubstrate, isProducer);
 
     let normChem = select(0.0, 1.0 / (1.0 + 0.35 * max(acc.bioChemCount - 1.0, 0.0)), acc.bioChemCount > 0.0);
     let grazeVitBoost = select(0.0, 0.24 * min(acc.nearForeignPrey, 2.2) * predCap, acc.nearForeignPrey > 0.12 && predCap > 0.34);
@@ -1826,42 +2011,52 @@ fn finalizeBioUnified(
         nextKin = wrapAngle(myKin + jitter);
     }
 
-    let moistureFactor = mix(
-        1.0,
-        mix(
-            0.74 + 0.16 * membraneShield,
-            clamp(0.45 + 0.52 * landHydration - 0.24 * aridStress + 0.16 * membraneShield, 0.30, 1.22),
-            hBlend,
-        ),
-        landFrac,
+    // Direct measured moisture & fertility (no artificial high baseline in bone-dry deserts)
+    let coastalMoisture = smoothstep(0.08, 0.45, oc.w) * 0.42;
+    let rawLandMoisture = clamp(
+        0.10 + 0.62 * smoothstep(0.22, 0.90, rh) + 0.55 * rainWash + 0.28 * seaFogCondense - 0.28 * aridStress + 0.16 * membraneShield,
+        0.06,
+        1.25,
     );
+    let moistureFactor = mix(1.0, mix(1.0, rawLandMoisture, hBlend), landFrac);
     let carbWaterBoost = clamp(0.84 + 0.14 * min(acc.nearCarbonFeed + acc.nearWaterFluid, 2.5), 0.80, 1.25);
     let o2RespireBoost = clamp(0.76 + 0.16 * min(acc.nearOxygenGas + ridgeVentMask * 1.4, 2.5), 0.72, 1.25);
-    let landFertilityScale = clamp(0.30 + 0.86 * landHydration, 0.26, 1.18) * (1.0 - 0.32 * smoothstep(2.2, 5.2, elevKm));
-    let solarGain = 0.62 * mix(1.0, q10Bio, 0.75) * solar * mix(0.55 + 0.85 * upwell, landFertilityScale, landFrac) * autoCap * moistureFactor * carbWaterBoost;
+    let landFertilityScale = clamp(mix(1.0, rawLandMoisture + coastalMoisture, hBlend), 0.08, 1.32) * (1.0 - 0.34 * smoothstep(2.2, 5.2, elevKm));
+
+    // Rooted autotrophs gain rhizosphere nutrient/mineral pumping; mobile autotrophs thrive in sunlit currents
+    let rootNutrPump = 1.0 + 0.34 * holdfast * clamp(0.45 + 0.45 * acc.nearMineralCount + 0.45 * acc.nearWaterFluid + 0.35 * landHydration, 0.5, 1.45);
+    let autoRatio = clamp((autoCap - predCap * 0.6) / 0.55, 0.0, 1.0);
+    let uvAcclim = clamp(0.32 * autoRatio + 0.38 * prefSolar * autoRatio, 0.0, 0.72);
+    let nightDormancy = clamp((0.18 - solar) / 0.18, 0.0, 1.0) * autoRatio * clamp(1.0 - motility * 0.65, 0.25, 1.0);
+
+    let solarGain = 0.66 * q10Bio * solar * mix(0.55 + 0.85 * upwell, landFertilityScale, landFrac) * autoCap * moistureFactor * carbWaterBoost * rootNutrPump;
     let haloGain = select(0.0, 0.24 * min(acc.nearHalogen + ridgeVentMask, 2.5) * haloTol, haloTol > 0.52);
     let detritusGain = 0.26 * min(acc.nearStressedBio, 2.5) * decompCap * o2RespireBoost;
     let grazeEnvGain = 0.34 * min(acc.nearForeignPrey, 2.5) * predCap * o2RespireBoost;
-    let chemBonus = 0.24 * acc.dE * normChem * q10Bio * (1.0 + 0.35 * landFrac);
-    let coldTorpor = mix(1.0, clamp(0.66 + 0.38 * smoothstep(271.0, 296.0, tHabK), 0.62, 1.18), tBlend);
-    let basalBurn = (0.13 + 0.10 * motility * motility + 0.04 * avgAsym) * coldTorpor * (1.0 - 0.14 * membraneShield - 0.26 * isGradNowF);
+    let chemBonus = 0.24 * acc.dE * normChem * q10Bio * (1.0 + 0.35 * landFrac) * rootNutrPump;
+    let coldTorpor = mix(1.0, clamp(0.56 + 0.44 * smoothstep(270.0, 297.0, tHabK), 0.46, 1.15), tBlend);
+    let rootBurnDiscount = 1.0 - 0.32 * holdfast;
+    let nightBurnDiscount = 1.0 - 0.78 * nightDormancy;
+    let basalBurn = (0.13 + 0.10 * motility * motility + 0.04 * avgAsym) * coldTorpor * rootBurnDiscount * nightBurnDiscount * (1.0 - 0.14 * membraneShield - 0.26 * isGradNowF);
+
+    // Inter-species competition only (arbitrary own-blob crowd cap removed so blobs & forests scale freely)
     let foreignBio = max(0.0, acc.nearTotalBio - acc.blobCount);
-    let ownCrowdStart = select(56.0, 145.0, isGradNow);
-    let ownCrowdSlope = select(0.020, 0.008, isGradNow);
     let foreignCrowdScale = mix(1.0, 0.35, isGradNowF * membraneShield);
-    let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) * foreignCrowdScale + ownCrowdSlope * max(0.0, acc.blobCount - ownCrowdStart);
+    let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) * foreignCrowdScale;
     let poisonPenalty = 0.28 * poi * (1.0 - 0.65 * clamp(haloTol - 0.35, 0.0, 1.0));
-    let desiccationShield = 0.55 * membraneShield;
+    let desiccationShield = clamp(0.55 * membraneShield + 0.32 * holdfast, 0.0, 0.85);
     let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend + 0.55 * oceanBleachBoost;
     let frostShock = smoothstep(271.0, 249.0, tHabK) * tBlend;
-    let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield);
-    let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield);
+    let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield) * (1.0 - 0.28 * holdfast);
+    let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield) * (1.0 - uvAcclim);
     let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * (1.0 - clamp(haloTol, 0.0, 1.0)) * 0.022 * hBlend;
-    let landPenalty = (0.062 * landFrac * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.12, 2.0), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield);
+    let nightDesicEase = 1.0 - 0.55 * nightDormancy;
+    let landPenalty = (0.062 * landFrac * nightDesicEase * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.10, 2.0), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield);
 
     let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;
-    let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, 1.55);
+    let energyCap = mix(select(1.55, 1.78, isProducer), 1.98, holdfast);
+    let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, energyCap);
 
     // Inter-blob Grazing: foreign hunter eats vulnerable prey (~35% assimilated, ~65% respired back to pool)
     if (acc.nearPredThreat > 0.0) {
@@ -1926,10 +2121,10 @@ fn finalizeBioUnified(
         }
     }
 
-    // Natural senescence / turnover back to Chemistry (phase 1 -> 0)
-    let decayThreshold = select(0.08, 0.045, isGradNow);
+    // Natural senescence / turnover back to Chemistry (dormant plants endure darkness down to lower reserves)
+    let decayThreshold = select(0.08, 0.036, isGradNow || nightDormancy > 0.35);
     if (nextEnergy <= decayThreshold || poi >= 0.90) {
-        let pDecay = clamp(select(0.45, 0.14, isGradNow) * dtBio, 0.0, 0.14);
+        let pDecay = clamp(select(0.45, 0.12, isGradNow || nightDormancy > 0.35) * dtBio, 0.0, 0.14);
         if (hashFloat(pi, frameU, 24u) < pDecay) {
             let depletion = energyDeath(eDiffused + netDE * dtVit, eDiffused, decayThreshold, dtVit, crowdPenalty,
                 vec4f(poisonPenalty, thermStressPenalty, uvStressPenalty, landPenalty));
@@ -1953,7 +2148,7 @@ fn finalizeBioUnified(
         let hasSemiFormedShell = acc.blobLipidCount >= 4.0;
         let hasLargeMass = acc.blobCount >= 28.0;
         let hasEndosymbiosis = myDistinctColors >= 7u;
-        let canAutoGrad = (autoCap >= 0.46) && (solarGain >= 0.24) && (acc.nearCarbonFeed + acc.nearWaterFluid >= 0.25);
+        let canAutoGrad = (autoCap >= 0.46) && (solarGain >= 0.20) && (acc.nearCarbonFeed + acc.nearWaterFluid >= 0.25);
         let recentlyConsumed = (acc.nearForeignPrey >= 0.18 && predCap >= 0.34) || (vit >= 0.32 && avgBlobVit >= 0.30) || canAutoGrad;
         let metabolicSurplus = nextEnergy >= 0.85 && avgBlobE >= 0.82 && poi < 0.22;
         if (hasSemiFormedShell && hasLargeMass && hasEndosymbiosis && recentlyConsumed && metabolicSurplus) {
@@ -1963,7 +2158,7 @@ fn finalizeBioUnified(
         }
     }
 
-    // Controlled post-encapsulation somatic innovation & mega-cell budding
+    // Controlled post-encapsulation somatic innovation (no forced mega-blob bud splitting cap)
     var outSp = myBioSp;
     var outKin = nextKin;
     var outGene = nextGene;
@@ -1974,27 +2169,46 @@ fn finalizeBioUnified(
         let pInnov = clamp(0.018 * clayInnovBoost * uvMutBoost * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.015);
         if (hashFloat(pi, frameU, 26u) < pInnov) {
             outSp = pickCompatibleNovelSpecies(nChem, nBio, myBioSp, mySpeciesMask, pi, frameU, 50u);
+            let mutRootDelta = (hashFloat(pi, frameU, 35u) - 0.5) * 0.24;
+            rootGene = clamp(rootGene + mutRootDelta, 0.04, 0.96);
         }
     }
-    let budThreshold = select(72.0, 120.0, outGrad == 1u);
-    if (acc.blobCount > budThreshold && acc.blobLipidCount < 1.5 && nextEnergy > 1.04 && hashFloat(pi, frameU, 28u) < clamp(0.010 * dtBio, 0.0, 0.004)) {
-        outKin = wrapAngle(nextKin + 0.55);
-        outGene = mutateEncapGene(nextGene, pi, frameU, 29u, 0.5);
-        outGrad = 0u;
-    }
 
-    // Gentle chemotaxis / foraging steer for aquatic & terrestrial blobs
-    var st = acc.steer * (normChem * 1.4) + acc.bioSteer * max(rate, 0.2);
+    // Emergent Habitat Preference × Movement Style Spatial Taxis (zone homing + phototaxis + hydrotaxis)
+    let ocErr = prefOc - oc.w;
+    let tempErr = clamp((prefTempK - tHabK) / 16.0, -1.0, 1.0);
+    let solarGoal = clamp(0.45 + 0.55 * prefSolar, 0.45, 0.96);
+    let sunDrive = select(
+        0.0,
+        clamp(solarGoal - solar, -0.35, 1.0) - select(0.0, uvStress * 0.45 * (1.0 - uvAcclim), uvStress > 0.45),
+        isProducer,
+    );
+    let moistDrive = select(0.18, 0.65, isProducer) * clamp(1.0 - landHydration, 0.0, 1.0) * smoothstep(0.08, 0.55, landFrac + (1.0 - prefOc) * 0.4);
+    let nicheMismatch = clamp(abs(ocErr) * 1.4 + abs(tempErr) * 0.8, 0.0, 1.2);
+    let rawZoneSteer =
+        envGrads.gradOc * (ocErr * 0.42) +
+        envGrads.gradTemp * (tempErr * 0.022) +
+        envGrads.gradSolar * (sunDrive * 0.036) +
+        envGrads.gradMoist * (moistDrive * 0.28);
+    // Rooted plants creep gently via stolons/canopy edges; mobile autotrophs & predators swim actively
+    let styleMobilityWeight = select(
+        0.52 * (0.35 + 0.65 * nicheMismatch),
+        mix(0.85, 0.24, holdfast),
+        isProducer,
+    );
+    let zoneSteer = rawZoneSteer * styleMobilityWeight * clamp(0.75 + 0.5 * motility, 0.6, 1.35);
+
+    var st = acc.steer * (normChem * 1.4) + acc.bioSteer * max(rate, 0.2) + zoneSteer * max(rate, 0.25);
     let stLen = length(st);
     let maxSt = 1.6 * max(rate, 0.1);
     if (stLen > maxSt) {
         st *= maxSt / stLen;
     }
-    let outMetaW = clamp((predCap - autoCap) * 0.85, -1.0, 1.0);
+    let outNichePad = packBioNiche(prefOc, prefTempK, prefSolar, rootGene, holdfast, isProducer);
 
     return BioStepResult(
         vec4f(nextEnergy, vit, poi, packLifeMetaGrad(1u, outSp, outKin, outGene, outGrad)),
-        vec4f(st, outMetaW),
+        vec4f(st, outNichePad),
     );
 }
 

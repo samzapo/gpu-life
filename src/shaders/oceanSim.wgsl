@@ -222,14 +222,25 @@ fn integrateOceanParticle(
     let tBlend = clamp(localTempScale, 0.0, 1.5);
     let elevKm = max(0.0, terrainSample.x);
 
+    var holdfast = 0.0;
+    var isProducer = false;
+    if (myPhase == 1u && bioSteer.w >= 2097151.5) {
+        let packed = u32(round(bioSteer.w));
+        holdfast = f32((packed >> 16u) & 15u) / 15.0;
+        isProducer = ((packed >> 20u) & 1u) == 1u;
+    } else if (myPhase == 1u) {
+        isProducer = bioSteer.w < -0.04;
+    }
+
     var cTarget = vec3f(0.0);
     if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
         let cur3D = oc.x * eEast + oc.y * eNorth;
         cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * smoothstep(0.35, 0.55, oc.w);
-        // Buoyant marine producers experience light surface windage/Stokes drift
-        if (bioSteer.w < -0.05) {
+        // Mobile buoyant marine producers experience light surface windage/Stokes drift; rooted kelp holdfasts resist washout
+        if (isProducer && holdfast < 0.35) {
             cTarget += ((windRaw.x * eEast + windRaw.y * eNorth) / max(windRefSpeed, 6.0)) * (0.045 * max(windStrength, 0.0));
         }
+        cTarget *= mix(1.0, 0.16, holdfast);
         let cLen = length(cTarget);
         if (cLen > 1.15) {
             cTarget *= 1.15 / cLen;
@@ -242,24 +253,23 @@ fn integrateOceanParticle(
         clamp(0.75 + 0.35 * oceanState.x, 0.45, 1.15),
         myPhase == 2u,
     );
-    // Homeoviscous membrane fluidity & metabolic kinetics shaped by live ocean SST / land surface air temp
+    // Direct homeoviscous membrane fluidity & metabolic kinetics from live ocean SST / land surface air temp
     let thermFluid = mix(
         1.0,
-        clamp(0.76 + 0.42 * smoothstep(271.5, 304.5, tHabK), 0.72, 1.22),
+        clamp(0.72 + 0.46 * smoothstep(271.5, 304.5, tHabK), 0.68, 1.24),
         tBlend,
     );
-    let vitality = baseVitality * select(thermFluid, mix(0.90, thermFluid, 0.65), myPhase == 2u);
+    let vitality = baseVitality * thermFluid;
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
-    // Terrestrial producers anchor firmly into wet soil; mobile land consumers face gentle steep-slope drag
-    let isLandSessile = (landFrac > 0.45) && (bioSteer.w < -0.04);
-    let soilGrip = select(0.94, 0.72, isLandSessile);
+    let soilGrip = mix(0.94, mix(0.84, 0.46, holdfast), select(0.0, 1.0, isProducer));
     let substrateDrag = mix(1.0, soilGrip, landFrac) * frostDrag;
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
-    let slopeResist = select(vec3f(0.0), -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.06 * smoothstep(0.4, 3.0, elevKm)), landFrac > 0.40);
+    let slopeResist = select(vec3f(0.0), -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.06 * smoothstep(0.4, 3.0, elevKm)) * mix(1.0, 0.12, holdfast), landFrac > 0.40);
     let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
     let vRel = vTang - cTarget;
-    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + ((netForce * vitality + linBioSteer) + slopeResist) * sim.dt;
+    let anchoredForce = netForce * vitality * mix(1.0, 0.28, holdfast);
+    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + ((anchoredForce + linBioSteer) + slopeResist) * sim.dt;
 
     p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 
@@ -288,7 +298,7 @@ fn integrateOceanParticle(
     p.pos = stepRes.pos;
     p.vel = stepRes.vel;
     p.orient = stepRes.orient;
-    p._pad = clamp(bioSteer.w, -1.0, 1.0);
+    p._pad = select(clamp(bioSteer.w, -1.0, 1.0), bioSteer.w, myPhase == 1u && bioSteer.w >= 2097151.5);
     return p;
 }
 
