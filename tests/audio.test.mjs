@@ -357,3 +357,237 @@ test('invalidateLegacyBrowserCaches removes stale v1/v2 config entries on epoch 
     globalThis.window = prevWindow;
   }
 });
+
+test('GlobeCyberSynth preserves bar continuity across long frame stalls and background resume without scheduling past notes', async () => {
+  const startedEvents = [];
+  const activeMockVoices = [];
+  let ctxState = 'running';
+  let fakeTime = 1.0;
+
+  function advanceFakeTime(dtSec) {
+    fakeTime += dtSec;
+    for (let i = activeMockVoices.length - 1; i >= 0; i--) {
+      const v = activeMockVoices[i];
+      if (v.started && fakeTime >= v.endAt) {
+        activeMockVoices.splice(i, 1);
+        v.node.onended?.();
+      }
+    }
+  }
+
+  function makeParam(initial = 0) {
+    return {
+      value: initial,
+      setValueAtTime(v) { this.value = v; },
+      linearRampToValueAtTime() {},
+      exponentialRampToValueAtTime() {},
+      cancelScheduledValues() {},
+      setTargetAtTime(v) { this.value = v; },
+    };
+  }
+
+  class StallTestAudioContext {
+    constructor() {
+      this.sampleRate = 48000;
+      this.outputLatency = 0.08;
+      this.destination = { connect() {} };
+    }
+    get currentTime() { return fakeTime; }
+    get state() { return ctxState; }
+    addEventListener() {}
+    suspend() { ctxState = 'suspended'; return Promise.resolve(); }
+    resume() { ctxState = 'running'; return Promise.resolve(); }
+    createBuffer(channels, length, sampleRate) {
+      return {
+        numberOfChannels: channels,
+        length,
+        sampleRate,
+        getChannelData: () => new Float32Array(length),
+      };
+    }
+    createBufferSource() {
+      const voice = { node: null, started: false, endAt: Infinity };
+      const node = {
+        connect() {},
+        disconnect() {},
+        buffer: null,
+        loop: false,
+        playbackRate: makeParam(1),
+        onended: null,
+        start(when = 0) {
+          startedEvents.push({ kind: 'buf', when, now: fakeTime });
+          voice.started = true;
+          voice.endAt = when + 0.35;
+          activeMockVoices.push(voice);
+        },
+        stop(when = fakeTime) {
+          voice.endAt = Math.min(voice.endAt, when);
+        },
+      };
+      voice.node = node;
+      return node;
+    }
+    createGain() {
+      return { connect() {}, disconnect() {}, gain: makeParam(1) };
+    }
+    createDynamicsCompressor() {
+      return {
+        connect() {},
+        disconnect() {},
+        threshold: makeParam(0),
+        knee: makeParam(0),
+        ratio: makeParam(0),
+        attack: makeParam(0),
+        release: makeParam(0),
+      };
+    }
+    createAnalyser() {
+      return {
+        connect() {},
+        disconnect() {},
+        fftSize: 256,
+        frequencyBinCount: 128,
+        smoothingTimeConstant: 0,
+        minDecibels: -86,
+        maxDecibels: -12,
+        getFloatTimeDomainData(arr) { arr.fill(0); },
+        getByteFrequencyData(arr) { arr.fill(64); },
+      };
+    }
+    createDelay() {
+      return { connect() {}, disconnect() {}, delayTime: makeParam(0) };
+    }
+    createBiquadFilter() {
+      return { connect() {}, disconnect() {}, type: 'lowpass', frequency: makeParam(1000), Q: makeParam(1) };
+    }
+    createStereoPanner() {
+      return { connect() {}, disconnect() {}, pan: makeParam(0) };
+    }
+    createOscillator() {
+      const voice = { node: null, started: false, endAt: Infinity };
+      const node = {
+        connect() {},
+        disconnect() {},
+        type: 'sine',
+        frequency: makeParam(0),
+        detune: makeParam(0),
+        onended: null,
+        start(when = 0) {
+          startedEvents.push({ kind: 'osc', when, now: fakeTime });
+          voice.started = true;
+          activeMockVoices.push(voice);
+        },
+        stop(when = fakeTime + 0.25) {
+          voice.endAt = when;
+        },
+      };
+      voice.node = node;
+      return node;
+    }
+    createWaveShaper() {
+      return { connect() {}, disconnect() {}, curve: null };
+    }
+  }
+
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  let fakeHidden = false;
+  let timerSeq = 1;
+  globalThis.window = {
+    AudioContext: StallTestAudioContext,
+    setTimeout: (fn) => { fn(); return timerSeq++; },
+    clearTimeout: () => {},
+    setInterval: () => timerSeq++,
+    clearInterval: () => {},
+  };
+  globalThis.document = {
+    get hidden() { return fakeHidden; },
+  };
+
+  let synth;
+  try {
+    const obs = observeScreenAudioState(
+      new Float32Array(12),
+      new Float32Array([0.85, 0.1, 0, packMeta(1, 3, 1)]),
+      1,
+      buildPackedChemistryBuffer(14).elements,
+      { projectionId: 'orthographic', rotate: [0, 0, 0], scale: 1200, pan: [0, 0], width: 1200, height: 800 },
+      null,
+      {
+        windSpeedNorm: 0.85,
+        oceanFraction: 0.4,
+        oceanSpeedNorm: 0.5,
+        tempNorm: 0.6,
+        nightFactor: 0.8,
+        rhNorm: 0.6,
+        precipNorm: 0.3,
+        elevKmNorm: 0.5,
+        ridgeMask: 0.8,
+      },
+      9911,
+      false,
+    );
+    obs.active = true;
+    obs.totalBioMass = 120;
+
+    synth = new GlobeCyberSynth();
+    synth.setObservation(obs);
+    synth.setEnabled(true, true);
+    await synth.unlock();
+
+    // Advance normal frames past bar 8 (~17s -> 'drive' section, cursor well above 0)
+    for (let i = 0; i < 86; i++) {
+      advanceFakeTime(0.2);
+      synth.tick(1000 + i * 200);
+    }
+
+    const cursorBeforeStall = synth.frameCursor;
+    const snapBeforeStall = createSpectrogramSnapshot();
+    synth.readSpectrogram(snapBeforeStall);
+    assert.ok(cursorBeforeStall > SYNTH_RATE * 15, `expected frameCursor > 15s, got ${cursorBeforeStall}`);
+    assert.equal(snapBeforeStall.section, 'drive');
+
+    // Simulate a 1.8s frame stall (e.g., mobile frame hang): cursor must NOT jump back to 0 / 'emerge',
+    // and overdue notes must NOT be scheduled at or before `now` in a past-time burst.
+    const countBeforeStall = startedEvents.length;
+    advanceFakeTime(1.8);
+    synth.tick(19000);
+
+    const cursorAfterStall = synth.frameCursor;
+    const snapAfterStall = createSpectrogramSnapshot();
+    synth.readSpectrogram(snapAfterStall);
+    assert.ok(
+      cursorAfterStall > cursorBeforeStall,
+      `frameCursor regressed after stall: ${cursorBeforeStall} -> ${cursorAfterStall}`,
+    );
+    assert.equal(snapAfterStall.section, 'drive');
+
+    const postStallEvents = startedEvents.slice(countBeforeStall);
+    assert.ok(postStallEvents.length > 0, 'expected new lookahead events scheduled after stall');
+    for (const ev of postStallEvents) {
+      assert.ok(ev.when >= ev.now, `scheduled note in the past: when=${ev.when} < now=${ev.now}`);
+    }
+
+    // Background hide -> resume should preserve musical bar cursor rather than resetting to bar 0 / 'emerge'
+    fakeHidden = true;
+    synth.handleVisibilityChange(true);
+    advanceFakeTime(3.0);
+    fakeHidden = false;
+    synth.handleVisibilityChange(false);
+    await new Promise((r) => setTimeout(r, 10));
+    synth.tick(22200);
+
+    const cursorAfterResume = synth.frameCursor;
+    const snapAfterResume = createSpectrogramSnapshot();
+    synth.readSpectrogram(snapAfterResume);
+    assert.ok(
+      cursorAfterResume >= cursorAfterStall,
+      `frameCursor reset after background resume: ${cursorAfterStall} -> ${cursorAfterResume}`,
+    );
+    assert.equal(snapAfterResume.section, 'drive');
+  } finally {
+    synth?.setEnabled(false, true);
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+  }
+});

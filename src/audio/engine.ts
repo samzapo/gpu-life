@@ -95,8 +95,8 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
   };
 }
 
-const MAX_VOICES = 48;
-const LOOKAHEAD_SEC = 0.28;
+const MAX_VOICES = 72;
+const LOOKAHEAD_SEC = 0.55;
 const NUM_LANES = 5;
 
 function makeDriveCurve(amount: number): Float32Array<ArrayBuffer> {
@@ -190,6 +190,7 @@ export class GlobeCyberSynth {
   private unlocked = false;
   private armedOnGesture = false;
   private bgSuspendTimer: number | null = null;
+  private scheduleTimer: number | null = null;
   private wasHidden = false;
   private resumeInFlight = false;
 
@@ -331,6 +332,26 @@ export class GlobeCyberSynth {
     this.streamWorkletNode?.port.postMessage({
       masterAmp: active && this.unlocked && this.streamlinesEnabled ? 1 : 0,
     });
+    if (!active || !this.unlocked) {
+      this.stopScheduleTimer();
+    } else {
+      this.ensureScheduleTimer();
+    }
+  }
+
+  private ensureScheduleTimer(): void {
+    if (this.scheduleTimer !== null || typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
+    this.scheduleTimer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      this.pumpSchedule(performance.now());
+    }, 50);
+  }
+
+  private stopScheduleTimer(): void {
+    if (this.scheduleTimer !== null && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+      window.clearInterval(this.scheduleTimer);
+      this.scheduleTimer = null;
+    }
   }
 
   setVolume(vol: number): void {
@@ -383,7 +404,7 @@ export class GlobeCyberSynth {
       ctx.addEventListener('statechange', () => {
         if (this.ctx === ctx && ctx.state === 'running' && !this.wasHidden) {
           this.unlocked = true;
-          this.resetClockSoft();
+          this.syncMasterGain();
         }
       });
     }
@@ -396,8 +417,11 @@ export class GlobeCyberSynth {
     }
     if (this.ctx.state === 'running') {
       this.unlocked = true;
-      this.originTime = this.ctx.currentTime;
-      this.frameCursor = 0;
+      if (this.frameCursor <= 0) {
+        this.originTime = this.ctx.currentTime;
+      } else {
+        this.originTime = this.ctx.currentTime - this.frameCursor / SYNTH_RATE;
+      }
       this.syncMasterGain();
     }
   }
@@ -540,12 +564,17 @@ export class GlobeCyberSynth {
     this.resetClockSoft();
   }
 
-  private resetClockSoft(): void {
+  private resetClockSoft(preserveBarCursor = false): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
-    this.originTime = now;
-    this.frameCursor = 0;
+    if (!preserveBarCursor || this.frameCursor <= 0) {
+      this.originTime = now;
+      this.frameCursor = 0;
+    } else {
+      // Preserve bar/step cursor continuity across resumes instead of snapping back to beat 0
+      this.originTime = now - this.frameCursor / SYNTH_RATE;
+    }
     this.lastScheduleMs = -1000;
 
     if (this.duckGain) {
@@ -571,6 +600,9 @@ export class GlobeCyberSynth {
         this.masterGain.gain.setTargetAtTime(target, now + 0.025, 0.045);
       }
     }
+    if (this.enabled && this.unlocked && ctx.state === 'running') {
+      this.ensureScheduleTimer();
+    }
   }
 
   handleVisibilityChange(hidden: boolean): void {
@@ -582,6 +614,7 @@ export class GlobeCyberSynth {
 
     if (hidden) {
       this.wasHidden = true;
+      this.stopScheduleTimer();
       if (!ctx) return;
       const now = ctx.currentTime;
       if (this.masterGain) {
@@ -634,12 +667,44 @@ export class GlobeCyberSynth {
         }
         if (this.ctx === ctx && ctx.state === 'running' && (typeof document === 'undefined' || !document.hidden)) {
           this.unlocked = true;
-          this.resetClockSoft();
+          this.resetClockSoft(true);
         }
       } finally {
         this.resumeInFlight = false;
       }
     })();
+  }
+
+  private getEffectiveLookaheadSec(): number {
+    const outLat = Math.max(0, Math.min(0.6, Number((this.ctx as { outputLatency?: number } | null)?.outputLatency) || 0));
+    return Math.max(LOOKAHEAD_SEC, outLat + 0.35);
+  }
+
+  private pumpSchedule(nowMs: number): void {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!this.enabled || !this.unlocked || !this.ctx || this.ctx.state !== 'running') return;
+    if (this.volume <= 0.001) return;
+    if (nowMs - this.lastScheduleMs < 35) return;
+    this.lastScheduleMs = nowMs;
+
+    const now = this.ctx.currentTime;
+    const nowFrame = Math.max(0, Math.floor((now - this.originTime) * SYNTH_RATE));
+    // Maintain continuous beat-grid alignment across stalls/Bluetooth jitter: never reset
+    // originTime back to 0 during playback; advance cursor smoothly past expired frames.
+    if (this.frameCursor < nowFrame) {
+      this.frameCursor = nowFrame;
+    }
+    const targetFrame = nowFrame + Math.round(this.getEffectiveLookaheadSec() * SYNTH_RATE);
+    if (targetFrame > this.frameCursor) {
+      this.applyDspModulation(now);
+      const events = generateScoreEvents(
+        this.frameCursor,
+        targetFrame - this.frameCursor,
+        this.obs,
+      );
+      this.scheduleEvents(this.frameCursor, events, now);
+      this.frameCursor = targetFrame;
+    }
   }
 
   tick(nowMs: number): number {
@@ -654,31 +719,8 @@ export class GlobeCyberSynth {
     }
     if (this.volume <= 0.001) return 0;
 
-    if (nowMs - this.lastScheduleMs >= 45) {
-      this.lastScheduleMs = nowMs;
-      const now = this.ctx.currentTime;
-      let nowFrame = Math.max(0, Math.floor((now - this.originTime) * SYNTH_RATE));
-      if (nowFrame - this.frameCursor > SYNTH_RATE * 0.6) {
-        // Recover cleanly from timer stall/throttle without bursting stacked notes
-        this.originTime = now;
-        this.frameCursor = 0;
-        nowFrame = 0;
-      }
-      if (this.frameCursor < nowFrame) {
-        this.frameCursor = nowFrame;
-      }
-      const targetFrame = nowFrame + Math.round(LOOKAHEAD_SEC * SYNTH_RATE);
-      if (targetFrame > this.frameCursor) {
-        this.applyDspModulation(now);
-        const events = generateScoreEvents(
-          this.frameCursor,
-          targetFrame - this.frameCursor,
-          this.obs,
-        );
-        this.scheduleEvents(this.frameCursor, events, now);
-        this.frameCursor = targetFrame;
-      }
-    }
+    this.ensureScheduleTimer();
+    this.pumpSchedule(nowMs);
 
     if (!this.analyser) return 0;
     this.analyser.getFloatTimeDomainData(this.rmsScratch);
@@ -755,8 +797,9 @@ export class GlobeCyberSynth {
     out.sidechainDepth = Math.max(0, Math.min(1, (1 - duckVal) / 0.62));
     out.rms = Math.max(out.pulseLevel * 0.6, out.bassLevel * 0.5);
 
-    // Pure low-tempo BPM beat timing + low-end bass energy (< ~220 Hz)
-    const elapsedSec = Math.max(0, this.ctx.currentTime - this.originTime);
+    // Pure low-tempo BPM beat timing compensated for audio hardware/Bluetooth outputLatency
+    const outLat = Math.max(0, Math.min(0.6, Number((this.ctx as { outputLatency?: number }).outputLatency) || 0));
+    const elapsedSec = Math.max(0, this.ctx.currentTime - outLat - this.originTime);
     const beatCount = (elapsedSec * SYNTH_BPM) / 60;
     const qPhase = beatCount % 1;
     const barBeat = Math.floor(beatCount) % 4;
@@ -848,8 +891,9 @@ export class GlobeCyberSynth {
 
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
-      const when = Math.max(now, this.originTime + (startFrame + ev.offset) / SYNTH_RATE);
-      if (when < now - 0.025 || !Number.isFinite(when)) continue;
+      const exactWhen = this.originTime + (startFrame + ev.offset) / SYNTH_RATE;
+      if (!Number.isFinite(exactWhen) || exactWhen < now - 0.012) continue;
+      const when = Math.max(now + 0.002, exactWhen);
       if (this.activeVoices >= MAX_VOICES) continue;
 
       if (ev.kind === 'drum') {

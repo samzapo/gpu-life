@@ -40,7 +40,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let myAtomicNum = u32(matrix[mySBase + 7u]);
     let myV = valence[pi];
     let myAtomLoad = select(0.0, myV.x + myV.y + myV.z, myPhase == 0u);
-    let eq = makeEquirectCoord(p.pos, textureDimensions(oceanTex, 0));
+    let envDims = textureDimensions(oceanTex, 0);
+    let eq = makeEquirectCoord(p.pos, envDims);
     let windRaw = sampleWindTextureCoord(windTex, eq);
     let oc = sampleOceanTextureCoord(oceanTex, eq);
     let tSample = sampleTempTextureCoord(tempTex, eq);
@@ -115,7 +116,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    let envGrads = sampleBioEnvGrads(p.pos, oceanTex, tempTex, uvTex, hydroTex, myPhase);
+    let envGrads = sampleBioEnvGradsCoord(p.pos, eq, envDims, oceanTex, tempTex, uvTex, hydroTex, myPhase);
     let res = finalizeBioUnified(
         pi,
         p.pos,

@@ -2763,7 +2763,7 @@ function observeGlobeAudioCenter(nowMs: number) {
   if (
     !cyberSynth.isEnabled() ||
     cyberSynth.getState() !== 'running' ||
-    nowMs - lastAudioObserveMs < 260
+    nowMs - lastAudioObserveMs < 420
   ) {
     return;
   }

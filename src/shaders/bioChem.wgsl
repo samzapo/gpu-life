@@ -252,8 +252,10 @@ struct BioEnvGrads {
     gradMoist: vec3f,
 }
 
-fn sampleBioEnvGrads(
+fn sampleBioEnvGradsCoord(
     pos: vec3f,
+    eq: EquirectCoord,
+    dims: vec2u,
     oceanTex: texture_2d<f32>,
     tempTex: texture_2d<f32>,
     uvTex: texture_2d<f32>,
@@ -261,45 +263,52 @@ fn sampleBioEnvGrads(
     myPhase: u32,
 ) -> BioEnvGrads {
     var g = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
-    if (myPhase != 1u) {
+    if (myPhase != 1u || dims.x < 2u || dims.y < 2u) {
         return g;
     }
     let n = normalize(pos);
     let eE = sphereEastBasis(n);
     let eN = normalize(cross(n, eE));
-    let eps = 0.016;
-    let pEp = normalize(n + eE * eps);
-    let pEm = normalize(n - eE * eps);
-    let pNp = normalize(n + eN * eps);
-    let pNm = normalize(n - eN * eps);
+    let iE = (eq.i0 + 1u) % dims.x;
+    let iW = (eq.i0 + dims.x - 1u) % dims.x;
+    let jN = select(0u, eq.j0 - 1u, eq.j0 > 0u);
+    let jS = min(dims.y - 1u, eq.j0 + 1u);
 
-    let oEp = sampleOceanTexture(oceanTex, pEp).w;
-    let oEm = sampleOceanTexture(oceanTex, pEm).w;
-    let oNp = sampleOceanTexture(oceanTex, pNp).w;
-    let oNm = sampleOceanTexture(oceanTex, pNm).w;
-    g.gradOc = eE * ((oEp - oEm) / (2.0 * eps)) + eN * ((oNp - oNm) / (2.0 * eps));
+    let cosLat = max(length(n.xy), 0.15);
+    let invDx = 1.0 / max((TWO_PI * 2.0 / f32(dims.x)) * cosLat, 0.008);
+    let invDy = 1.0 / max(PI * f32(jS - jN) / f32(dims.y - 1u), 0.008);
 
-    let tEp = effectiveSurfaceTempK(sampleTempTexture(tempTex, pEp), oEp);
-    let tEm = effectiveSurfaceTempK(sampleTempTexture(tempTex, pEm), oEm);
-    let tNp = effectiveSurfaceTempK(sampleTempTexture(tempTex, pNp), oNp);
-    let tNm = effectiveSurfaceTempK(sampleTempTexture(tempTex, pNm), oNm);
-    g.gradTemp = eE * ((tEp - tEm) / (2.0 * eps)) + eN * ((tNp - tNm) / (2.0 * eps));
+    let oE = textureLoad(oceanTex, vec2u(iE, eq.j0), 0).w;
+    let oW = textureLoad(oceanTex, vec2u(iW, eq.j0), 0).w;
+    let oN = textureLoad(oceanTex, vec2u(eq.i0, jN), 0).w;
+    let oS = textureLoad(oceanTex, vec2u(eq.i0, jS), 0).w;
+    g.gradOc = eE * ((oE - oW) * invDx) + eN * ((oN - oS) * invDy);
 
-    let sEp = clamp(sampleUvTexture(uvTex, pEp).x, 0.0, 24.0);
-    let sEm = clamp(sampleUvTexture(uvTex, pEm).x, 0.0, 24.0);
-    let sNp = clamp(sampleUvTexture(uvTex, pNp).x, 0.0, 24.0);
-    let sNm = clamp(sampleUvTexture(uvTex, pNm).x, 0.0, 24.0);
-    g.gradSolar = eE * ((sEp - sEm) / (2.0 * eps)) + eN * ((sNp - sNm) / (2.0 * eps));
+    let tRawE = textureLoad(tempTex, vec2u(iE, eq.j0), 0);
+    let tRawW = textureLoad(tempTex, vec2u(iW, eq.j0), 0);
+    let tRawN = textureLoad(tempTex, vec2u(eq.i0, jN), 0);
+    let tRawS = textureLoad(tempTex, vec2u(eq.i0, jS), 0);
+    let tE = select(tRawE.w, tRawE.y, oE > 0.45 && tRawE.z > 0.45);
+    let tW = select(tRawW.w, tRawW.y, oW > 0.45 && tRawW.z > 0.45);
+    let tN = select(tRawN.w, tRawN.y, oN > 0.45 && tRawN.z > 0.45);
+    let tS = select(tRawS.w, tRawS.y, oS > 0.45 && tRawS.z > 0.45);
+    g.gradTemp = eE * ((tE - tW) * invDx) + eN * ((tN - tS) * invDy);
 
-    let hEp = sampleHydroTexture(hydroTex, pEp);
-    let hEm = sampleHydroTexture(hydroTex, pEm);
-    let hNp = sampleHydroTexture(hydroTex, pNp);
-    let hNm = sampleHydroTexture(hydroTex, pNm);
-    let mEp = hEp.x + 0.18 * smoothstep(0.2, 5.0, hEp.y);
-    let mEm = hEm.x + 0.18 * smoothstep(0.2, 5.0, hEm.y);
-    let mNp = hNp.x + 0.18 * smoothstep(0.2, 5.0, hNp.y);
-    let mNm = hNm.x + 0.18 * smoothstep(0.2, 5.0, hNm.y);
-    g.gradMoist = eE * ((mEp - mEm) / (2.0 * eps)) + eN * ((mNp - mNm) / (2.0 * eps));
+    let sE = clamp(textureLoad(uvTex, vec2u(iE, eq.j0), 0).x, 0.0, 24.0);
+    let sW = clamp(textureLoad(uvTex, vec2u(iW, eq.j0), 0).x, 0.0, 24.0);
+    let sN = clamp(textureLoad(uvTex, vec2u(eq.i0, jN), 0).x, 0.0, 24.0);
+    let sS = clamp(textureLoad(uvTex, vec2u(eq.i0, jS), 0).x, 0.0, 24.0);
+    g.gradSolar = eE * ((sE - sW) * invDx) + eN * ((sN - sS) * invDy);
+
+    let hE = textureLoad(hydroTex, vec2u(iE, eq.j0), 0).xy;
+    let hW = textureLoad(hydroTex, vec2u(iW, eq.j0), 0).xy;
+    let hN = textureLoad(hydroTex, vec2u(eq.i0, jN), 0).xy;
+    let hS = textureLoad(hydroTex, vec2u(eq.i0, jS), 0).xy;
+    let mE = clamp(hE.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hE.y, 0.0));
+    let mW = clamp(hW.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hW.y, 0.0));
+    let mN = clamp(hN.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hN.y, 0.0));
+    let mS = clamp(hS.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hS.y, 0.0));
+    g.gradMoist = eE * ((mE - mW) * invDx) + eN * ((mN - mS) * invDy);
     return g;
 }
 
