@@ -415,8 +415,8 @@ export const synthVolBinding = withTooltip(
     step: 0.05,
     format: (v: number) => `${Math.round(v * 100)}%`,
   }),
-  'Cyberpunk Synth Volume',
-  'Master volume (0%–100%) for the dark cyberpunk Web Audio synthesizer driven by the center of the globe.',
+  'Globe Synth Volume',
+  'Master volume (0%–100%) for the adaptive Web Audio synthesizer driven by the center of the globe.',
 );
 export const seedInput = withTooltip(
   advanced.addBinding(params, 'seed', { view: 'text' }),

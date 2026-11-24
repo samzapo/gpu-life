@@ -28,7 +28,7 @@ function makePrng(seed: number): () => number {
 }
 
 /**
- * Deterministically renders the dark cyberpunk percussion and mineral-hit bank
+ * Deterministically renders the percussion and mineral-hit bank
  * (kick, dark hi-hat, gated retro-industrial snare, deep industrial tom, warm crystal pulse, sulfide anvil).
  * Pitched bass, arpeggio, lead, and pad voices are synthesized live via Web Audio nodes.
  */
@@ -58,7 +58,7 @@ export function buildCyberDrumBank(ctx: AudioContext): Map<number, AudioBuffer> 
 
       switch (id) {
         case 0: {
-          // 4-on-the-floor cyberpunk kick: tight sub sweep + saturated punch + warm transient
+          // 4-on-the-floor kick: tight sub sweep + saturated punch + warm transient
           const sweepPhase = TAU * (42 * t + 86 * 0.022 * (1 - Math.exp(-t / 0.022)));
           const body = Math.tanh(Math.sin(sweepPhase) * 1.55) * Math.exp(-t * 7.8);
           const click = (noise - prevNoise * 0.25) * Math.exp(-t * 170) * 0.14;

@@ -26,7 +26,7 @@ export interface SynthSpectrogramSnapshot {
   running: boolean;
   enabled: boolean;
   bpm: number;
-  mode: 'CYBER' | 'PHRYGIAN';
+  mode: 'AEOLIAN' | 'PHRYGIAN';
   section: string;
   rms: number;
   bassLevel: number;
@@ -63,7 +63,7 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
     running: false,
     enabled: false,
     bpm: SYNTH_BPM,
-    mode: 'CYBER',
+    mode: 'AEOLIAN',
     section: 'emerge',
     rms: 0,
     bassLevel: 0,
@@ -739,7 +739,7 @@ export class GlobeCyberSynth {
     out.enabled = this.enabled;
     out.running = this.isRunning();
     out.bpm = SYNTH_BPM;
-    out.mode = darkBias > 0.36 ? 'PHRYGIAN' : 'CYBER';
+    out.mode = darkBias > 0.36 ? 'PHRYGIAN' : 'AEOLIAN';
     out.observation = obs;
     out.bassCutoffHz = this.curBassCutoffHz;
     out.chorusWidth = this.curChorusWidth;

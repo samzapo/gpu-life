@@ -27,7 +27,7 @@ export type ScheduledAudioEvent =
 
 const PHRYGIAN_DEGREES = [0, 1, 3, 5, 7, 8, 10, 12] as const;
 
-// Sequenced cyberpunk / synthwave bassline contours (octave jumps, b7, 5th, m3)
+// Sequenced electronic bassline contours (octave jumps, b7, 5th, m3)
 const SEQ_BASS_CONTOURS: readonly (readonly number[])[] = [
   [0, 12, 0, 10, 0, 7, 0, 3, 0, 12, 0, 10, 7, 12, 10, 3],
   [0, 0, 12, 0, 10, 0, 7, 10, 0, 0, 12, 3, 7, 10, 12, 7],
@@ -189,7 +189,7 @@ function emitStepEvents(
     });
   }
 
-  // 5. Core Cyberpunk Sequenced Saw+Sub Bassline with Per-Note Filter Pluck Envelope
+  // 5. Core Sequenced Saw+Sub Bassline with Per-Note Filter Pluck Envelope
   const grooveIdx =
     obs.consumerRatio > 0.28
       ? 0

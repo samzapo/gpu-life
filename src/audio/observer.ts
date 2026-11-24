@@ -351,7 +351,7 @@ export function observeScreenAudioState(
   obs.dominantBioSp = bestSp;
   obs.dominantChemElem = domChemElem;
 
-  // Overall cyberpunk drive/intensity climbs with predation, complex blooms, wind, ridges & acid chemistry
+  // Overall synth drive/intensity climbs with predation, complex blooms, wind, ridges & acid chemistry
   obs.intensity = Math.max(
     0.18,
     Math.min(
@@ -366,7 +366,7 @@ export function observeScreenAudioState(
     ),
   );
 
-  // Darker, deeper cyberpunk cutoff curve: colder temperatures & night side plunge cutoff deeper
+  // Deeper nocturnal filter cutoff curve: colder temperatures & night side plunge cutoff deeper
   const baseCutoff =
     320 +
     1900 * Math.pow(Math.max(0.05, env.tempNorm * (1 - 0.52 * env.nightFactor)), 1.35) +

@@ -86,7 +86,7 @@ class StreamlineSynthProcessor extends AudioWorkletProcessor {
         this.detunePhases[i] = (this.detunePhases[i] + detuneRate * 0.06) % TAU;
 
         const p = this.phases[i];
-        // Smooth warm triangle + fundamental blend (dark ambient cyberpunk filament)
+        // Smooth warm triangle + fundamental blend (low ambient harmonic filament)
         const tri = 4 * Math.abs(p - 0.5) - 1;
         const fund = Math.sin(TAU * p);
         const harmWeight = i < 8 ? 0.36 + 0.30 * this.drive : 0.20 + 0.16 * this.drive;

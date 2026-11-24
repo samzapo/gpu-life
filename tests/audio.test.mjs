@@ -77,7 +77,7 @@ test('observeScreenAudioState tracks center life, chemistry halogens, minerals, 
   assert.ok(obsDay.lanes[1].cutoffHz > obsNight.lanes[1].cutoffHz, 'expected night hemisphere to darken filter cutoff');
 });
 
-test('generateScoreEvents emits sorted cyberpunk kick, per-note filtered saw+sub bassline, and ridge percussion', () => {
+test('generateScoreEvents emits sorted kick, per-note filtered saw+sub bassline, and ridge percussion', () => {
   const obs = observeScreenAudioState(
     new Float32Array(12),
     new Float32Array([0.85, 0.1, 0, packMeta(1, 3, 1)]),
@@ -112,7 +112,7 @@ test('generateScoreEvents emits sorted cyberpunk kick, per-note filtered saw+sub
   const frames = Math.round(SYNTH_RATE * 2.0);
   const events = generateScoreEvents(0, frames, obs);
 
-  assert.ok(events.length >= 20, `expected rich cyberpunk groove events, got ${events.length}`);
+  assert.ok(events.length >= 20, `expected rich groove events, got ${events.length}`);
   let sawKick = false;
   let sawFilteredBass = false;
   let sawAnvilOrRim = false;
@@ -123,7 +123,7 @@ test('generateScoreEvents emits sorted cyberpunk kick, per-note filtered saw+sub
     prevOffset = ev.offset;
     assert.ok(ev.lane >= 0 && ev.lane <= 4);
     assert.ok(ev.gain > 0);
-    assert.ok(ev.note <= 72, `expected dark cyberpunk register without high tinks, got MIDI note ${ev.note}`);
+    assert.ok(ev.note <= 72, `expected dark register without high tinks, got MIDI note ${ev.note}`);
     if (ev.kind === 'drum' && ev.instrument === 0) sawKick = true;
     if (ev.kind === 'drum' && (ev.instrument === 3 || ev.instrument === 15)) sawAnvilOrRim = true;
     if (ev.kind === 'synth' && ev.voiceType === 'bass') {

@@ -434,7 +434,7 @@ export class SynthSpectrogramOverlay {
     const header = document.createElement('div');
     header.className = 'synth-tip-head';
     const titleSpan = document.createElement('strong');
-    titleSpan.textContent = 'CYBERPUNK SYNTH SPECTROGRAM';
+    titleSpan.textContent = 'GLOBE SYNTH SPECTROGRAM';
     const stateSpan = document.createElement('span');
     stateSpan.className = 'synth-tip-status';
     stateSpan.textContent = statusText;
