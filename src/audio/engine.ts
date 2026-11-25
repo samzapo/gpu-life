@@ -9,7 +9,10 @@ import {
   type ScreenAudioObservation,
 } from './observer.ts';
 import { cyberSection, generateScoreEvents, type ScheduledAudioEvent } from './score.ts';
-import { STREAMLINE_WORKLET_NAME, STREAMLINE_WORKLET_SOURCE } from './streamWorklet.ts';
+import {
+  GLOBE_SYNTH_WORKLET_NAME,
+  GLOBE_SYNTH_WORKLET_SOURCE,
+} from './synthWorklet.ts';
 
 interface AudioLaneNodes {
   input: GainNode;
@@ -154,8 +157,33 @@ function sampleLogBins(
 
 export class GlobeCyberSynth {
   private ctx: AudioContext | null = null;
-  private drumBank: Map<number, AudioBuffer> = new Map();
+  private audioMode: 'worklet' | 'fallback' | 'uninitialized' = 'uninitialized';
+
+  // Primary Worklet nodes & state
+  private workletNode: AudioWorkletNode | null = null;
+  private workletInitPromise: Promise<boolean> | null = null;
+  private unlockPromise: Promise<void> | null = null;
+
   private masterGain: GainNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private masterBins: Uint8Array<ArrayBuffer> = new Uint8Array(128);
+  private rmsScratch = new Float32Array(256);
+
+  // Worklet telemetry mirrors (posted from audio thread ~12 Hz)
+  private workletRms = 0;
+  private workletBassLevel = 0;
+  private workletPolyLevel = 0;
+  private workletChorusLevel = 0;
+  private workletDelayLevel = 0;
+  private workletSidechainDepth = 0;
+  private workletLowBassEnergy = 0;
+  private workletSampleCursor = 0;
+  private workletSampleRate = 48000;
+  private workletBar = 0;
+  private workletTelemetryCtxTime = 0;
+
+  // Legacy/Fallback Web Audio graph fields (used ONLY if AudioWorklet is unavailable)
+  private drumBank: Map<number, AudioBuffer> = new Map();
   private duckGain: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
   private delayNode: DelayNode | null = null;
@@ -165,9 +193,6 @@ export class GlobeCyberSynth {
   private chorusR: DelayNode | null = null;
   private chorusMix: GainNode | null = null;
   private polyBus: GainNode | null = null;
-
-  private analyser: AnalyserNode | null = null;
-  private masterBins: Uint8Array<ArrayBuffer> = new Uint8Array(128);
   private bassAnalyser: AnalyserNode | null = null;
   private bassBins: Uint8Array<ArrayBuffer> = new Uint8Array(128);
   private polyAnalyser: AnalyserNode | null = null;
@@ -176,21 +201,19 @@ export class GlobeCyberSynth {
   private chorusBins: Uint8Array<ArrayBuffer> = new Uint8Array(128);
   private delayAnalyser: AnalyserNode | null = null;
   private delayBins: Uint8Array<ArrayBuffer> = new Uint8Array(128);
-  private rmsScratch = new Float32Array(256);
-
   private lanes: AudioLaneNodes[] = [];
   private activeVoices = 0;
   private originTime = 0;
   private frameCursor = 0;
   private lastScheduleMs = -1000;
-  private obs: ScreenAudioObservation = createEmptyAudioObservation();
+  private scheduleTimer: number | null = null;
 
+  private obs: ScreenAudioObservation = createEmptyAudioObservation();
   private enabled = false;
   private volume = 0.65;
   private unlocked = false;
   private armedOnGesture = false;
   private bgSuspendTimer: number | null = null;
-  private scheduleTimer: number | null = null;
   private wasHidden = false;
   private resumeInFlight = false;
 
@@ -200,15 +223,21 @@ export class GlobeCyberSynth {
   private curAcidDrive = 0.18;
 
   private streamlinesEnabled = true;
-  private streamWorkletNode: AudioWorkletNode | null = null;
-  private streamWorkletLoading = false;
   private streamBands16 = new Float32Array(16);
-  private streamFreqs16 = new Float32Array(16);
   private streamEnergyAvg = 0;
   private lastStreamSendMs = -1000;
+  private sentStreamDisabled = false;
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  isWorkletActive(): boolean {
+    return this.audioMode === 'worklet' && Boolean(this.workletNode);
+  }
+
+  getAudioMode(): 'worklet' | 'fallback' | 'uninitialized' {
+    return this.audioMode;
   }
 
   isStreamlinesEnabled(): boolean {
@@ -217,10 +246,15 @@ export class GlobeCyberSynth {
 
   setStreamlinesEnabled(on: boolean): void {
     this.streamlinesEnabled = on;
-    if (this.streamWorkletNode) {
-      this.streamWorkletNode.port.postMessage({
-        masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
+    if (!on) {
+      this.streamEnergyAvg = 0;
+    }
+    if (this.audioMode === 'worklet' && this.workletNode) {
+      this.workletNode.port.postMessage({
+        type: 'streams',
+        enabled: on && this.isRunning(),
       });
+      this.sentStreamDisabled = !on;
     }
   }
 
@@ -236,53 +270,103 @@ export class GlobeCyberSynth {
     return this.ctx ? this.ctx.state : 'uninitialized';
   }
 
-  private initStreamWorklet(ctx: AudioContext): void {
-    if (this.streamWorkletLoading || this.streamWorkletNode || !ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') {
-      return;
+  private handleWorkletMessage(msg: unknown): void {
+    if (!msg || typeof msg !== 'object') return;
+    const payload = msg as { type?: string; data?: ArrayLike<number> };
+    if (payload.type !== 'telemetry' || !payload.data || payload.data.length < 16) return;
+    const d = payload.data;
+    this.workletRms = d[0] || 0;
+    this.workletBassLevel = d[1] || 0;
+    this.workletPolyLevel = d[2] || 0;
+    this.workletChorusLevel = d[3] || 0;
+    this.workletDelayLevel = d[4] || 0;
+    this.workletSidechainDepth = d[5] || 0;
+    this.workletLowBassEnergy = d[6] || 0;
+    this.workletSampleCursor = d[7] || 0;
+    this.workletSampleRate = Math.max(8000, d[8] || 48000);
+    this.curBassCutoffHz = d[9] || this.curBassCutoffHz;
+    this.curChorusWidth = d[10] || this.curChorusWidth;
+    this.curDelayFeedback = d[11] ?? this.curDelayFeedback;
+    this.curAcidDrive = d[12] ?? this.curAcidDrive;
+    this.workletBar = Math.max(0, Math.floor(d[14] || 0));
+    this.workletTelemetryCtxTime = this.ctx ? this.ctx.currentTime : 0;
+  }
+
+  private ensureSynthWorklet(ctx: AudioContext): Promise<boolean> {
+    if (this.workletNode) return Promise.resolve(true);
+    if (this.workletInitPromise) return this.workletInitPromise;
+    if (!ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') {
+      return Promise.resolve(false);
     }
-    this.streamWorkletLoading = true;
-    const blob = new Blob([STREAMLINE_WORKLET_SOURCE], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    void ctx.audioWorklet
+
+    const canBlobUrl =
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function' &&
+      typeof Blob !== 'undefined';
+    const url = canBlobUrl
+      ? URL.createObjectURL(new Blob([GLOBE_SYNTH_WORKLET_SOURCE], { type: 'application/javascript' }))
+      : `data:application/javascript,${encodeURIComponent(GLOBE_SYNTH_WORKLET_SOURCE)}`;
+
+    this.workletInitPromise = ctx.audioWorklet
       .addModule(url)
       .then(() => {
-        if (this.ctx !== ctx) return;
-        const node = new AudioWorkletNode(ctx, STREAMLINE_WORKLET_NAME, {
+        if (this.ctx !== ctx || !this.masterGain) return false;
+        const node = new AudioWorkletNode(ctx, GLOBE_SYNTH_WORKLET_NAME, {
           numberOfInputs: 0,
           numberOfOutputs: 1,
           outputChannelCount: [2],
+          processorOptions: {
+            obs: this.obs,
+            streams: {
+              enabled: this.streamlinesEnabled,
+              bands: this.streamBands16,
+            },
+            state: {
+              active: this.enabled && this.unlocked && ctx.state === 'running',
+              streamlinesEnabled: this.streamlinesEnabled,
+            },
+          },
         });
-        const workletGain = ctx.createGain();
-        workletGain.gain.value = 0.28;
-        node.connect(workletGain);
-        if (this.polyBus) workletGain.connect(this.polyBus);
-        if (this.chorusMix) {
-          const cSend = ctx.createGain();
-          cSend.gain.value = 0.18;
-          workletGain.connect(cSend);
-          cSend.connect(this.chorusMix);
-        }
-        if (this.duckGain) workletGain.connect(this.duckGain);
-        this.streamWorkletNode = node;
+        node.port.onmessage = (ev: MessageEvent) => {
+          this.handleWorkletMessage(ev.data);
+        };
+        node.connect(this.masterGain);
+        this.workletNode = node;
+        this.audioMode = 'worklet';
+        this.workletSampleRate = Math.max(8000, Math.round(ctx.sampleRate || 48000));
+        this.workletTelemetryCtxTime = ctx.currentTime;
+
+        node.port.postMessage({ type: 'obs', obs: this.obs });
         node.port.postMessage({
-          masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
-          drive: this.curAcidDrive,
+          type: 'streams',
+          enabled: this.streamlinesEnabled,
+          bands: this.streamBands16,
         });
+        node.port.postMessage({
+          type: 'state',
+          active: this.enabled && this.unlocked && ctx.state === 'running',
+          streamlinesEnabled: this.streamlinesEnabled,
+        });
+        return true;
       })
-      .catch(() => {
-        // Gracefully degrade if AudioWorklet is unavailable
-      })
+      .catch(() => false)
       .finally(() => {
-        this.streamWorkletLoading = false;
-        URL.revokeObjectURL(url);
+        this.workletInitPromise = null;
+        if (canBlobUrl && url.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
+          URL.revokeObjectURL(url);
+        }
       });
+
+    return this.workletInitPromise;
   }
 
   updateStreamlineTelemetry(nowMs: number, windBands?: Float32Array, oceanBands?: Float32Array): void {
-    if (!this.streamlinesEnabled || !this.isRunning()) {
-      if (this.streamWorkletNode && nowMs - this.lastStreamSendMs >= 120) {
+    const running = this.isRunning();
+    if (!this.streamlinesEnabled || !running) {
+      if (this.audioMode === 'worklet' && this.workletNode && !this.sentStreamDisabled && nowMs - this.lastStreamSendMs >= 90) {
         this.lastStreamSendMs = nowMs;
-        this.streamWorkletNode.port.postMessage({ masterAmp: 0 });
+        this.sentStreamDisabled = true;
+        this.workletNode.port.postMessage({ type: 'streams', enabled: false });
       }
       this.streamEnergyAvg = 0;
       return;
@@ -298,29 +382,14 @@ export class GlobeCyberSynth {
     }
     this.streamEnergyAvg = Math.min(1, sum / 16);
 
-    if (!this.streamWorkletNode || nowMs - this.lastStreamSendMs < 65) return;
+    if (this.audioMode !== 'worklet' || !this.workletNode || nowMs - this.lastStreamSendMs < 90) return;
     this.lastStreamSendMs = nowMs;
+    this.sentStreamDisabled = false;
 
-    const obs = this.obs;
-    const env = obs.env;
-    const darkBias = obs.halogenStress * 0.45 + env.nightFactor * 0.45 + obs.mineralSulfideRatio * 0.35;
-    const usePhrygian = darkBias > 0.36;
-    const bar = Math.floor(this.frameCursor / ((SYNTH_RATE * 60) / SYNTH_BPM / 4 * 16));
-    const prog = usePhrygian ? [0, 5, 1, 8] : [0, 5, 8, 10];
-    const rootMidi = 50 + prog[Math.floor(bar / 2) % prog.length] + (env.nightFactor > 0.55 ? -12 : 0);
-
-    const windDegrees = usePhrygian ? [0, 1, 7, 10, 12, 13, 19, 22] : [0, 3, 7, 10, 12, 15, 19, 22];
-    const oceanDegrees = usePhrygian ? [-12, -5, -11, 0, 1, 7, 8, 12] : [-12, -5, 0, 3, 7, 10, 12, 15];
-    for (let i = 0; i < 8; i++) {
-      this.streamFreqs16[i] = midiToHz(Math.max(36, Math.min(80, rootMidi + windDegrees[i])));
-      this.streamFreqs16[8 + i] = midiToHz(Math.max(28, Math.min(72, rootMidi + oceanDegrees[i])));
-    }
-
-    this.streamWorkletNode.port.postMessage({
+    this.workletNode.port.postMessage({
+      type: 'streams',
+      enabled: true,
       bands: this.streamBands16,
-      freqs: this.streamFreqs16,
-      drive: this.curAcidDrive,
-      masterAmp: 1,
     });
   }
 
@@ -329,17 +398,28 @@ export class GlobeCyberSynth {
     const active = this.enabled && this.ctx.state === 'running';
     const target = active ? this.volume * 0.85 : 0;
     this.masterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02);
-    this.streamWorkletNode?.port.postMessage({
-      masterAmp: active && this.unlocked && this.streamlinesEnabled ? 1 : 0,
-    });
-    if (!active || !this.unlocked) {
+
+    if (this.audioMode === 'worklet' && this.workletNode) {
       this.stopScheduleTimer();
-    } else {
-      this.ensureScheduleTimer();
+      this.workletNode.port.postMessage({
+        type: 'state',
+        active: active && this.unlocked,
+        streamlinesEnabled: active && this.unlocked && this.streamlinesEnabled,
+      });
+      return;
+    }
+
+    if (this.audioMode === 'fallback') {
+      if (!active || !this.unlocked) {
+        this.stopScheduleTimer();
+      } else {
+        this.ensureScheduleTimer();
+      }
     }
   }
 
   private ensureScheduleTimer(): void {
+    if (this.audioMode !== 'fallback') return;
     if (this.scheduleTimer !== null || typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
     this.scheduleTimer = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
@@ -381,54 +461,122 @@ export class GlobeCyberSynth {
 
   setObservation(obs: ScreenAudioObservation): void {
     this.obs = obs;
+    if (this.audioMode === 'worklet' && this.workletNode) {
+      this.workletNode.port.postMessage({ type: 'obs', obs });
+    }
   }
 
-  async unlock(): Promise<void> {
-    if (this.ctx && this.ctx.state === 'running') {
+  unlock(): Promise<void> {
+    if (this.unlockPromise) return this.unlockPromise;
+    const p = this.unlockInner().finally(() => {
+      if (this.unlockPromise === p) {
+        this.unlockPromise = null;
+      }
+    });
+    this.unlockPromise = p;
+    return p;
+  }
+
+  private async unlockInner(): Promise<void> {
+    if (
+      this.ctx &&
+      this.ctx.state === 'running' &&
+      (this.audioMode === 'fallback' || this.workletNode !== null)
+    ) {
       this.unlocked = true;
       this.syncMasterGain();
       return;
     }
+
     const Ctor =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctor) return;
+
     if (!this.ctx) {
       const ctx = new Ctor({ latencyHint: 'playback' });
       this.ctx = ctx;
-      this.buildGraph(ctx);
-      this.drumBank = buildCyberDrumBank(ctx);
-      this.initStreamWorklet(ctx);
-      this.originTime = ctx.currentTime;
-      this.frameCursor = 0;
       ctx.addEventListener('statechange', () => {
         if (this.ctx === ctx && ctx.state === 'running' && !this.wasHidden) {
           this.unlocked = true;
           this.syncMasterGain();
         }
       });
-    }
-    if (this.ctx.state === 'suspended') {
-      try {
-        await this.ctx.resume();
-      } catch {
-        // Ignore until next user gesture
+
+      const canWorklet = Boolean(ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined');
+      if (canWorklet) {
+        this.buildWorkletBaseGraph(ctx);
+      } else {
+        this.initFallbackGraph(ctx);
       }
     }
-    if (this.ctx.state === 'running') {
+
+    const ctx = this.ctx;
+    const canWorklet = Boolean(ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined');
+
+    // Call ctx.resume() synchronously inside the user-gesture turn before awaiting addModule.
+    const resumePromise =
+      ctx.state === 'suspended' ? ctx.resume().catch(() => {}) : Promise.resolve();
+    const workletPromise =
+      canWorklet && !this.workletNode && this.audioMode !== 'fallback'
+        ? this.ensureSynthWorklet(ctx)
+        : Promise.resolve(this.audioMode === 'worklet' && this.workletNode !== null);
+
+    const [, workletOk] = await Promise.all([resumePromise, workletPromise]);
+    if (this.ctx !== ctx) return;
+
+    if (canWorklet && !workletOk && this.audioMode !== 'fallback') {
+      this.initFallbackGraph(ctx);
+    }
+
+    if (ctx.state === 'running') {
       this.unlocked = true;
-      if (this.frameCursor <= 0) {
-        this.originTime = this.ctx.currentTime;
+      if (this.audioMode === 'fallback') {
+        if (this.frameCursor <= 0) {
+          this.originTime = ctx.currentTime;
+        } else {
+          this.originTime = ctx.currentTime - this.frameCursor / SYNTH_RATE;
+        }
       } else {
-        this.originTime = this.ctx.currentTime - this.frameCursor / SYNTH_RATE;
+        this.workletTelemetryCtxTime = ctx.currentTime;
       }
       this.syncMasterGain();
     }
   }
 
-  private buildGraph(ctx: AudioContext): void {
+  private buildWorkletBaseGraph(ctx: AudioContext): void {
+    this.audioMode = 'worklet';
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = 0;
+
+    const mTap = makeInstantAnalyser(ctx);
+    this.analyser = mTap.node;
+    this.masterBins = mTap.bins;
+
+    this.masterGain.connect(this.analyser);
+    this.analyser.connect(ctx.destination);
+  }
+
+  private initFallbackGraph(ctx: AudioContext): void {
+    if (this.audioMode === 'fallback') return;
+    this.audioMode = 'fallback';
+    if (!this.masterGain) {
+      this.masterGain = ctx.createGain();
+      this.masterGain.gain.value = 0;
+    }
+    if (!this.analyser) {
+      const mTap = makeInstantAnalyser(ctx);
+      this.analyser = mTap.node;
+      this.masterBins = mTap.bins;
+    }
+    this.buildFallbackGraph(ctx);
+    this.drumBank = buildCyberDrumBank(ctx);
+    this.originTime = ctx.currentTime;
+    this.frameCursor = 0;
+  }
+
+  private buildFallbackGraph(ctx: AudioContext): void {
+    if (!this.masterGain || !this.analyser) return;
 
     this.duckGain = ctx.createGain();
     this.duckGain.gain.value = 1;
@@ -442,10 +590,6 @@ export class GlobeCyberSynth {
     this.compressor.ratio.value = 4.5;
     this.compressor.attack.value = 0.004;
     this.compressor.release.value = 0.13;
-
-    const mTap = makeInstantAnalyser(ctx);
-    this.analyser = mTap.node;
-    this.masterBins = mTap.bins;
 
     const bTap = makeInstantAnalyser(ctx);
     this.bassAnalyser = bTap.node;
@@ -478,7 +622,7 @@ export class GlobeCyberSynth {
     this.delayFilter.connect(this.duckGain);
     this.delayFilter.connect(this.delayAnalyser);
 
-    // Wide stereo modulated analog Chorus ("makes everything sound HUGE")
+    // Wide stereo modulated analog Chorus
     this.chorusMix = ctx.createGain();
     this.chorusMix.gain.value = 0.42;
     this.chorusL = ctx.createDelay(0.1);
@@ -561,13 +705,39 @@ export class GlobeCyberSynth {
 
   resetClock(): void {
     if (!this.ctx) return;
-    this.resetClockSoft();
+    this.resetClockSoft(false);
   }
 
   private resetClockSoft(preserveBarCursor = false): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
+
+    if (this.audioMode === 'worklet' && this.workletNode) {
+      if (!preserveBarCursor) {
+        this.workletSampleCursor = 0;
+        this.workletBar = 0;
+      }
+      this.workletTelemetryCtxTime = now;
+      const active = Boolean(this.enabled && this.unlocked && ctx.state === 'running');
+      this.workletNode.port.postMessage({
+        type: 'state',
+        active,
+        streamlinesEnabled: active && this.streamlinesEnabled,
+        clearFx: true,
+        resetClock: !preserveBarCursor,
+      });
+      if (this.masterGain) {
+        const target = active ? this.volume * 0.85 : 0;
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setValueAtTime(0, now);
+        if (target > 0.0001) {
+          this.masterGain.gain.setTargetAtTime(target, now + 0.025, 0.045);
+        }
+      }
+      return;
+    }
+
     if (!preserveBarCursor || this.frameCursor <= 0) {
       this.originTime = now;
       this.frameCursor = 0;
@@ -585,12 +755,6 @@ export class GlobeCyberSynth {
       this.delayFeedback.gain.cancelScheduledValues(now);
       this.delayFeedback.gain.setValueAtTime(0, now);
       this.delayFeedback.gain.setTargetAtTime(this.curDelayFeedback, now + 0.08, 0.08);
-    }
-    if (this.streamWorkletNode) {
-      this.streamWorkletNode.port.postMessage({
-        resetState: true,
-        masterAmp: this.streamlinesEnabled && this.isRunning() ? 1 : 0,
-      });
     }
     if (this.masterGain) {
       const target = this.enabled && this.unlocked && ctx.state === 'running' ? this.volume * 0.85 : 0;
@@ -621,8 +785,12 @@ export class GlobeCyberSynth {
         this.masterGain.gain.cancelScheduledValues(now);
         this.masterGain.gain.setTargetAtTime(0, now, 0.015);
       }
-      if (this.streamWorkletNode) {
-        this.streamWorkletNode.port.postMessage({ masterAmp: 0 });
+      if (this.audioMode === 'worklet' && this.workletNode) {
+        this.workletNode.port.postMessage({
+          type: 'state',
+          active: false,
+          streamlinesEnabled: false,
+        });
       }
       if (this.delayFeedback) {
         this.delayFeedback.gain.cancelScheduledValues(now);
@@ -681,6 +849,7 @@ export class GlobeCyberSynth {
   }
 
   private pumpSchedule(nowMs: number): void {
+    if (this.audioMode !== 'fallback') return;
     if (typeof document !== 'undefined' && document.hidden) return;
     if (!this.enabled || !this.unlocked || !this.ctx || this.ctx.state !== 'running') return;
     if (this.volume <= 0.001) return;
@@ -689,8 +858,7 @@ export class GlobeCyberSynth {
 
     const now = this.ctx.currentTime;
     const nowFrame = Math.max(0, Math.floor((now - this.originTime) * SYNTH_RATE));
-    // Maintain continuous beat-grid alignment across stalls/Bluetooth jitter: never reset
-    // originTime back to 0 during playback; advance cursor smoothly past expired frames.
+    // Maintain continuous beat-grid alignment across stalls/Bluetooth jitter
     if (this.frameCursor < nowFrame) {
       this.frameCursor = nowFrame;
     }
@@ -718,6 +886,10 @@ export class GlobeCyberSynth {
       }
     }
     if (this.volume <= 0.001) return 0;
+
+    if (this.audioMode === 'worklet') {
+      return this.workletRms;
+    }
 
     this.ensureScheduleTimer();
     this.pumpSchedule(nowMs);
@@ -748,10 +920,120 @@ export class GlobeCyberSynth {
     out.streamlinesEnabled = this.streamlinesEnabled;
     out.streamlineEnergy = this.streamEnergyAvg;
 
-    const currentStep = Math.floor(this.frameCursor / ((SYNTH_RATE * 60) / SYNTH_BPM / 4));
-    out.section = cyberSection(Math.floor(currentStep / 16));
+    const currentBar =
+      this.audioMode === 'worklet'
+        ? this.workletBar
+        : Math.floor(Math.floor(this.frameCursor / ((SYNTH_RATE * 60) / SYNTH_BPM / 4)) / 16);
+    out.section = cyberSection(currentBar);
 
-    if (!out.running || !this.ctx || !this.analyser || !this.bassAnalyser || !this.polyAnalyser || !this.chorusAnalyser || !this.delayAnalyser) {
+    if (!out.running || !this.ctx || !this.analyser) {
+      out.rms = 0;
+      out.bassLevel = 0;
+      out.acidLevel = 0;
+      out.chorusLevel = 0;
+      out.delayLevel = 0;
+      out.polyLevel = 0;
+      out.pulseLevel = 0;
+      out.sidechainDepth = 0;
+      out.downbeatPulse = 0;
+      out.offbeatPulse = 0;
+      out.lowBassPhase = 0;
+      out.lowBassEnergy = 0;
+      for (let c = 0; c < out.curves.length; c++) out.curves[c].fill(0);
+      return;
+    }
+
+    const sr = this.ctx.sampleRate || 44100;
+    const outLat = Math.max(0, Math.min(0.6, Number((this.ctx as { outputLatency?: number }).outputLatency) || 0));
+
+    if (this.audioMode === 'worklet') {
+      out.rms = this.workletRms;
+      out.sidechainDepth = this.workletSidechainDepth;
+      out.lowBassEnergy = this.workletLowBassEnergy;
+
+      if (computeCurves) {
+        this.analyser.getByteFrequencyData(this.masterBins);
+        const pulseSpecPeak = sampleLogBins(this.masterBins, sr, out.curves[5], 1.0);
+        out.pulseLevel = Math.max(pulseSpecPeak, Math.min(1, this.workletRms * 1.4));
+
+        const bassBus = this.workletBassLevel;
+        const chorusBus = this.workletChorusLevel;
+        const delayBus = this.workletDelayLevel;
+        const polyBus = this.workletPolyLevel;
+
+        let bassPeak = 0;
+        let chorusPeak = 0;
+        let delayPeak = 0;
+        let polyPeak = 0;
+        let acidPeak = 0;
+        const acidMul = 0.45 + 0.95 * this.curAcidDrive;
+        const cSpread = 0.45 + 0.85 * this.curChorusWidth;
+        const dEcho = 0.40 + 1.2 * this.curDelayFeedback;
+
+        for (let i = 0; i < SPECTROGRAM_BINS; i++) {
+          const t = i / (SPECTROGRAM_BINS - 1);
+          const m = out.curves[5][i];
+
+          const bW = Math.max(0.08, 1.0 - 0.78 * Math.pow(t, 0.72));
+          const bV = Math.min(1, Math.max(m * bW * 1.15, bassBus * bW * 0.85));
+          out.curves[0][i] = bV;
+          if (bV > bassPeak) bassPeak = bV;
+
+          const cW = Math.sin(Math.PI * Math.min(1, 0.14 + t * 0.86));
+          const cV = Math.min(1, Math.max(m * cW * cSpread, chorusBus * cW * 0.85));
+          out.curves[2][i] = cV;
+          if (cV > chorusPeak) chorusPeak = cV;
+
+          const dW = Math.sin(Math.PI * Math.min(1, 0.22 + t * 0.68));
+          const dV = Math.min(1, Math.max(m * dW * dEcho, delayBus * dW * 0.85));
+          out.curves[3][i] = dV;
+          if (dV > delayPeak) delayPeak = dV;
+
+          const pW = Math.sin(Math.PI * Math.min(1, 0.18 + t * 0.82));
+          const pV = Math.min(1, Math.max(m * pW * 1.12, polyBus * pW * 0.85));
+          out.curves[4][i] = pV;
+          if (pV > polyPeak) polyPeak = pV;
+
+          const harmonicBand = Math.sin(Math.PI * Math.min(1, Math.max(0.08, t * 1.15))) * 0.85 + 0.15;
+          const aV = Math.min(1, (bV * 0.55 + pV * 0.65) * acidMul * harmonicBand);
+          out.curves[1][i] = aV;
+          if (aV > acidPeak) acidPeak = aV;
+        }
+
+        out.bassLevel = Math.max(bassPeak, bassBus);
+        out.chorusLevel = Math.max(chorusPeak, chorusBus);
+        out.delayLevel = Math.max(delayPeak, delayBus);
+        out.polyLevel = Math.max(polyPeak, polyBus);
+        out.acidLevel = acidPeak;
+      } else {
+        out.bassLevel = this.workletBassLevel;
+        out.chorusLevel = this.workletChorusLevel;
+        out.delayLevel = this.workletDelayLevel;
+        out.polyLevel = this.workletPolyLevel;
+        out.acidLevel = Math.min(1, (this.workletBassLevel * 0.5 + this.workletPolyLevel * 0.65) * (0.45 + 0.95 * this.curAcidDrive));
+        out.pulseLevel = Math.min(1, Math.max(this.workletRms * 1.4, this.workletSidechainDepth));
+      }
+
+      const dtSinceMsg = Math.max(0, Math.min(0.25, this.ctx.currentTime - this.workletTelemetryCtxTime));
+      const elapsedSec = Math.max(
+        0,
+        this.workletSampleCursor / Math.max(8000, this.workletSampleRate) + dtSinceMsg - outLat,
+      );
+      const beatCount = (elapsedSec * SYNTH_BPM) / 60;
+      const qPhase = beatCount % 1;
+      const barBeat = Math.floor(beatCount) % 4;
+      const downEmphasis = barBeat === 0 || barBeat === 2 ? 1.0 : 0.62;
+      out.downbeatPulse = Math.exp(-qPhase * 4.2) * downEmphasis;
+
+      const offPhase = (beatCount + 0.5) % 1;
+      const offBeatIdx = Math.floor(beatCount + 0.5) % 4;
+      const backEmphasis = offBeatIdx === 1 || offBeatIdx === 3 ? 1.0 : 0.68;
+      out.offbeatPulse = Math.exp(-offPhase * 4.6) * backEmphasis;
+      out.lowBassPhase = beatCount * Math.PI;
+      return;
+    }
+
+    if (!this.bassAnalyser || !this.polyAnalyser || !this.chorusAnalyser || !this.delayAnalyser) {
       out.rms = 0;
       out.bassLevel = 0;
       out.acidLevel = 0;
@@ -769,7 +1051,6 @@ export class GlobeCyberSynth {
     }
 
     if (computeCurves) {
-      const sr = this.ctx.sampleRate || 44100;
       this.bassAnalyser.getByteFrequencyData(this.bassBins);
       this.chorusAnalyser.getByteFrequencyData(this.chorusBins);
       this.delayAnalyser.getByteFrequencyData(this.delayBins);
@@ -782,7 +1063,6 @@ export class GlobeCyberSynth {
       out.polyLevel = sampleLogBins(this.polyBins, sr, out.curves[4], 1.22);
       out.pulseLevel = sampleLogBins(this.masterBins, sr, out.curves[5], 1.0);
 
-      // Acid waveshaper curve: highlight nonlinear upper-harmonic saturation energy directly
       const acidMul = 0.45 + 0.95 * this.curAcidDrive;
       let acidPeak = 0;
       for (let i = 0; i < SPECTROGRAM_BINS; i++) {
@@ -799,8 +1079,6 @@ export class GlobeCyberSynth {
     out.sidechainDepth = Math.max(0, Math.min(1, (1 - duckVal) / 0.62));
     out.rms = Math.max(out.pulseLevel * 0.6, out.bassLevel * 0.5);
 
-    // Pure low-tempo BPM beat timing compensated for audio hardware/Bluetooth outputLatency
-    const outLat = Math.max(0, Math.min(0.6, Number((this.ctx as { outputLatency?: number }).outputLatency) || 0));
     const elapsedSec = Math.max(0, this.ctx.currentTime - outLat - this.originTime);
     const beatCount = (elapsedSec * SYNTH_BPM) / 60;
     const qPhase = beatCount % 1;

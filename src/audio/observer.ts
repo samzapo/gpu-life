@@ -208,7 +208,8 @@ export function observeScreenAudioState(
         ? 12
         : 4;
 
-  for (let i = 0; i < n; i++) {
+  const stride = n > 4000 ? 2 : 1;
+  for (let i = 0; i < n; i += stride) {
     const pBase = i * 12;
     const px = particlesF32[pBase];
     const py = particlesF32[pBase + 1];
@@ -240,7 +241,7 @@ export function observeScreenAudioState(
     if (dist > 1.05) continue;
 
     // Emphasize viewport center smoothly (matching primordia's proximity windowing)
-    const w = Math.pow(Math.max(0, 1 - dist / 1.05), 1.55);
+    const w = Math.pow(Math.max(0, 1 - dist / 1.05), 1.55) * stride;
     if (w < 0.015) continue;
 
     const laneIdx = Math.max(0, Math.min(3, Math.floor((dxNorm * 0.5 + 0.5) * 4)));

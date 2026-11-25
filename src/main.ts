@@ -3057,7 +3057,7 @@ function observeGlobeAudioCenter(nowMs: number) {
   if (
     !cyberSynth.isEnabled() ||
     cyberSynth.getState() !== 'running' ||
-    nowMs - lastAudioObserveMs < 640
+    nowMs - lastAudioObserveMs < 950
   ) {
     return;
   }
@@ -3484,6 +3484,8 @@ window.complexLife = {
   getAudioStatus: () => ({
     enabled: cyberSynth.isEnabled(),
     state: cyberSynth.getState(),
+    mode: cyberSynth.getAudioMode(),
+    workletActive: cyberSynth.isWorkletActive(),
     volume: cyberSynth.getVolume(),
     lastObservation: lastAudioObservation,
   }),

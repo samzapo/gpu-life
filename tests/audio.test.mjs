@@ -4,6 +4,7 @@ import { observeScreenAudioState } from '../src/audio/observer.ts';
 import { generateScoreEvents, lineageMotif } from '../src/audio/score.ts';
 import { SYNTH_RATE } from '../src/audio/synthBank.ts';
 import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '../src/audio/engine.ts';
+import { GLOBE_SYNTH_CORE_SOURCE, GLOBE_SYNTH_WORKLET_NAME } from '../src/audio/synthWorklet.ts';
 import { describeSynthEffects, SYNTH_EFFECT_SPECS } from '../src/audio/spectrogram.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
 import { CONFIG_STORAGE_KEY, invalidateLegacyBrowserCaches, loadCachedConfig } from '../src/config.ts';
@@ -589,5 +590,347 @@ test('GlobeCyberSynth preserves bar continuity across long frame stalls and back
     synth?.setEnabled(false, true);
     globalThis.window = prevWindow;
     globalThis.document = prevDocument;
+  }
+});
+
+function loadSynthDspCoreClass() {
+  return new Function(`${GLOBE_SYNTH_CORE_SOURCE}\nreturn SynthDspCore;`)();
+}
+
+function makeRichTestObs() {
+  const obs = observeScreenAudioState(
+    new Float32Array(12),
+    new Float32Array([0.85, 0.1, 0, packMeta(1, 3, 1)]),
+    1,
+    buildPackedChemistryBuffer(14).elements,
+    { projectionId: 'orthographic', rotate: [0, 0, 0], scale: 1200, pan: [0, 0], width: 1200, height: 800 },
+    null,
+    {
+      windSpeedNorm: 0.85,
+      oceanFraction: 0.4,
+      oceanSpeedNorm: 0.5,
+      tempNorm: 0.6,
+      nightFactor: 0.35,
+      rhNorm: 0.65,
+      precipNorm: 0.4,
+      elevKmNorm: 0.5,
+      ridgeMask: 0.6,
+    },
+    9911,
+    false,
+  );
+  obs.active = true;
+  obs.totalBioMass = 180;
+  obs.consumerRatio = 0.35;
+  obs.chemBondActivity = 0.6;
+  obs.chemVaporRatio = 0.45;
+  obs.halogenStress = 0.45;
+  obs.mineralCrystalRatio = 0.4;
+  obs.mineralSulfideRatio = 0.35;
+  obs.lanes[0].chemGain = 0.7;
+  obs.lanes[0].bioGain = 0.6;
+  obs.lanes[0].mineralGain = 0.5;
+  obs.lanes[1].chemGain = 0.8;
+  obs.lanes[1].bioGain = 0.7;
+  obs.lanes[2].bioGain = 0.75;
+  obs.lanes[3].chemGain = 0.6;
+  obs.lanes[3].mineralGain = 0.5;
+  return obs;
+}
+
+test('SynthDspCore renders continuous sample-accurate stereo audio below real-time budget with zero allocations', () => {
+  const SynthDspCore = loadSynthDspCoreClass();
+  const sampleRate = 48000;
+  const core = new SynthDspCore(sampleRate);
+  const obs = makeRichTestObs();
+
+  core.applyMessage({ type: 'obs', obs });
+  core.applyMessage({
+    type: 'streams',
+    enabled: true,
+    bands: new Float32Array([0.4, 0.6, 0.3, 0.7, 0.5, 0.3, 0.8, 0.6, 0.3, 0.5, 0.4, 0.6, 0.7, 0.2, 0.5, 0.8]),
+  });
+  core.applyMessage({ type: 'state', active: true, streamlinesEnabled: true });
+
+  const blockLen = 128;
+  const outL = new Float32Array(blockLen);
+  const outR = new Float32Array(blockLen);
+  const telemetry = new Float32Array(16);
+  const quanta = 2500; // 2500 * 128 = 320,000 samples (6.667s across bars 0..3)
+
+  // Warmup 16 quanta before benchmarking JIT speed
+  for (let q = 0; q < 16; q++) {
+    core.process(outL, outR);
+  }
+  core.applyMessage({ type: 'state', active: true, streamlinesEnabled: true, clearFx: true, resetClock: true });
+
+  let sumSq = 0;
+  let maxAbs = 0;
+  let maxAbsDiff = 0;
+  const t0 = performance.now();
+  for (let q = 0; q < quanta; q++) {
+    core.process(outL, outR);
+    for (let i = 0; i < blockLen; i++) {
+      const l = outL[i];
+      const r = outR[i];
+      assert.ok(Number.isFinite(l) && Number.isFinite(r), `non-finite audio sample at q=${q}, i=${i}`);
+      const al = Math.abs(l);
+      const ar = Math.abs(r);
+      if (al > maxAbs) maxAbs = al;
+      if (ar > maxAbs) maxAbs = ar;
+      const diff = Math.abs(l - r);
+      if (diff > maxAbsDiff) maxAbsDiff = diff;
+      sumSq += 0.5 * (l * l + r * r);
+    }
+  }
+  const elapsedMs = performance.now() - t0;
+  const msPerQuantum = elapsedMs / quanta;
+  const rms = Math.sqrt(sumSq / (quanta * blockLen));
+
+  core.fillTelemetry(telemetry);
+  const expectedSamples = quanta * blockLen;
+  const expectedStep = Math.floor(expectedSamples / ((sampleRate * 60) / 120 / 4));
+
+  assert.ok(maxAbs <= 1.0, `peak exceeded 1.0: ${maxAbs}`);
+  assert.ok(rms > 0.04, `expected strong audible stereo RMS > 0.04, got ${rms}`);
+  assert.ok(maxAbsDiff > 0.01, `expected true stereo separation > 0.01, got ${maxAbsDiff}`);
+  assert.equal(telemetry[7], expectedSamples, `expected exact sampleCursor=${expectedSamples}`);
+  assert.equal(telemetry[8], sampleRate);
+  assert.equal(telemetry[15], expectedStep, `expected sample-accurate step=${expectedStep}`);
+  assert.ok(telemetry[1] > 0, `expected non-zero bassLevel, got ${telemetry[1]}`);
+  assert.ok(telemetry[2] > 0, `expected non-zero polyLevel, got ${telemetry[2]}`);
+  assert.ok(telemetry[3] > 0, `expected non-zero chorusLevel, got ${telemetry[3]}`);
+  assert.ok(telemetry[4] > 0, `expected non-zero delayLevel, got ${telemetry[4]}`);
+  assert.ok(telemetry[5] >= 0, `expected valid sidechainDepth, got ${telemetry[5]}`);
+  assert.ok(telemetry[6] > 0, `expected non-zero lowBassEnergy, got ${telemetry[6]}`);
+  assert.ok(
+    msPerQuantum < 0.8,
+    `expected < 0.8 ms per 128-sample quantum in Node V8, got ${msPerQuantum.toFixed(4)} ms`,
+  );
+
+  // Verify pause ramps cleanly to silence and preserves bar/step across clearFx without resetClock
+  const barBeforePause = telemetry[14];
+  const stepBeforePause = telemetry[15];
+  core.applyMessage({ type: 'state', active: false, streamlinesEnabled: false });
+  for (let q = 0; q < 60; q++) {
+    core.process(outL, outR);
+  }
+  let tailSq = 0;
+  for (let i = 0; i < blockLen; i++) {
+    tailSq += 0.5 * (outL[i] * outL[i] + outR[i] * outR[i]);
+  }
+  const tailRms = Math.sqrt(tailSq / blockLen);
+  assert.ok(tailRms < 1e-4, `expected paused tail to fade smoothly to silence, got ${tailRms}`);
+
+  core.fillTelemetry(telemetry);
+  const barAfterPause = telemetry[14];
+  const stepAfterPause = telemetry[15];
+  assert.ok(barAfterPause >= barBeforePause);
+  assert.ok(stepAfterPause >= stepBeforePause);
+
+  core.applyMessage({ type: 'state', active: true, streamlinesEnabled: true, clearFx: true, resetClock: false });
+  core.fillTelemetry(telemetry);
+  assert.equal(telemetry[14], barAfterPause);
+  assert.equal(telemetry[15], stepAfterPause);
+
+  core.applyMessage({ type: 'state', active: true, streamlinesEnabled: true, clearFx: true, resetClock: true });
+  core.fillTelemetry(telemetry);
+  assert.equal(telemetry[7], 0);
+  assert.equal(telemetry[14], 0);
+  assert.equal(telemetry[15], 0);
+});
+
+test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-thread node churn and bar continuity', async () => {
+  const SynthDspCore = loadSynthDspCoreClass();
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevAudioWorkletNode = globalThis.AudioWorkletNode;
+
+  let fakeHidden = false;
+  let fakeTime = 1.0;
+  let ctxState = 'running';
+  let addedModules = [];
+  let createdNode = null;
+  let postedToWorklet = [];
+  const counts = {
+    osc: 0,
+    shaper: 0,
+    delay: 0,
+    comp: 0,
+    bufSrc: 0,
+    analyser: 0,
+    setInterval: 0,
+  };
+  const masterTargets = [];
+
+  class WorkletMockAudioContext {
+    constructor() {
+      this.sampleRate = 48000;
+      this.outputLatency = 0.04;
+      this.destination = { connect() {} };
+      this.audioWorklet = {
+        addModule: async (url) => {
+          addedModules.push(url);
+        },
+      };
+    }
+    get currentTime() { return fakeTime; }
+    get state() { return ctxState; }
+    addEventListener() {}
+    suspend() { ctxState = 'suspended'; return Promise.resolve(); }
+    resume() { ctxState = 'running'; return Promise.resolve(); }
+    createGain() {
+      const node = {
+        connect() {},
+        disconnect() {},
+        gain: {
+          value: 0,
+          setValueAtTime(v) { node.gain.value = v; },
+          linearRampToValueAtTime() {},
+          exponentialRampToValueAtTime() {},
+          cancelScheduledValues() {},
+          setTargetAtTime(v) {
+            node.gain.value = v;
+            masterTargets.push(v);
+          },
+        },
+      };
+      return node;
+    }
+    createAnalyser() {
+      counts.analyser++;
+      return {
+        connect() {},
+        disconnect() {},
+        fftSize: 256,
+        frequencyBinCount: 128,
+        smoothingTimeConstant: 0,
+        minDecibels: -86,
+        maxDecibels: -12,
+        getFloatTimeDomainData(arr) { arr.fill(0); },
+        getByteFrequencyData(arr) { arr.fill(48); },
+      };
+    }
+    createOscillator() { counts.osc++; throw new Error('must not create oscillators in worklet mode'); }
+    createWaveShaper() { counts.shaper++; throw new Error('must not create waveshapers in worklet mode'); }
+    createDelay() { counts.delay++; throw new Error('must not create DelayNodes in worklet mode'); }
+    createDynamicsCompressor() { counts.comp++; throw new Error('must not create DynamicsCompressor in worklet mode'); }
+    createBufferSource() { counts.bufSrc++; throw new Error('must not create BufferSourceNodes in worklet mode'); }
+    createBuffer() { throw new Error('must not build fallback drum buffers in worklet mode'); }
+  }
+
+  class MockAudioWorkletNode {
+    constructor(ctx, name) {
+      this.ctx = ctx;
+      this.name = name;
+      this.core = new SynthDspCore(ctx.sampleRate);
+      this.outL = new Float32Array(128);
+      this.outR = new Float32Array(128);
+      this.telemetry = new Float32Array(16);
+      this.quantum = 0;
+      this.port = {
+        onmessage: null,
+        postMessage: (msg) => {
+          postedToWorklet.push(msg);
+          this.core.applyMessage(msg);
+        },
+      };
+      createdNode = this;
+    }
+    connect() {}
+    disconnect() {}
+    stepQuanta(n) {
+      for (let i = 0; i < n; i++) {
+        this.core.process(this.outL, this.outR);
+        fakeTime += 128 / this.ctx.sampleRate;
+        this.quantum++;
+        if ((this.quantum & 31) === 0) {
+          this.core.fillTelemetry(this.telemetry);
+          this.port.onmessage?.({ data: { type: 'telemetry', data: new Float32Array(this.telemetry) } });
+        }
+      }
+    }
+  }
+
+  globalThis.AudioWorkletNode = MockAudioWorkletNode;
+  globalThis.window = {
+    AudioContext: WorkletMockAudioContext,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    setInterval: () => { counts.setInterval++; return 1; },
+    clearInterval: () => {},
+  };
+  globalThis.document = {
+    get hidden() { return fakeHidden; },
+  };
+
+  let synth;
+  try {
+    const obs = makeRichTestObs();
+    synth = new GlobeCyberSynth();
+    synth.setObservation(obs);
+    synth.setVolume(0.75);
+    synth.setEnabled(true, true);
+    await synth.unlock();
+
+    assert.equal(synth.getAudioMode(), 'worklet');
+    assert.equal(synth.isWorkletActive(), true);
+    assert.equal(addedModules.length, 1);
+    assert.equal(createdNode.name, GLOBE_SYNTH_WORKLET_NAME);
+    assert.equal(counts.analyser, 1);
+    assert.equal(counts.osc, 0);
+    assert.equal(counts.shaper, 0);
+    assert.equal(counts.delay, 0);
+    assert.equal(counts.comp, 0);
+    assert.equal(counts.bufSrc, 0);
+    assert.equal(counts.setInterval, 0);
+
+    // Advance ~18 seconds (18 * 48000 / 128 = 6750 quanta) -> 'drive' section (> bar 8)
+    createdNode.stepQuanta(6750);
+
+    const rms = synth.tick(18000);
+    assert.ok(rms > 0.04, `expected live worklet RMS > 0.04, got ${rms}`);
+
+    const snap = createSpectrogramSnapshot();
+    synth.readSpectrogram(snap, true);
+    assert.equal(snap.running, true);
+    assert.equal(snap.section, 'drive');
+    assert.ok(snap.rms > 0.04);
+    assert.ok(snap.bassLevel > 0);
+    assert.ok(snap.polyLevel > 0);
+    assert.ok(snap.chorusLevel > 0);
+    assert.ok(snap.delayLevel > 0);
+    assert.ok(snap.lowBassEnergy > 0);
+    assert.ok(snap.downbeatPulse > 0);
+    assert.equal(snap.curves.length, 6);
+    assert.equal(snap.curves[0].length, SPECTROGRAM_BINS);
+
+    const barBeforeHide = createdNode.telemetry[14];
+
+    // Background hide -> 3s pause -> resume must preserve bar continuity (no resetClock)
+    fakeHidden = true;
+    synth.handleVisibilityChange(true);
+    fakeTime += 3.0;
+    fakeHidden = false;
+    synth.handleVisibilityChange(false);
+    await new Promise((r) => setTimeout(r, 10));
+
+    createdNode.stepQuanta(64);
+    const barAfterResume = createdNode.telemetry[14];
+    assert.ok(barAfterResume >= barBeforeHide, `bar regressed after resume: ${barBeforeHide} -> ${barAfterResume}`);
+
+    // Mute -> unmute cleanly toggles active state & masterGain
+    synth.setEnabled(false, true);
+    assert.equal(masterTargets.at(-1), 0);
+    assert.equal(postedToWorklet.at(-1)?.active, false);
+
+    synth.setEnabled(true, true);
+    await synth.unlock();
+    assert.ok(Math.abs(masterTargets.at(-1) - 0.75 * 0.85) < 1e-6);
+  } finally {
+    synth?.setEnabled(false, true);
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+    globalThis.AudioWorkletNode = prevAudioWorkletNode;
   }
 });
