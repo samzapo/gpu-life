@@ -2155,27 +2155,7 @@ fn finalizeBioUnified(
     let prevMdpPoi = select(curLifeState.z, curMdp.ctrl.y, mdpInit);
     var emaReward = select(0.0, curMdp.ctrl.z, mdpInit);
 
-    // 1) Lateral Q-table gossip across thriving kin neighbors + gentle prior anchor
-    let hasGossip = acc.bestMdpScore > -0.5;
-    let gossipAlpha = clamp(1.8 * dtBio, 0.0, 0.14);
-    let priorAnchor = clamp(0.14 * dtBio, 0.0, 0.022);
-    for (var rs = 0u; rs < 4u; rs++) {
-        let myRow = getQRow(qPack, rs);
-        let peerRow = select(myRow, getQRow(acc.bestMdpQPack, rs), hasGossip);
-        let priorRow = getQRow(priorQPack, rs);
-        var blendedRow = 0u;
-        for (var aa = 0u; aa < 4u; aa++) {
-            let qSelf = unpackMdpQ(myRow, aa);
-            let qPeer = unpackMdpQ(peerRow, aa);
-            let qPrior = unpackMdpQ(priorRow, aa);
-            let qStep = mix(qSelf, qPeer, select(0.0, gossipAlpha, hasGossip));
-            let qAnch = clamp(mix(qStep, qPrior, priorAnchor), -1.45, 1.45);
-            blendedRow |= quantizeMdpQ(qAnch) << (aa * 8u);
-        }
-        qPack = setQRow(qPack, rs, blendedRow);
-    }
-
-    // 2) Classify discrete ecological state s_t in {STARVING, THREATENED, THRIVING, DORMANT}
+    // 1) Classify discrete ecological state s_t in {STARVING, THREATENED, THRIVING, DORMANT}
     let threatLevel = max(poi * 1.15, max(acc.nearHalogen * 0.85, acc.nearPredThreat * 1.35));
     var curState: u32 = MDP_STATE_THRIVING;
     if (threatLevel > 0.26) {
@@ -2185,6 +2165,24 @@ fn finalizeBioUnified(
     } else if (nightDormancy > 0.42 || solar < 0.14 || (crowdPenalty + landPenalty) > 0.075) {
         curState = MDP_STATE_DORMANT;
     }
+
+    // 2) Lateral Q-table gossip across thriving kin neighbors + gentle prior anchor (active state row only to keep ALU low)
+    let hasGossip = acc.bestMdpScore > -0.5;
+    let gossipAlpha = clamp(2.0 * dtBio, 0.0, 0.16);
+    let priorAnchor = clamp(0.16 * dtBio, 0.0, 0.024);
+    let activeMyRow = getQRow(qPack, curState);
+    let activePeerRow = select(activeMyRow, getQRow(acc.bestMdpQPack, curState), hasGossip);
+    let activePriorRow = getQRow(priorQPack, curState);
+    var blendedActiveRow = 0u;
+    for (var aa = 0u; aa < 4u; aa++) {
+        let qSelf = unpackMdpQ(activeMyRow, aa);
+        let qPeer = unpackMdpQ(activePeerRow, aa);
+        let qPrior = unpackMdpQ(activePriorRow, aa);
+        let qStep = mix(qSelf, qPeer, select(0.0, gossipAlpha, hasGossip));
+        let qAnch = clamp(mix(qStep, qPrior, priorAnchor), -1.45, 1.45);
+        blendedActiveRow |= quantizeMdpQ(qAnch) << (aa * 8u);
+    }
+    qPack = setQRow(qPack, curState, blendedActiveRow);
 
     // 3) Emergency threat breaks non-evasive dwell hysteresis immediately
     if (curState == MDP_STATE_THREATENED && threatLevel > 0.45 && prevAction != MDP_ACT_EVADE && prevDwell > 4u) {

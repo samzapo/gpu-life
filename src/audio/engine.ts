@@ -95,8 +95,8 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
   };
 }
 
-const MAX_VOICES = 72;
-const LOOKAHEAD_SEC = 0.55;
+const MAX_VOICES = 84;
+const LOOKAHEAD_SEC = 1.05;
 const NUM_LANES = 5;
 
 function makeDriveCurve(amount: number): Float32Array<ArrayBuffer> {
@@ -344,7 +344,7 @@ export class GlobeCyberSynth {
     this.scheduleTimer = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       this.pumpSchedule(performance.now());
-    }, 50);
+    }, 40);
   }
 
   private stopScheduleTimer(): void {
@@ -677,14 +677,14 @@ export class GlobeCyberSynth {
 
   private getEffectiveLookaheadSec(): number {
     const outLat = Math.max(0, Math.min(0.6, Number((this.ctx as { outputLatency?: number } | null)?.outputLatency) || 0));
-    return Math.max(LOOKAHEAD_SEC, outLat + 0.35);
+    return Math.max(LOOKAHEAD_SEC, outLat + 0.50);
   }
 
   private pumpSchedule(nowMs: number): void {
     if (typeof document !== 'undefined' && document.hidden) return;
     if (!this.enabled || !this.unlocked || !this.ctx || this.ctx.state !== 'running') return;
     if (this.volume <= 0.001) return;
-    if (nowMs - this.lastScheduleMs < 35) return;
+    if (nowMs - this.lastScheduleMs < 25) return;
     this.lastScheduleMs = nowMs;
 
     const now = this.ctx.currentTime;
@@ -732,7 +732,7 @@ export class GlobeCyberSynth {
     return Math.sqrt(sumSq / this.rmsScratch.length);
   }
 
-  readSpectrogram(out: SynthSpectrogramSnapshot): void {
+  readSpectrogram(out: SynthSpectrogramSnapshot, computeCurves = true): void {
     const obs = this.obs;
     const env = obs.env;
     const darkBias = obs.halogenStress * 0.45 + env.nightFactor * 0.45 + obs.mineralSulfideRatio * 0.35;
@@ -768,30 +768,32 @@ export class GlobeCyberSynth {
       return;
     }
 
-    const sr = this.ctx.sampleRate || 44100;
-    this.bassAnalyser.getByteFrequencyData(this.bassBins);
-    this.chorusAnalyser.getByteFrequencyData(this.chorusBins);
-    this.delayAnalyser.getByteFrequencyData(this.delayBins);
-    this.polyAnalyser.getByteFrequencyData(this.polyBins);
-    this.analyser.getByteFrequencyData(this.masterBins);
+    if (computeCurves) {
+      const sr = this.ctx.sampleRate || 44100;
+      this.bassAnalyser.getByteFrequencyData(this.bassBins);
+      this.chorusAnalyser.getByteFrequencyData(this.chorusBins);
+      this.delayAnalyser.getByteFrequencyData(this.delayBins);
+      this.polyAnalyser.getByteFrequencyData(this.polyBins);
+      this.analyser.getByteFrequencyData(this.masterBins);
 
-    out.bassLevel = sampleLogBins(this.bassBins, sr, out.curves[0], 1.12);
-    out.chorusLevel = sampleLogBins(this.chorusBins, sr, out.curves[2], 1.25);
-    out.delayLevel = sampleLogBins(this.delayBins, sr, out.curves[3], 1.32);
-    out.polyLevel = sampleLogBins(this.polyBins, sr, out.curves[4], 1.22);
-    out.pulseLevel = sampleLogBins(this.masterBins, sr, out.curves[5], 1.0);
+      out.bassLevel = sampleLogBins(this.bassBins, sr, out.curves[0], 1.12);
+      out.chorusLevel = sampleLogBins(this.chorusBins, sr, out.curves[2], 1.25);
+      out.delayLevel = sampleLogBins(this.delayBins, sr, out.curves[3], 1.32);
+      out.polyLevel = sampleLogBins(this.polyBins, sr, out.curves[4], 1.22);
+      out.pulseLevel = sampleLogBins(this.masterBins, sr, out.curves[5], 1.0);
 
-    // Acid waveshaper curve: highlight nonlinear upper-harmonic saturation energy directly
-    const acidMul = 0.45 + 0.95 * this.curAcidDrive;
-    let acidPeak = 0;
-    for (let i = 0; i < SPECTROGRAM_BINS; i++) {
-      const t = i / (SPECTROGRAM_BINS - 1);
-      const harmonicBand = Math.sin(Math.PI * Math.min(1, Math.max(0.08, t * 1.15))) * 0.85 + 0.15;
-      const v = Math.min(1, (out.curves[0][i] * 0.55 + out.curves[4][i] * 0.65) * acidMul * harmonicBand);
-      out.curves[1][i] = v;
-      if (v > acidPeak) acidPeak = v;
+      // Acid waveshaper curve: highlight nonlinear upper-harmonic saturation energy directly
+      const acidMul = 0.45 + 0.95 * this.curAcidDrive;
+      let acidPeak = 0;
+      for (let i = 0; i < SPECTROGRAM_BINS; i++) {
+        const t = i / (SPECTROGRAM_BINS - 1);
+        const harmonicBand = Math.sin(Math.PI * Math.min(1, Math.max(0.08, t * 1.15))) * 0.85 + 0.15;
+        const v = Math.min(1, (out.curves[0][i] * 0.55 + out.curves[4][i] * 0.65) * acidMul * harmonicBand);
+        out.curves[1][i] = v;
+        if (v > acidPeak) acidPeak = v;
+      }
+      out.acidLevel = acidPeak;
     }
-    out.acidLevel = acidPeak;
 
     const duckVal = this.duckGain ? this.duckGain.gain.value : 1;
     out.sidechainDepth = Math.max(0, Math.min(1, (1 - duckVal) / 0.62));
@@ -950,15 +952,20 @@ export class GlobeCyberSynth {
       const durSec = Number.isFinite(ev.durationSec) ? Math.max(0.05, ev.durationSec) : 0.25;
       const endWhen = when + durSec + 0.04;
 
+      const useDualSaw = ev.voiceType !== 'arp' && this.activeVoices < 24;
       const oscMain = ctx.createOscillator();
       oscMain.type = 'sawtooth';
       oscMain.frequency.setValueAtTime(freq, when);
-      oscMain.detune.setValueAtTime(-ev.detuneCents * 0.5, when);
+      if (useDualSaw) {
+        oscMain.detune.setValueAtTime(-ev.detuneCents * 0.5, when);
+      }
 
-      const oscDetune = ctx.createOscillator();
-      oscDetune.type = 'sawtooth';
-      oscDetune.frequency.setValueAtTime(freq, when);
-      oscDetune.detune.setValueAtTime(ev.detuneCents * 0.5, when);
+      const oscDetune = useDualSaw ? ctx.createOscillator() : null;
+      if (oscDetune) {
+        oscDetune.type = 'sawtooth';
+        oscDetune.frequency.setValueAtTime(freq, when);
+        oscDetune.detune.setValueAtTime(ev.detuneCents * 0.5, when);
+      }
 
       const oscSub = ctx.createOscillator();
       oscSub.type = ev.voiceType === 'bass' ? 'triangle' : 'sine';
@@ -985,14 +992,14 @@ export class GlobeCyberSynth {
       }
 
       const amp = ctx.createGain();
-      const peakGain = Math.max(0.001, Math.min(0.85, (Number.isFinite(ev.gain) ? ev.gain : 0.2) * 0.55));
+      const peakGain = Math.max(0.001, Math.min(0.85, (Number.isFinite(ev.gain) ? ev.gain : 0.2) * (useDualSaw ? 0.55 : 0.72)));
       const att = ev.voiceType === 'pad' ? 0.16 : 0.005;
       amp.gain.setValueAtTime(0.0001, when);
       amp.gain.linearRampToValueAtTime(peakGain, when + att);
       amp.gain.exponentialRampToValueAtTime(0.0005, endWhen);
 
       oscMain.connect(filter);
-      oscDetune.connect(filter);
+      if (oscDetune) oscDetune.connect(filter);
       oscSub.connect(subGain);
       subGain.connect(filter);
       filter.connect(amp);
@@ -1002,7 +1009,7 @@ export class GlobeCyberSynth {
       oscMain.onended = () => {
         this.activeVoices = Math.max(0, this.activeVoices - 1);
         oscMain.disconnect();
-        oscDetune.disconnect();
+        oscDetune?.disconnect();
         oscSub.disconnect();
         subGain.disconnect();
         filter.disconnect();
@@ -1010,10 +1017,10 @@ export class GlobeCyberSynth {
       };
 
       oscMain.start(when);
-      oscDetune.start(when);
+      oscDetune?.start(when);
       oscSub.start(when);
       oscMain.stop(endWhen + 0.01);
-      oscDetune.stop(endWhen + 0.01);
+      oscDetune?.stop(endWhen + 0.01);
       oscSub.stop(endWhen + 0.01);
     }
   }

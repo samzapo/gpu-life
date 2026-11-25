@@ -2808,7 +2808,7 @@ function observeGlobeAudioCenter(nowMs: number) {
   if (
     !cyberSynth.isEnabled() ||
     cyberSynth.getState() !== 'running' ||
-    nowMs - lastAudioObserveMs < 420
+    nowMs - lastAudioObserveMs < 640
   ) {
     return;
   }
@@ -4964,7 +4964,10 @@ function update() {
   tooltipManager.tick();
   observeGlobeAudioCenter(start);
   const rmsAudio = cyberSynth.tick(start);
-  cyberSynth.readSpectrogram(synthSpecSnapshot);
+  cyberSynth.readSpectrogram(
+    synthSpecSnapshot,
+    cyberSynth.isEnabled() && !synthSpectrogram.isMinimized(),
+  );
   synthSpectrogram.render(synthSpecSnapshot, start);
   if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
 

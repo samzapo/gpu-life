@@ -92,12 +92,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let nbAtomicNum = u32(matrix[nbSBase + 7u]);
                     let nbV = valence[ip.idx];
                     let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
-                    let nbEntry = lifeStateIn[ip.idx];
-                    let nbLife = nbEntry.life;
+                    let nbLife = lifeStateIn[ip.idx].life;
                     let nbPart = input[ip.idx];
                     var nbMdp = emptyMdpState();
                     if (myPhase == 1u && ip.phase == 1u) {
-                        nbMdp = MdpState(nbEntry.qPack, nbEntry.ctrl);
+                        nbMdp = MdpState(lifeStateIn[ip.idx].qPack, lifeStateIn[ip.idx].ctrl);
                     }
                     accumulateBioUnifiedNeighbor(
                         p.pos,
