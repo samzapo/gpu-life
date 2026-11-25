@@ -212,15 +212,19 @@ fn wrapAngle(angle: f32) -> f32 {
 }
 
 const MDP_SPECIES_STRIDE: u32 = 16u;
-const MDP_STATE_STARVING: u32 = 0u;
-const MDP_STATE_THREATENED: u32 = 1u;
-const MDP_STATE_THRIVING: u32 = 2u;
-const MDP_STATE_DORMANT: u32 = 3u;
+const MDP_STATE_LOW_ENERGY: u32 = 0u;
+const MDP_STATE_HAZARD: u32 = 1u;
+const MDP_STATE_ABUNDANT: u32 = 2u;
+const MDP_STATE_DARK_CROWDED: u32 = 3u;
 
-const MDP_ACT_FORAGE: u32 = 0u;
-const MDP_ACT_HUNT: u32 = 1u;
-const MDP_ACT_EVADE: u32 = 2u;
-const MDP_ACT_CONSOLIDATE: u32 = 3u;
+const MDP_ACT_EXPAND: u32 = 0u;
+const MDP_ACT_PROPEL: u32 = 1u;
+const MDP_ACT_DISPERSE: u32 = 2u;
+const MDP_ACT_COMPACT: u32 = 3u;
+
+const MAX_LEADER_HOPS: u32 = 24u;
+const NO_LEADER: u32 = 0xffffffffu;
+const MDP_PAD_TAG: u32 = 2097152u;
 
 struct MdpState {
     qPack: vec4u,
@@ -231,6 +235,27 @@ struct LifeMdpState {
     life: vec4f,
     qPack: vec4u,
     ctrl: vec4f,
+    blob: vec4u, // x=leaderId, y=distHops, z=packed3Mdp, w=prevSpeciesCtrl
+}
+
+struct BlobMdpSlot {
+    qPack: vec4u,
+    ctrl: vec4f,
+}
+
+struct MdpLeverProfile {
+    dSameKin: f32,
+    dForeignBio: f32,
+    dChemNutr: f32,
+    dChemHalogen: f32,
+    dLipid: f32,
+    dMineral: f32,
+    dBeta: f32,
+    dDrag: f32,
+    chiralTwist: f32,
+    agitation: f32,
+    lipidAlloc: f32,
+    torpor: f32,
 }
 
 fn emptyMdpState() -> MdpState {
@@ -278,4 +303,68 @@ fn setQRow(qPack: vec4u, stateIdx: u32, rowVal: u32) -> vec4u {
     else if (s == 2u) { out.z = rowVal; }
     else { out.w = rowVal; }
     return out;
+}
+
+fn packBlobPolicyZ(
+    pAct: u32,
+    bAct: u32,
+    sAct: u32,
+    pState: u32,
+    bState: u32,
+    hasBlob: u32,
+    sizeBucket: u32,
+) -> u32 {
+    return (pAct & 3u)
+        | ((bAct & 3u) << 2u)
+        | ((sAct & 3u) << 4u)
+        | ((pState & 3u) << 6u)
+        | ((bState & 3u) << 8u)
+        | ((hasBlob & 1u) << 10u)
+        | ((sizeBucket & 7u) << 11u)
+        | 16384u; // bit 14: valid 3-MDP broadcast
+}
+
+fn packThreeMdpPadFromZ(packedBlobZ: u32) -> f32 {
+    return f32(MDP_PAD_TAG | (packedBlobZ & 16383u));
+}
+
+fn actionLeverProfile(act: u32) -> MdpLeverProfile {
+    let a = act & 3u;
+    if (a == MDP_ACT_EXPAND) {
+        return MdpLeverProfile(0.18, 0.45, 0.62, -0.30, 0.18, 0.32, -0.05, -0.08, 0.22, 0.25, 0.25, 0.0);
+    }
+    if (a == MDP_ACT_PROPEL) {
+        return MdpLeverProfile(0.05, 0.70, 0.30, -0.55, -0.05, 0.10, -0.08, -0.22, 0.48, 0.42, 0.12, 0.0);
+    }
+    if (a == MDP_ACT_DISPERSE) {
+        return MdpLeverProfile(-0.28, -0.75, 0.15, -0.85, -0.22, -0.35, 0.12, -0.28, -0.30, 0.78, 0.05, 0.0);
+    }
+    return MdpLeverProfile(0.52, -0.22, 0.28, -0.45, 0.62, 0.38, -0.04, 0.42, 0.0, 0.0, 0.85, 0.45);
+}
+
+fn evalCombinedMdpPolicy(packedBlobZ: u32) -> MdpLeverProfile {
+    let pAct = packedBlobZ & 3u;
+    let bAct = (packedBlobZ >> 2u) & 3u;
+    let sAct = (packedBlobZ >> 4u) & 3u;
+    let hasBlob = ((packedBlobZ >> 10u) & 1u) != 0u;
+    let lp = actionLeverProfile(pAct);
+    let lb = actionLeverProfile(bAct);
+    let ls = actionLeverProfile(sAct);
+    let wp = select(0.65, 0.35, hasBlob);
+    let wb = select(0.0, 0.40, hasBlob);
+    let ws = select(0.35, 0.25, hasBlob);
+    return MdpLeverProfile(
+        wp * lp.dSameKin + wb * lb.dSameKin + ws * ls.dSameKin,
+        wp * lp.dForeignBio + wb * lb.dForeignBio + ws * ls.dForeignBio,
+        wp * lp.dChemNutr + wb * lb.dChemNutr + ws * ls.dChemNutr,
+        wp * lp.dChemHalogen + wb * lb.dChemHalogen + ws * ls.dChemHalogen,
+        wp * lp.dLipid + wb * lb.dLipid + ws * ls.dLipid,
+        wp * lp.dMineral + wb * lb.dMineral + ws * ls.dMineral,
+        wp * lp.dBeta + wb * lb.dBeta + ws * ls.dBeta,
+        wp * lp.dDrag + wb * lb.dDrag + ws * ls.dDrag,
+        wp * lp.chiralTwist + wb * lb.chiralTwist + ws * ls.chiralTwist,
+        wp * lp.agitation + wb * lb.agitation + ws * ls.agitation,
+        wp * lp.lipidAlloc + wb * lb.lipidAlloc + ws * ls.lipidAlloc,
+        wp * lp.torpor + wb * lb.torpor + ws * ls.torpor,
+    );
 }

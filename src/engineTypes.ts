@@ -8,6 +8,11 @@ export interface UnifiedEngineRefs {
   lifeStateBuffers: [GPUBuffer, GPUBuffer];
   valenceBuffer: GPUBuffer;
   bioForceBuffer: GPUBuffer;
+  blobPoolBuffer: GPUBuffer;
+  blobPoolZeroBuffer: GPUBuffer;
+  blobMdpBuffer: GPUBuffer;
+  speciesMdpBuffer: GPUBuffer;
+  bioColourAmt: number;
   windTexView: GPUTextureView;
   oceanTexView: GPUTextureView;
   tempTexView: GPUTextureView;

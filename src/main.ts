@@ -32,8 +32,13 @@ import {
 } from './periodicTable2D';
 import type { UnifiedEngineRefs } from './engineTypes';
 import {
+  BLOB_MDP_SLOT_WORDS,
+  BLOB_POOL_SLOT_WORDS,
+  buildInitialSpeciesMdpBuffer,
   buildSpeciesMdpPriors,
+  LIFE_MDP_STRIDE,
   MDP_SPECIES_STRIDE,
+  SPECIES_MDP_SLOT_WORDS,
 } from './mdp';
 import structsShader from './shaders/structs.wgsl?raw';
 import projectionShader from './shaders/projection.wgsl?raw';
@@ -372,7 +377,7 @@ speciesTraits = computeSpeciesTraitsFromMatrix(oceanMatrixData, oceanColourAmt).
 
 const particleStride = 48; // 12 floats: pos(3), colour(1), vel(3), omega(1), orient(3), pad(1)
 const valenceStride = 16;
-const lifeMdpStride = 48; // 12 words: life(vec4f) + mdpQPack(vec4u) + mdpCtrl(vec4f)
+const lifeMdpStride = LIFE_MDP_STRIDE; // 64 bytes: 16 words (life + qPack + ctrl + blob)
 const GRID_TEX_W = 360;
 const GRID_TEX_H = 181;
 const WATERMAN_INV_W = 640;
@@ -407,6 +412,10 @@ let valenceBuffer: GPUBuffer | undefined;
 let bioForceBuffer: GPUBuffer | undefined;
 let particleBuffers: [GPUBuffer, GPUBuffer] | undefined;
 let lifeStateBuffers: [GPUBuffer, GPUBuffer] | undefined;
+let blobPoolBuffer: GPUBuffer | undefined;
+let blobPoolZeroBuffer: GPUBuffer | undefined;
+let blobMdpBuffer: GPUBuffer | undefined;
+let speciesMdpBuffer: GPUBuffer | undefined;
 let bioWasActive = false;
 
 let windTexture: GPUTexture | undefined;
@@ -1416,7 +1425,7 @@ function writeWorldRuleAndColourBuffers() {
     oceanColourAmt,
   );
   speciesTraits = table;
-  const mdpPriorsFlat = buildSpeciesMdpPriors(table, oceanColourAmt, oceanSeed);
+  const mdpPriorsFlat = buildSpeciesMdpPriors(oceanColourAmt, oceanSeed);
   const rules = new Float32Array(
     chemistryData.length +
       oceanMatrixData.length +
@@ -1640,6 +1649,12 @@ declare global {
       }>;
       exportSimState: () => Promise<SimStateExportV1>;
       importSimState: (raw: string | SimStateExportV1) => Promise<SimConfigV1>;
+      readSpeciesMdp: () => Promise<{ qValues: number[][]; bestActions: number[][] }>;
+      readBlobMdpStats: () => Promise<{
+        activeLeaders: number;
+        maxBlobSize: number;
+        distinctBlobPolicies: number[];
+      }>;
     };
   }
 }
@@ -1754,7 +1769,7 @@ async function readUnifiedWorldBuffers(
   };
 
   queueRead('particles', particleBuffers[alternate], n * particleStride, false, 12);
-  queueRead('lifeState', lifeStateBuffers[alternate], n * lifeMdpStride, true, 12);
+  queueRead('lifeState', lifeStateBuffers[alternate], n * lifeMdpStride, true, 16);
   if (includeExtras) {
     if (valenceBuffer) {
       queueRead('valence', valenceBuffer, n * valenceStride, true, 4);
@@ -1822,6 +1837,12 @@ async function captureCurrentSimState(): Promise<SimStateExportV1> {
   if (gameTracking) {
     queueCopy('gameTracking', gameTracking, n * Uint32Array.BYTES_PER_ELEMENT * 2);
   }
+  if (blobMdpBuffer) {
+    queueCopy('blobMdp', blobMdpBuffer, n * BLOB_MDP_SLOT_WORDS * 4);
+  }
+  if (speciesMdpBuffer) {
+    queueCopy('speciesMdp', speciesMdpBuffer, speciesMdpBuffer.size);
+  }
 
   device.queue.submit([enc.finish()]);
   const keys = Object.keys(stageEntries);
@@ -1864,6 +1885,8 @@ async function captureCurrentSimState(): Promise<SimStateExportV1> {
       bioForce: readBytes('bioForce'),
       valence: readBytes('valence'),
       gameTracking: readBytes('gameTracking'),
+      blobMdp: readBytes('blobMdp'),
+      speciesMdp: readBytes('speciesMdp'),
     });
   } finally {
     for (const k of keys) {
@@ -1893,7 +1916,8 @@ async function restoreDecodedSimState(decoded: DecodedSimState): Promise<void> {
   const targetAlternate = alternate;
   const writeBytes = (buf: GPUBuffer, data: Uint8Array) => {
     const ab = data.buffer as ArrayBuffer;
-    device!.queue.writeBuffer(buf, 0, ab, data.byteOffset, data.byteLength);
+    const len = Math.min(buf.size, data.byteLength);
+    device!.queue.writeBuffer(buf, 0, ab, data.byteOffset, len);
   };
   writeBytes(particleBuffers[targetAlternate], decoded.particles);
   writeBytes(lifeStateBuffers[targetAlternate], decoded.lifeMdp);
@@ -1906,12 +1930,94 @@ async function restoreDecodedSimState(decoded: DecodedSimState): Promise<void> {
   if (decoded.gameTracking && gameTracking) {
     writeBytes(gameTracking, decoded.gameTracking);
   }
+  if (decoded.blobMdp && blobMdpBuffer) {
+    writeBytes(blobMdpBuffer, decoded.blobMdp);
+  }
+  if (decoded.speciesMdp && speciesMdpBuffer) {
+    writeBytes(speciesMdpBuffer, decoded.speciesMdp);
+  }
 
   frameBuf[0] = frameCount;
   simData[18] = frameCount;
   bioUniformData[9] = frameCount;
   if (simBuffer) setSim(device, simData, simBuffer, frameCount);
   syncBioUniformState();
+}
+
+async function readSpeciesMdpDiag(): Promise<{
+  qValues: number[][];
+  bestActions: number[][];
+}> {
+  if (!device || !speciesMdpBuffer) {
+    return { qValues: [], bestActions: [] };
+  }
+  const stg = device.createBuffer({
+    size: speciesMdpBuffer.size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(speciesMdpBuffer, 0, stg, 0, speciesMdpBuffer.size);
+  device.queue.submit([enc.finish()]);
+  try {
+    await stg.mapAsync(GPUMapMode.READ);
+    const i32 = new Int32Array(stg.getMappedRange());
+    const u32 = new Uint32Array(i32.buffer);
+    const nSp = Math.floor(i32.length / SPECIES_MDP_SLOT_WORDS);
+    const qValues: number[][] = [];
+    const bestActions: number[][] = [];
+    for (let sp = 0; sp < nSp; sp++) {
+      const b = sp * SPECIES_MDP_SLOT_WORDS;
+      const qArr: number[] = [];
+      for (let k = 0; k < 16; k++) qArr.push(i32[b + k] / 10000);
+      const bestArr = [u32[b + 16], u32[b + 17], u32[b + 18], u32[b + 19]];
+      qValues.push(qArr);
+      bestActions.push(bestArr);
+    }
+    return { qValues, bestActions };
+  } finally {
+    try { stg.unmap(); } catch { /* ignore */ }
+    stg.destroy();
+  }
+}
+
+async function readBlobMdpDiag(): Promise<{
+  activeLeaders: number;
+  maxBlobSize: number;
+  distinctBlobPolicies: number[];
+}> {
+  if (!device || !blobMdpBuffer) {
+    return { activeLeaders: 0, maxBlobSize: 0, distinctBlobPolicies: [0, 0, 0, 0] };
+  }
+  const stg = device.createBuffer({
+    size: blobMdpBuffer.size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(blobMdpBuffer, 0, stg, 0, blobMdpBuffer.size);
+  device.queue.submit([enc.finish()]);
+  try {
+    await stg.mapAsync(GPUMapMode.READ);
+    const f32 = new Float32Array(stg.getMappedRange());
+    const countSlots = Math.floor(f32.length / BLOB_MDP_SLOT_WORDS);
+    let activeLeaders = 0;
+    let maxBlobSize = 0;
+    const distinctBlobPolicies = [0, 0, 0, 0];
+    for (let i = 0; i < countSlots; i++) {
+      const b = i * BLOB_MDP_SLOT_WORDS;
+      const ctrlW = Math.round(f32[b + 7] ?? 0);
+      if ((ctrlW & 4096) === 0) continue;
+      const cnt = Math.round(f32[b + 5] ?? 0);
+      if (cnt <= 0) continue;
+      activeLeaders++;
+      if (cnt > maxBlobSize) maxBlobSize = cnt;
+      const act = (ctrlW >>> 2) & 3;
+      distinctBlobPolicies[act]++;
+    }
+    return { activeLeaders, maxBlobSize, distinctBlobPolicies };
+  } finally {
+    try { stg.unmap(); } catch { /* ignore */ }
+    stg.destroy();
+  }
 }
 
 async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
@@ -2712,19 +2818,25 @@ const game = new TemporalGame({
     tooltipManager.invalidateInspectionFrame();
     device.queue.writeBuffer(particleBuffers[alternate], 0, state.particles);
     const pCount = Math.floor(state.life.length / 4);
-    const combinedLife = new Float32Array(pCount * 12);
+    const combinedLife = new Float32Array(pCount * 16);
     const combinedU32 = new Uint32Array(combinedLife.buffer);
     const mdpWords = state.inspection?.mdp;
+    const mdpWordStride = mdpWords && mdpWords.length >= pCount * 12 ? 12 : 8;
     for (let i = 0; i < pCount; i++) {
       const s = i * 4;
-      const d = i * 12;
+      const d = i * 16;
       combinedLife[d + 0] = state.life[s + 0];
       combinedLife[d + 1] = state.life[s + 1];
       combinedLife[d + 2] = state.life[s + 2];
       combinedLife[d + 3] = state.life[s + 3];
-      if (mdpWords && mdpWords.length >= (i + 1) * 8) {
-        const ms = i * 8;
-        for (let k = 0; k < 8; k++) combinedU32[d + 4 + k] = mdpWords[ms + k];
+      if (mdpWords && mdpWords.length >= (i + 1) * mdpWordStride) {
+        const ms = i * mdpWordStride;
+        for (let k = 0; k < mdpWordStride; k++) combinedU32[d + 4 + k] = mdpWords[ms + k];
+        if (mdpWordStride === 8) {
+          combinedU32[d + 12] = i;
+        }
+      } else {
+        combinedU32[d + 12] = i;
       }
     }
     device.queue.writeBuffer(lifeStateBuffers[alternate], 0, combinedLife);
@@ -3329,6 +3441,10 @@ window.complexLife = {
     oceanSeed = seed ?? generateRandomSeed();
     oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
     writeWorldRuleAndColourBuffers();
+    if (device && speciesMdpBuffer && speciesMdpBuffer.size === oceanColourAmt * SPECIES_MDP_SLOT_WORDS * 4) {
+      const spInit = buildInitialSpeciesMdpBuffer(oceanColourAmt, oceanSeed);
+      device.queue.writeBuffer(speciesMdpBuffer, 0, spInit.buffer);
+    }
     syncBioUniformState();
   },
   getOceanInfo: () =>
@@ -3377,11 +3493,11 @@ window.complexLife = {
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readValence: (count: number = 16) => readVec4Buffer(valenceBuffer, particleAmt, count),
   readOceanState: (count: number = 16) =>
-    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 12),
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 16),
   readAirBioReact: (count: number = 16) =>
     readVec4Buffer(bioForceBuffer, particleAmt, count),
   readLifeState: (count: number = 16) =>
-    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 12),
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 16),
   readBioForce: (count: number = 16) =>
     readVec4Buffer(bioForceBuffer, particleAmt, count),
   readWorldState: async (count: number = 16) =>
@@ -3394,6 +3510,8 @@ window.complexLife = {
   getWorldStats: computeWorldStats,
   exportSimState: captureCurrentSimState,
   importSimState: (raw: string | SimStateExportV1) => importConfiguration(raw),
+  readSpeciesMdp: readSpeciesMdpDiag,
+  readBlobMdpStats: readBlobMdpDiag,
 };
 
 function syncCanvasDimensions() {
@@ -4360,6 +4478,10 @@ function startWorld() {
   particleBuffers?.[1].destroy();
   lifeStateBuffers?.[0].destroy();
   lifeStateBuffers?.[1].destroy();
+  blobPoolBuffer?.destroy();
+  blobPoolZeroBuffer?.destroy();
+  blobMdpBuffer?.destroy();
+  speciesMdpBuffer?.destroy();
   valenceBuffer?.destroy();
   bioForceBuffer?.destroy();
   worldRulesBuffer?.destroy();
@@ -4426,6 +4548,32 @@ function startWorld() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     label: 'bioForceBuffer',
   });
+
+  const blobPoolByteSize = particleAmt * BLOB_POOL_SLOT_WORDS * 4;
+  blobPoolBuffer = device.createBuffer({
+    size: blobPoolByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: 'blobPoolBuffer',
+  });
+  blobPoolZeroBuffer = device.createBuffer({
+    size: blobPoolByteSize,
+    usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    label: 'blobPoolZeroBuffer',
+  });
+  device.queue.writeBuffer(blobPoolZeroBuffer, 0, new Uint32Array(particleAmt * BLOB_POOL_SLOT_WORDS));
+  blobMdpBuffer = device.createBuffer({
+    size: particleAmt * BLOB_MDP_SLOT_WORDS * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: 'blobMdpBuffer',
+  });
+  device.queue.writeBuffer(blobMdpBuffer, 0, new Uint32Array(particleAmt * BLOB_MDP_SLOT_WORDS));
+  const initSpMdpData = buildInitialSpeciesMdpBuffer(oceanColourAmt, oceanSeed);
+  speciesMdpBuffer = device.createBuffer({
+    size: initSpMdpData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: 'speciesMdpBuffer',
+  });
+  device.queue.writeBuffer(speciesMdpBuffer, 0, initSpMdpData.buffer);
 
   worldRulesBuffer = device.createBuffer({
     size: Math.max(
@@ -4881,17 +5029,20 @@ function startWorld() {
   }
 
   device.queue.writeBuffer(particleBuffers[0], 0, particleData.buffer);
-  const lifeMdpInit = new Float32Array(particleAmt * 12);
+  const lifeMdpInit = new Float32Array(particleAmt * 16);
+  const lifeMdpInitU32 = new Uint32Array(lifeMdpInit.buffer);
   for (let i = 0; i < particleAmt; i++) {
     const s = i * 4;
-    const d = i * 12;
+    const d = i * 16;
     lifeMdpInit[d + 0] = lifeData[s + 0];
     lifeMdpInit[d + 1] = lifeData[s + 1];
     lifeMdpInit[d + 2] = lifeData[s + 2];
     lifeMdpInit[d + 3] = lifeData[s + 3];
+    const phase = Math.round(lifeData[s + 3]) & 3;
+    lifeMdpInitU32[d + 12] = phase === 1 || phase === 2 ? i : 0xffffffff;
   }
   device.queue.writeBuffer(lifeStateBuffers[0], 0, lifeMdpInit.buffer);
-  device.queue.writeBuffer(lifeStateBuffers[1], 0, new Float32Array(particleAmt * 12));
+  device.queue.writeBuffer(lifeStateBuffers[1], 0, new Float32Array(particleAmt * 16));
   device.queue.writeBuffer(valenceBuffer, 0, new Float32Array(particleAmt * 4));
   device.queue.writeBuffer(bioForceBuffer, 0, new Float32Array(particleAmt * 4));
 
@@ -4910,6 +5061,11 @@ function startWorld() {
     lifeStateBuffers,
     valenceBuffer,
     bioForceBuffer,
+    blobPoolBuffer,
+    blobPoolZeroBuffer,
+    blobMdpBuffer,
+    speciesMdpBuffer,
+    bioColourAmt: oceanColourAmt,
     windTexView: windTexture.createView(),
     oceanTexView: oceanTexture.createView(),
     tempTexView: tempTexture.createView(),
@@ -5561,6 +5717,10 @@ randomizeOceanRulesBtn.on('click', () => {
   } else {
     oceanMatrixData = buildRandomOceanMatrix(oceanColourAmt, oceanSeed);
     writeWorldRuleAndColourBuffers();
+    if (device && speciesMdpBuffer && speciesMdpBuffer.size === oceanColourAmt * SPECIES_MDP_SLOT_WORDS * 4) {
+      const spInit = buildInitialSpeciesMdpBuffer(oceanColourAmt, oceanSeed);
+      device.queue.writeBuffer(speciesMdpBuffer, 0, spInit.buffer);
+    }
     syncBioUniformState();
   }
   saveConfigNow();

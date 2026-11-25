@@ -201,7 +201,12 @@ export function observeScreenAudioState(
   let chemElemCarbonW = 0;
   let domChemElem = 5;
   let bestChemScore = -1;
-  const lifeStride = lifeStateF32.length >= count * 12 ? 12 : 4;
+  const lifeStride =
+    lifeStateF32.length >= count * 16
+      ? 16
+      : lifeStateF32.length >= count * 12
+        ? 12
+        : 4;
 
   for (let i = 0; i < n; i++) {
     const pBase = i * 12;

@@ -53,11 +53,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let terrainSample = sampleTerrainTextureCoord(terrainTex, eq);
 
     if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
-        let zeroGrads = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, p._pad, curMdp, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, zeroGrads, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, curEntry.blob, curMdp, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, initBioUnifiedAccum(), bio,
         );
-        lifeStateOut[pi] = LifeMdpState(resOff.nextLifeState, resOff.nextMdpState.qPack, resOff.nextMdpState.ctrl);
+        lifeStateOut[pi] = LifeMdpState(resOff.nextLifeState, resOff.nextMdpState.qPack, resOff.nextMdpState.ctrl, resOff.nextBlob);
         bioForceOut[pi] = resOff.bioForce;
         return;
     }
@@ -92,11 +91,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let nbAtomicNum = u32(matrix[nbSBase + 7u]);
                     let nbV = valence[ip.idx];
                     let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
-                    let nbLife = lifeStateIn[ip.idx].life;
+                    let nbEntry = lifeStateIn[ip.idx];
+                    let nbLife = nbEntry.life;
                     let nbPart = input[ip.idx];
                     var nbMdp = emptyMdpState();
                     if (myPhase == 1u && ip.phase == 1u) {
-                        nbMdp = MdpState(lifeStateIn[ip.idx].qPack, lifeStateIn[ip.idx].ctrl);
+                        nbMdp = MdpState(nbEntry.qPack, nbEntry.ctrl);
                     }
                     accumulateBioUnifiedNeighbor(
                         p.pos,
@@ -106,6 +106,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         myValence,
                         myAtomLoad,
                         curLife,
+                        curEntry.blob.z,
+                        ip.idx,
                         ip.pos,
                         nbPart.vel,
                         ip.colour,
@@ -115,7 +117,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         nbAtomLoad,
                         nbAtomicNum,
                         nbValence,
-                        nbPart._pad,
+                        nbEntry.blob,
                         nbMdp,
                         oc,
                         bio,
@@ -126,7 +128,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    let envGrads = sampleBioEnvGradsCoord(p.pos, eq, envDims, oceanTex, tempTex, uvTex, hydroTex, myPhase);
     let res = finalizeBioUnified(
         pi,
         p.pos,
@@ -135,7 +136,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         myValence,
         myAtomLoad,
         curLife,
-        p._pad,
+        curEntry.blob,
         curMdp,
         windRaw,
         oc,
@@ -143,11 +144,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         uvSample,
         hydroSample,
         terrainSample,
-        envGrads,
         acc,
         bio,
     );
-    lifeStateOut[pi] = LifeMdpState(res.nextLifeState, res.nextMdpState.qPack, res.nextMdpState.ctrl);
+    lifeStateOut[pi] = LifeMdpState(res.nextLifeState, res.nextMdpState.qPack, res.nextMdpState.ctrl, res.nextBlob);
     bioForceOut[pi] = res.bioForce;
 }
 `;

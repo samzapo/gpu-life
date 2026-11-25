@@ -10,6 +10,8 @@ import {
   LIFE_MDP_BYTES,
   VEC4_BYTES,
   GAME_TRACKING_BYTES,
+  BLOB_MDP_BYTES,
+  SPECIES_MDP_BYTES,
 } from '../src/simState.ts';
 
 function makePatternBytes(byteLength, seedOffset) {
@@ -34,6 +36,8 @@ test('serializeSimState + parseSimStateInput round-trip gzip-base64 buffers bit-
   const bioForce = makePatternBytes(n * VEC4_BYTES, 7);
   const valence = makePatternBytes(n * VEC4_BYTES, 11);
   const gameTracking = makePatternBytes(n * GAME_TRACKING_BYTES, 19);
+  const blobMdp = makePatternBytes(n * BLOB_MDP_BYTES, 23);
+  const speciesMdp = makePatternBytes(12 * SPECIES_MDP_BYTES, 29);
 
   const snapshot = await serializeSimState({
     capturedAt: '2026-11-24T12:00:00.000Z',
@@ -68,6 +72,8 @@ test('serializeSimState + parseSimStateInput round-trip gzip-base64 buffers bit-
     bioForce,
     valence,
     gameTracking,
+    blobMdp,
+    speciesMdp,
   });
 
   const json = JSON.stringify(snapshot);
@@ -86,6 +92,8 @@ test('serializeSimState + parseSimStateInput round-trip gzip-base64 buffers bit-
   assert.deepEqual(decoded.bioForce, bioForce);
   assert.deepEqual(decoded.valence, valence);
   assert.deepEqual(decoded.gameTracking, gameTracking);
+  assert.deepEqual(decoded.blobMdp, blobMdp);
+  assert.deepEqual(decoded.speciesMdp, speciesMdp);
 });
 
 test('serializeSimState + parseSimStateInput supports raw-base64 fallback encoding', async () => {

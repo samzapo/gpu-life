@@ -2,9 +2,11 @@ import { parseConfigInput, type SimConfigV1 } from './config.ts';
 
 export const SIM_STATE_KIND = 'complex-life-sim-state' as const;
 export const PARTICLE_BYTES = 48;
-export const LIFE_MDP_BYTES = 48;
+export const LIFE_MDP_BYTES = 64;
 export const VEC4_BYTES = 16;
 export const GAME_TRACKING_BYTES = 8;
+export const BLOB_MDP_BYTES = 32;
+export const SPECIES_MDP_BYTES = 80;
 
 export type SimStateEncoding = 'gzip-base64' | 'raw-base64';
 
@@ -42,6 +44,8 @@ export interface SimStateExportV1 {
     bioForce?: SimStateBufferBlob;
     valence?: SimStateBufferBlob;
     gameTracking?: SimStateBufferBlob;
+    blobMdp?: SimStateBufferBlob;
+    speciesMdp?: SimStateBufferBlob;
   };
 }
 
@@ -53,6 +57,8 @@ export interface SerializeSimStateInput {
   bioForce?: Uint8Array;
   valence?: Uint8Array;
   gameTracking?: Uint8Array;
+  blobMdp?: Uint8Array;
+  speciesMdp?: Uint8Array;
   capturedAt?: string;
   encoding?: SimStateEncoding;
 }
@@ -66,6 +72,8 @@ export interface DecodedSimState {
   bioForce?: Uint8Array;
   valence?: Uint8Array;
   gameTracking?: Uint8Array;
+  blobMdp?: Uint8Array;
+  speciesMdp?: Uint8Array;
 }
 
 export function encodeBytesToBase64(bytes: Uint8Array): string {
@@ -217,13 +225,17 @@ export async function serializeSimState(
     throw new Error('Life/MDP buffer length does not match particleCount.');
   }
 
-  const [particles, lifeMdp, bioForce, valence, gameTracking] = await Promise.all([
+  const [particles, lifeMdp, bioForce, valence, gameTracking, blobMdp, speciesMdp] = await Promise.all([
     compressBufferBlob(input.particles, input.encoding),
     compressBufferBlob(input.lifeMdp, input.encoding),
     input.bioForce ? compressBufferBlob(input.bioForce, input.encoding) : Promise.resolve(undefined),
     input.valence ? compressBufferBlob(input.valence, input.encoding) : Promise.resolve(undefined),
     input.gameTracking
       ? compressBufferBlob(input.gameTracking, input.encoding)
+      : Promise.resolve(undefined),
+    input.blobMdp ? compressBufferBlob(input.blobMdp, input.encoding) : Promise.resolve(undefined),
+    input.speciesMdp
+      ? compressBufferBlob(input.speciesMdp, input.encoding)
       : Promise.resolve(undefined),
   ]);
 
@@ -234,6 +246,8 @@ export async function serializeSimState(
   if (bioForce) buffers.bioForce = bioForce;
   if (valence) buffers.valence = valence;
   if (gameTracking) buffers.gameTracking = gameTracking;
+  if (blobMdp) buffers.blobMdp = blobMdp;
+  if (speciesMdp) buffers.speciesMdp = speciesMdp;
 
   return {
     v: 1,
@@ -302,13 +316,17 @@ export async function parseSimStateInput(
   };
 
   const bufsRaw = obj.buffers as Record<string, unknown>;
-  const [particles, lifeMdp, bioForce, valence, gameTracking] = await Promise.all([
+  const [particles, lifeMdp, bioForce, valence, gameTracking, blobMdp, speciesMdp] = await Promise.all([
     decompressBufferBlob(bufsRaw.particles, 'particles'),
     decompressBufferBlob(bufsRaw.lifeMdp, 'lifeMdp'),
     bufsRaw.bioForce ? decompressBufferBlob(bufsRaw.bioForce, 'bioForce') : Promise.resolve(undefined),
     bufsRaw.valence ? decompressBufferBlob(bufsRaw.valence, 'valence') : Promise.resolve(undefined),
     bufsRaw.gameTracking
       ? decompressBufferBlob(bufsRaw.gameTracking, 'gameTracking')
+      : Promise.resolve(undefined),
+    bufsRaw.blobMdp ? decompressBufferBlob(bufsRaw.blobMdp, 'blobMdp') : Promise.resolve(undefined),
+    bufsRaw.speciesMdp
+      ? decompressBufferBlob(bufsRaw.speciesMdp, 'speciesMdp')
       : Promise.resolve(undefined),
   ]);
 
@@ -337,6 +355,16 @@ export async function parseSimStateInput(
       `gameTracking byteLength mismatch (${gameTracking.byteLength} !== ${particleCount * GAME_TRACKING_BYTES}).`,
     );
   }
+  if (blobMdp && blobMdp.byteLength !== particleCount * BLOB_MDP_BYTES) {
+    throw new Error(
+      `blobMdp byteLength mismatch (${blobMdp.byteLength} !== ${particleCount * BLOB_MDP_BYTES}).`,
+    );
+  }
+  if (speciesMdp && speciesMdp.byteLength % SPECIES_MDP_BYTES !== 0) {
+    throw new Error(
+      `speciesMdp byteLength mismatch (${speciesMdp.byteLength} not aligned to ${SPECIES_MDP_BYTES}).`,
+    );
+  }
 
   return {
     snapshot: obj as unknown as SimStateExportV1,
@@ -347,5 +375,7 @@ export async function parseSimStateInput(
     bioForce,
     valence,
     gameTracking,
+    blobMdp,
+    speciesMdp,
   };
 }

@@ -94,6 +94,8 @@ fn getBioCellForce(
     p: Particle,
     myPhase: u32,
     myKin: f32,
+    pol: MdpLeverProfile,
+    nChem: u32,
     oceanBase: u32,
     rowOffset: u32,
     nBio: u32,
@@ -106,18 +108,39 @@ fn getBioCellForce(
         if (ip.idx != pi) {
             let nbLs = lifeStateNext[ip.idx].life;
             let nbPhase = unpackPhase(nbLs.w);
-            if (nbPhase != 0u) {
-                let nbKin = unpackKinPhase(nbLs.w);
-                let colIdx = min(unpackBioSpecies(nbLs.w), nBio - 1u);
-                let a = select(0.0, matrix[oceanBase + rowOffset + colIdx], myPhase == 1u && nbPhase == 1u);
-                accumulateOceanOrLipidNeighbor(
+            var skipNb = false;
+            var nbChemRole = 0u;
+            var nbKin = 0.0;
+            var a = 0.0;
+            if (nbPhase == 0u) {
+                if (myPhase != 1u) {
+                    skipNb = true;
+                } else {
+                    let nbSc = min(u32(ip.colour), nChem - 1u);
+                    let nbSBase = nbSc * SPECIES_STRIDE;
+                    nbChemRole = bioRoleKind(u32(matrix[nbSBase + 7u]), u32(matrix[nbSBase + 0u]));
+                    if (nbChemRole == 0u) {
+                        skipNb = true;
+                    }
+                }
+            } else {
+                nbKin = unpackKinPhase(nbLs.w);
+                if (myPhase == 1u && nbPhase == 1u) {
+                    let colIdx = min(unpackBioSpecies(nbLs.w), nBio - 1u);
+                    a = matrix[oceanBase + rowOffset + colIdx];
+                }
+            }
+            if (!skipNb) {
+                accumulateUnifiedEmergentNeighbor(
                     pi,
                     p,
                     myPhase,
                     myKin,
+                    pol,
                     ip.pos,
                     ip.orient,
                     nbPhase,
+                    nbChemRole,
                     nbKin,
                     a,
                     acc,
@@ -129,11 +152,12 @@ fn getBioCellForce(
     }
 }
 
-fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32) -> ForceResult {
+fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32, packedBlobZ: u32) -> ForceResult {
     let nChem = max(u32(sim.colours), 1u);
     let nBio = max(u32(oceanSim.colours), 1u);
     let oceanBase = nChem * SPECIES_STRIDE + nChem * nChem;
     let rowOffset = min(bioSp, nBio - 1u) * nBio;
+    let pol = evalCombinedMdpPolicy(packedBlobZ);
     var acc = OceanForceAccum();
 
     let worldP = p.pos * oceanSim.worldSize;
@@ -145,7 +169,7 @@ fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32) -> Fo
         for (var cy = cmin.y; cy <= cmax.y; cy++) {
             for (var cz = cmin.z; cz <= cmax.z; cz++) {
                 let c = hash3i(vec3i(cx, cy, cz)) % numCells;
-                getBioCellForce(pi, p, myPhase, myKin, oceanBase, rowOffset, nBio, c, &acc);
+                getBioCellForce(pi, p, myPhase, myKin, pol, nChem, oceanBase, rowOffset, nBio, c, &acc);
             }
         }
     }
@@ -161,7 +185,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let p = input[pi];
-    let ls = lifeStateNext[pi].life;
+    let myEntry = lifeStateNext[pi];
+    let ls = myEntry.life;
     let myPhase = unpackPhase(ls.w);
     if (myPhase == 3u) {
         output[pi] = integrateMineralParticle(p, ls, bioForce[pi]);
@@ -177,7 +202,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (myPhase == 1u || myPhase == 2u) {
         let bioSp = unpackBioSpecies(ls.w);
         let myKin = unpackKinPhase(ls.w);
-        let resBio = getBioForce(pi, p, myPhase, bioSp, myKin);
+        let resBio = getBioForce(pi, p, myPhase, bioSp, myKin, myEntry.blob.z);
         let windRaw = sampleWindTextureCoord(windTex, eq);
         output[pi] = integrateOceanParticle(
             pi,
@@ -196,6 +221,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             uniforms.mouseSphere,
             ls,
             bioForce[pi],
+            sim.frame,
+            myEntry.blob.x,
+            myEntry.blob.z,
         );
         return;
     }

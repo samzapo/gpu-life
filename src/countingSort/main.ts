@@ -1,5 +1,12 @@
 import type { UnifiedEngineRefs } from '../engineTypes';
 import {
+  buildBlobMdpBindGroups,
+  createBlobMdpBundle,
+  dispatchBlobMdpPasses,
+  type BlobMdpBindGroups,
+  type BlobMdpBundle,
+} from '../shaders/blobMdpPasses';
+import {
   linkComputeTimestamp,
   readTimestamp,
   resolveTimestamp,
@@ -30,6 +37,10 @@ interface CountingWorldState {
   valenceBindGroups: [GPUBindGroup, GPUBindGroup];
   bioBindGroups: [GPUBindGroup, GPUBindGroup];
   simBindGroups: [GPUBindGroup, GPUBindGroup];
+  blobMdpGroups: BlobMdpBindGroups;
+  blobPoolZeroBuffer: GPUBuffer;
+  blobPoolBuffer: GPUBuffer;
+  bioColourAmt: number;
 }
 
 const workgroupSize = 128;
@@ -40,6 +51,7 @@ let sortPipeline: GPUComputePipeline | undefined;
 let valencePipeline: GPUComputePipeline | undefined;
 let bioPipeline: GPUComputePipeline | undefined;
 let simPipeline: GPUComputePipeline | undefined;
+let blobMdpBundle: BlobMdpBundle | undefined;
 
 let worldState: CountingWorldState | undefined;
 
@@ -112,6 +124,7 @@ export function setup(device: GPUDevice) {
       entryPoint: 'main',
     },
   });
+  blobMdpBundle = createBlobMdpBundle(device, workgroupSize);
 }
 
 export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
@@ -121,7 +134,8 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
     !sortPipeline ||
     !valencePipeline ||
     !bioPipeline ||
-    !simPipeline
+    !simPipeline ||
+    !blobMdpBundle
   ) {
     return;
   }
@@ -268,6 +282,10 @@ export function start(device: GPUDevice, refs: UnifiedEngineRefs) {
     valenceBindGroups: [valenceGroups[0], valenceGroups[1]],
     bioBindGroups: [bioGroups[0], bioGroups[1]],
     simBindGroups: [simGroups[0], simGroups[1]],
+    blobMdpGroups: buildBlobMdpBindGroups(device, blobMdpBundle, refs),
+    blobPoolZeroBuffer: refs.blobPoolZeroBuffer,
+    blobPoolBuffer: refs.blobPoolBuffer,
+    bioColourAmt: refs.bioColourAmt,
   };
 }
 
@@ -331,6 +349,21 @@ export function tick(
   bioPass.setBindGroup(0, s.bioBindGroups[alternate]);
   bioPass.dispatchWorkgroups(wgCount);
   bioPass.end();
+
+  if (blobMdpBundle) {
+    dispatchBlobMdpPasses(
+      commandEncoder,
+      blobMdpBundle,
+      s.blobMdpGroups,
+      alternate,
+      particleAmt,
+      s.bioColourAmt,
+      s.blobPoolZeroBuffer.size,
+      s.blobPoolZeroBuffer,
+      s.blobPoolBuffer,
+      workgroupSize,
+    );
+  }
 
   const simPass = commandEncoder.beginComputePass(
     linkComputeTimestamp(device, 'countSim'),

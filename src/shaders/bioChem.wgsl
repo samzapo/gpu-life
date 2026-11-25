@@ -1,7 +1,7 @@
-// Unified conserved-mass emergent blob ecology + biogenic lipid bilayers + inorganic mineral crust.
+// Unified conserved-mass emergent ecology + amphiphilic lipid bilayers + inorganic mineral crust.
 // Every particle carries an immutable `chemSpecies` (`p.colour`), live `phase`
-// (0 = Fluid Chemistry, 1 = Organism Cytoplasm, 2 = Biogenic Lipid Bilayer, 3 = Crust-Pinned Mineral),
-// `bioSpecies` (0..M-1) / `mineralType` (0..4), circular `kinPhase` / `crystalAngle`, and 4-bit `encapGene` / `grade` in `lifeState.w`.
+// (0 = Fluid Chemistry, 1 = Living Cytoplasm, 2 = Biogenic Lipid Bilayer, 3 = Crust-Pinned Mineral),
+// `bioSpecies` (0..M-1) / `mineralType` (0..4), circular `kinPhase` / `crystalAngle`, and 4-bit `gene` / `grade` in `lifeState.w`.
 
 const MINERAL_SILICATE: u32 = 0u;
 const MINERAL_EVAPORITE: u32 = 1u;
@@ -36,17 +36,17 @@ struct BioStepResult {
     nextLifeState: vec4f,
     bioForce: vec4f,
     nextMdpState: MdpState,
+    nextBlob: vec4u,
 }
 
 fn bioStepOnly(nextLifeState: vec4f, bioForce: vec4f) -> BioStepResult {
-    return BioStepResult(nextLifeState, bioForce, emptyMdpState());
+    return BioStepResult(nextLifeState, bioForce, emptyMdpState(), vec4u(NO_LEADER, 99u, 0u, 0u));
 }
 
 fn isBiogenicElement(atomicNum: u32, valence: u32) -> bool {
     if (valence == 0u) {
         return false;
     }
-    // Biogenic pool: H(1), C(5), O(6), S(12). Si(11), halogens, metals, noble gases remain strictly abiotic.
     return atomicNum == 1u || atomicNum == 5u || atomicNum == 6u || atomicNum == 12u;
 }
 
@@ -54,12 +54,10 @@ fn isLipidElement(atomicNum: u32, valence: u32) -> bool {
     if (valence == 0u) {
         return false;
     }
-    // Membrane lipids assemble strictly from conserved H(1), C(5), O(6).
     return atomicNum == 1u || atomicNum == 5u || atomicNum == 6u;
 }
 
 fn isMineralCandidate(atomicNum: u32, valence: u32) -> bool {
-    // Noble gases (valence == 0: He, Ne, Ar) never crystallize into crust minerals.
     return valence > 0u && atomicNum >= 1u;
 }
 
@@ -79,7 +77,6 @@ fn elementFitsMineralType(atomicNum: u32, valence: u32, mType: u32) -> bool {
     if (mType == MINERAL_SULFIDE) {
         return atomicNum == 12u || atomicNum == 10u || atomicNum == 6u || atomicNum == 4u || atomicNum == 7u;
     }
-    // MINERAL_CLAY (Hydrated phyllosilicates / zeolites): traps Si, O, H, Mg, C
     return atomicNum == 11u || atomicNum == 6u || atomicNum == 1u || atomicNum == 10u || atomicNum == 5u;
 }
 
@@ -93,36 +90,7 @@ fn evalWindVel3D(pos: vec3f, windRaw: vec3f, bio: BioLink) -> vec3f {
     return (w3 / max(bio.windStreamMax, 10.0)) * (0.45 * bio.windScale);
 }
 
-fn encapReqColors(gene: u32) -> u32 {
-    if (gene <= 2u) {
-        return 3u;
-    }
-    if (gene <= 7u) {
-        return 4u;
-    }
-    if (gene <= 12u) {
-        return 5u;
-    }
-    return 6u;
-}
-
-fn encapReqSize(gene: u32) -> f32 {
-    if (gene <= 4u) {
-        return 6.0 + 0.5 * f32(gene);
-    }
-    if (gene <= 10u) {
-        return 8.5 + 0.65 * f32(gene - 4u);
-    }
-    return 12.5 + 0.9 * f32(gene - 10u);
-}
-
-fn encapNoveltyDrive(gene: u32, currentColors: u32) -> f32 {
-    let g = f32(min(gene, 15u)) / 15.0;
-    let goalColors = 5.0 + g * 4.0;
-    return 0.10 + 0.24 * clamp((goalColors - f32(currentColors)) / 4.0, 0.0, 1.0);
-}
-
-fn mutateEncapGene(baseGene: u32, pi: u32, frameU: u32, salt: u32, pMut: f32) -> u32 {
+fn mutateGene(baseGene: u32, pi: u32, frameU: u32, salt: u32, pMut: f32) -> u32 {
     let g = min(baseGene, 15u);
     let r = hashFloat(pi, frameU, salt);
     if (r >= pMut) {
@@ -139,54 +107,36 @@ fn bioRoleKind(atomicNum: u32, valence: u32) -> u32 {
         return 0u; // Inert noble gas (He, Ne, Ar)
     }
     if (atomicNum == 7u || atomicNum == 13u) {
-        return 4u; // Halogen poison (F, Cl)
+        return 4u; // Halogen toxin (F, Cl)
     }
     if (atomicNum == 3u || atomicNum == 4u || atomicNum == 10u) {
-        return 3u; // Vitamin cofactor (Li, Be, Mg)
+        return 3u; // Cofactor (Li, Be, Mg)
     }
     if (atomicNum == 5u) {
-        return 2u; // Primary carbon food backbone (C)
+        return 2u; // Carbon food backbone (C)
     }
     if (atomicNum == 1u || atomicNum == 12u) {
-        return 1u; // Energy fuel / hydride & sulfur (H, S)
+        return 1u; // Fuel hydride / sulfur (H, S)
     }
-    return 5u; // Oxide / silicate / alkali (O, Si, Na, etc.)
+    return 5u; // Oxide / silicate / alkali
 }
 
 fn elemSolarWeight(atomicNum: u32) -> f32 {
-    if (atomicNum == 5u) {
-        return 1.0; // C
-    }
-    if (atomicNum == 6u) {
-        return 0.80; // O
-    }
-    if (atomicNum == 1u) {
-        return 0.25; // H
-    }
-    if (atomicNum == 12u) {
-        return 0.15; // S
-    }
+    if (atomicNum == 5u) { return 1.0; }
+    if (atomicNum == 6u) { return 0.80; }
+    if (atomicNum == 1u) { return 0.25; }
+    if (atomicNum == 12u) { return 0.15; }
     return 0.0;
 }
 
 fn elemRedoxWeight(atomicNum: u32) -> f32 {
-    if (atomicNum == 12u) {
-        return 1.0; // S
-    }
-    if (atomicNum == 1u) {
-        return 0.85; // H
-    }
-    if (atomicNum == 5u) {
-        return 0.25; // C
-    }
-    if (atomicNum == 6u) {
-        return 0.10; // O
-    }
+    if (atomicNum == 12u) { return 1.0; }
+    if (atomicNum == 1u) { return 0.85; }
+    if (atomicNum == 5u) { return 0.25; }
+    if (atomicNum == 6u) { return 0.10; }
     return 0.0;
 }
 
-// Computes photosynthetic/evaporative irradiance (.x) and UV-B/A photodamage stress (.y)
-// directly from real live CPC + GFS UVI (`uviNow = uvSample.x`) with zero synthetic night-noon leakage.
 fn evalUvSolarAndStress(uvSample: vec4f, localUvScale: f32) -> vec2f {
     let sc = clamp(localUvScale, 0.0, 2.0);
     if (sc <= 0.001) {
@@ -195,135 +145,10 @@ fn evalUvSolarAndStress(uvSample: vec4f, localUvScale: f32) -> vec2f {
     let uviNow = clamp(uvSample.x, 0.0, 24.0);
     let blend = min(sc, 1.5);
     let normU = uviNow / 3.8;
-    // Direct Michaelis-Menten P-I curve from measured uviNow: true night (uviNow == 0) has 0.0 solar;
-    // temperate/cloudy day (uviNow 2..5) yields lush 0.48..0.73 productivity; tropics saturate cleanly.
     let solarRaw = select(0.0, clamp((normU / (normU + 0.55)) * 1.18, 0.0, 1.25), uviNow > 0.001);
     let solar = solarRaw * blend;
     let uvStress = smoothstep(5.5, 15.5, uviNow) * blend;
     return vec2f(solar, uvStress);
-}
-
-const BIO_NICHE_TAG: u32 = 2097152u; // 1u << 21u
-
-fn hasValidBioNiche(padVal: f32) -> bool {
-    if (padVal < 2097151.5) {
-        return false;
-    }
-    let u = u32(round(padVal));
-    return (u & BIO_NICHE_TAG) != 0u;
-}
-
-fn unpackPrefOc(padVal: f32) -> f32 {
-    return f32(u32(round(padVal)) & 15u) / 15.0;
-}
-
-fn unpackPrefTempK(padVal: f32) -> f32 {
-    let q = (u32(round(padVal)) >> 4u) & 15u;
-    return 258.15 + (f32(q) / 15.0) * 55.0;
-}
-
-fn unpackPrefSolar(padVal: f32) -> f32 {
-    let q = (u32(round(padVal)) >> 8u) & 15u;
-    return f32(q) / 15.0;
-}
-
-fn unpackRootGene(padVal: f32) -> f32 {
-    let q = (u32(round(padVal)) >> 12u) & 15u;
-    return f32(q) / 15.0;
-}
-
-fn unpackMdpAction(padVal: f32) -> u32 {
-    if (!hasValidBioNiche(padVal)) {
-        return MDP_ACT_FORAGE;
-    }
-    return (u32(round(padVal)) >> 22u) & 3u;
-}
-
-fn packBioNiche(
-    prefOc: f32,
-    prefTempK: f32,
-    prefSolar: f32,
-    rootGene: f32,
-    rootNow: f32,
-    isProducer: bool,
-    mdpAction: u32,
-) -> f32 {
-    let qOc = u32(clamp(round(clamp(prefOc, 0.0, 1.0) * 15.0), 0.0, 15.0));
-    let qT = u32(clamp(round(clamp((prefTempK - 258.15) / 55.0, 0.0, 1.0) * 15.0), 0.0, 15.0));
-    let qS = u32(clamp(round(clamp(prefSolar, 0.0, 1.0) * 15.0), 0.0, 15.0));
-    let qRg = u32(clamp(round(clamp(rootGene, 0.0, 1.0) * 15.0), 0.0, 15.0));
-    let qRn = u32(clamp(round(clamp(rootNow, 0.0, 1.0) * 15.0), 0.0, 15.0));
-    let prBit = select(0u, 1u, isProducer);
-    let actBits = (mdpAction & 3u) << 22u;
-    let packed = BIO_NICHE_TAG | qOc | (qT << 4u) | (qS << 8u) | (qRg << 12u) | (qRn << 16u) | (prBit << 20u) | actBits;
-    return f32(packed);
-}
-
-struct BioEnvGrads {
-    gradOc: vec3f,
-    gradTemp: vec3f,
-    gradSolar: vec3f,
-    gradMoist: vec3f,
-}
-
-fn sampleBioEnvGradsCoord(
-    pos: vec3f,
-    eq: EquirectCoord,
-    dims: vec2u,
-    oceanTex: texture_2d<f32>,
-    tempTex: texture_2d<f32>,
-    uvTex: texture_2d<f32>,
-    hydroTex: texture_2d<f32>,
-    myPhase: u32,
-) -> BioEnvGrads {
-    var g = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
-    if (myPhase != 1u || dims.x < 2u || dims.y < 2u) {
-        return g;
-    }
-    let n = normalize(pos);
-    let eE = sphereEastBasis(n);
-    let eN = normalize(cross(n, eE));
-    let iE = (eq.i0 + 1u) % dims.x;
-    let iW = (eq.i0 + dims.x - 1u) % dims.x;
-    let jN = select(0u, eq.j0 - 1u, eq.j0 > 0u);
-    let jS = min(dims.y - 1u, eq.j0 + 1u);
-
-    let cosLat = max(length(n.xy), 0.15);
-    let invDx = 1.0 / max((TWO_PI * 2.0 / f32(dims.x)) * cosLat, 0.008);
-    let invDy = 1.0 / max(PI * f32(jS - jN) / f32(dims.y - 1u), 0.008);
-
-    let oE = textureLoad(oceanTex, vec2u(iE, eq.j0), 0).w;
-    let oW = textureLoad(oceanTex, vec2u(iW, eq.j0), 0).w;
-    let oN = textureLoad(oceanTex, vec2u(eq.i0, jN), 0).w;
-    let oS = textureLoad(oceanTex, vec2u(eq.i0, jS), 0).w;
-    g.gradOc = eE * ((oE - oW) * invDx) + eN * ((oN - oS) * invDy);
-
-    let tRawE = textureLoad(tempTex, vec2u(iE, eq.j0), 0);
-    let tRawW = textureLoad(tempTex, vec2u(iW, eq.j0), 0);
-    let tRawN = textureLoad(tempTex, vec2u(eq.i0, jN), 0);
-    let tRawS = textureLoad(tempTex, vec2u(eq.i0, jS), 0);
-    let tE = select(tRawE.w, tRawE.y, oE > 0.45 && tRawE.z > 0.45);
-    let tW = select(tRawW.w, tRawW.y, oW > 0.45 && tRawW.z > 0.45);
-    let tN = select(tRawN.w, tRawN.y, oN > 0.45 && tRawN.z > 0.45);
-    let tS = select(tRawS.w, tRawS.y, oS > 0.45 && tRawS.z > 0.45);
-    g.gradTemp = eE * ((tE - tW) * invDx) + eN * ((tN - tS) * invDy);
-
-    let sE = clamp(textureLoad(uvTex, vec2u(iE, eq.j0), 0).x, 0.0, 24.0);
-    let sW = clamp(textureLoad(uvTex, vec2u(iW, eq.j0), 0).x, 0.0, 24.0);
-    let sN = clamp(textureLoad(uvTex, vec2u(eq.i0, jN), 0).x, 0.0, 24.0);
-    let sS = clamp(textureLoad(uvTex, vec2u(eq.i0, jS), 0).x, 0.0, 24.0);
-    g.gradSolar = eE * ((sE - sW) * invDx) + eN * ((sN - sS) * invDy);
-
-    let hE = textureLoad(hydroTex, vec2u(iE, eq.j0), 0).xy;
-    let hW = textureLoad(hydroTex, vec2u(iW, eq.j0), 0).xy;
-    let hN = textureLoad(hydroTex, vec2u(eq.i0, jN), 0).xy;
-    let hS = textureLoad(hydroTex, vec2u(eq.i0, jS), 0).xy;
-    let mE = clamp(hE.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hE.y, 0.0));
-    let mW = clamp(hW.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hW.y, 0.0));
-    let mN = clamp(hN.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hN.y, 0.0));
-    let mS = clamp(hS.x, 0.0, 1.0) + 0.18 * smoothstep(0.2, 5.0, max(hS.y, 0.0));
-    g.gradMoist = eE * ((mE - mW) * invDx) + eN * ((mN - mS) * invDy);
-    return g;
 }
 
 fn evalCoastalUpwelling(oc: vec4f) -> f32 {
@@ -357,7 +182,6 @@ fn getBioMatrixA(nChem: u32, nBio: u32, rowSp: u32, colSp: u32) -> f32 {
     return matrix[oceanBase + rSp * max(nBio, 1u) + cSp];
 }
 
-// Returns vec4f(coh, chase, flee, asym) derived dynamically from random matrix `A`.
 fn getBioSpeciesTraits(nChem: u32, nBio: u32, sp: u32) -> vec4f {
     let oceanBase = nChem * SPECIES_STRIDE + nChem * nChem;
     let traitBase = oceanBase + max(nBio, 1u) * max(nBio, 1u);
@@ -402,7 +226,7 @@ fn pickCompatibleNovelSpecies(
         }
         let aHC = getBioMatrixA(nChem, nBio, hostSp, candSp);
         let aCH = getBioMatrixA(nChem, nBio, candSp, hostSp);
-        let compat = (aHC > 0.12) || (abs(aHC - aCH) > 0.42 && (aHC + aCH) > -0.22);
+        let compat = (aHC > 0.08) || (abs(aHC - aCH) > 0.35 && (aHC + aCH) > -0.25);
         if (!compat) {
             continue;
         }
@@ -418,139 +242,91 @@ fn pickCompatibleNovelSpecies(
     return fallbackSp;
 }
 
-// Computes `(dEnergy, dVitamin, dPoison, signedSteerMag)` imparted to one living Biomass particle
-// by one nearby Chemistry atom from frozen time-t state using emergent traits.
+// Pure contact biochemistry: `(dEnergy, dVitamin, dPoison)` from close-contact Chemistry atom (`r < 0.62 * catRadius`).
+// Zero explicit steering vectors: motion comes solely from the combined attractor matrix and physical levers.
 fn evalLifeFromAtomPair(
-    traits: vec4f,
     lifeState: vec4f,
     atomicNum: u32,
     valence: u32,
     atomLoad: f32,
     r: f32,
     bio: BioLink,
-) -> vec4f {
+) -> vec3f {
+    let contactR = bio.catRadius * 0.62;
     let kind = bioRoleKind(atomicNum, valence);
-    if (kind == 0u || r >= bio.catRadius) {
-        return vec4f(0.0);
+    if (kind == 0u || r >= contactR) {
+        return vec3f(0.0);
     }
 
-    let w = (1.0 - r / max(bio.catRadius, 1e-4)) * bio.rate;
-    let coh = clamp(traits.x, 0.0, 1.0);
-    let asym = clamp(traits.w, 0.0, 1.0);
+    let w = (1.0 - r / max(contactR, 1e-4)) * bio.rate;
     let energy = clamp(lifeState.x, 0.0, 1.5);
     let vit = clamp(lifeState.y, 0.0, 1.0);
-    let haloAffinity = clamp(0.20 + 0.35 * coh + 0.35 * asym + 0.25 * vit, 0.0, 1.0);
 
     var dE = 0.0;
     var dVit = 0.0;
     var dPoi = 0.0;
-    var steer = 0.0;
 
     if (kind == 3u) {
-        dVit += 0.24 * w;
-        steer += 0.20 * w;
+        dVit += 0.28 * w;
     } else if (kind == 4u) {
-        if (haloAffinity > 0.62) {
-            dE += 0.10 * haloAffinity * w;
-            steer += 0.28 * w;
-        } else {
-            let resist = 0.45 + 0.55 * (1.0 - haloAffinity);
-            dPoi += 0.36 * w * (1.0 - 0.50 * vit) * resist;
-            dE -= 0.12 * w * (1.0 - 0.35 * vit) * resist;
-            steer -= 0.70 * w * resist;
-        }
+        dPoi += 0.34 * w * (1.0 - 0.55 * vit);
+        dE -= 0.10 * w * (1.0 - 0.35 * vit);
     } else if (kind == 1u) {
         let fuelReady = clamp(atomLoad + 0.35, 0.35, 1.5);
-        if (energy < 1.40) {
-            let capGain = (0.18 + 0.10 * vit) * fuelReady * (0.65 + 0.35 * asym) * w;
-            dE += capGain;
+        if (energy < 1.45) {
+            dE += (0.20 + 0.10 * vit) * fuelReady * w;
         }
-        steer += 0.28 * w;
     } else if (kind == 2u) {
         let foodRich = clamp(atomLoad + 0.25, 0.25, 2.2);
-        dE += (0.12 + 0.14 * asym) * foodRich * w * (1.0 + 0.25 * vit);
-        steer += (0.25 + 0.30 * coh) * w;
+        dE += (0.14 + 0.10 * vit) * foodRich * w;
     } else if (atomicNum == 6u) {
         if (atomLoad > 0.05 && atomLoad < 1.35) {
             dE += 0.09 * w;
-        } else if (coh > 0.45 && energy > 0.40 && atomLoad >= 1.35) {
+        } else if (energy > 0.40 && atomLoad >= 1.35) {
             dE -= 0.04 * w;
         }
     }
 
-    return vec4f(dE, dVit, dPoi, steer);
+    return vec3f(dE, dVit, dPoi);
 }
 
-// Computes `(radialKickScalar, tangentialSpinScalar, actScale, glow)` imparted to one Chemistry atom
-// by one nearby living Biomass particle (`dToNb` points atom -> life on tangent plane).
+// Local catalysis modulation `(actScale, glow)` on nearby Chemistry atoms without scripted propulsion vectors.
 fn evalAtomFromLifePair(
     atomicNum: u32,
     valence: u32,
     atomLoad: f32,
-    nbTraits: vec4f,
     nbLifeState: vec4f,
     r: f32,
     bio: BioLink,
-) -> vec4f {
+) -> vec2f {
+    let contactR = bio.catRadius * 0.72;
     let kind = bioRoleKind(atomicNum, valence);
-    if (kind == 0u || r >= bio.catRadius) {
-        return vec4f(0.0, 0.0, 1.0, 0.0);
+    if (kind == 0u || r >= contactR) {
+        return vec2f(1.0, 0.0);
     }
 
-    let w = (1.0 - r / max(bio.catRadius, 1e-4)) * bio.rate;
-    let coh = clamp(nbTraits.x, 0.0, 1.0);
-    let asym = clamp(nbTraits.w, 0.0, 1.0);
+    let w = (1.0 - r / max(contactR, 1e-4)) * bio.rate;
     let energy = clamp(nbLifeState.x, 0.0, 1.5);
-    let vit = clamp(nbLifeState.y, 0.0, 1.0);
-    let catPower = clamp(0.25 + energy * 0.75 + vit * 0.35, 0.0, 1.5);
-    let isAnabolic = coh >= asym;
-
-    var kickToLife = 0.0;
-    var spinSwirl = 0.0;
     var actScale = 1.0;
     var glow = 0.0;
 
     if (kind == 3u) {
         actScale = 0.45;
         glow = 0.35 * w;
-    } else if (kind == 4u && (coh + vit) > 0.70 && energy > 0.24) {
-        kickToLife = 0.20 * catPower * w;
-        actScale = 0.22;
-        glow = -0.60 * w;
-    } else if (kind == 1u) {
-        if (isAnabolic && energy > 0.28) {
-            kickToLife = 0.30 * catPower * w;
-            actScale = 0.16;
-            glow = 0.72 * w;
-        } else if (energy < 1.40) {
-            kickToLife = -0.40 * w;
-            spinSwirl = 0.52 * w;
-            actScale = 0.35;
-            glow = -0.72 * w;
+    } else if (kind == 4u && energy > 0.28) {
+        actScale = 0.25;
+        glow = -0.50 * w;
+    } else if (kind == 1u || kind == 2u) {
+        if (energy > 0.30) {
+            actScale = 0.18;
+            glow = 0.65 * w;
         }
-    } else if (kind == 2u) {
-        if (isAnabolic && energy > 0.28) {
-            kickToLife = 0.38 * catPower * w;
-            actScale = 0.12;
-            glow = 0.96 * w;
-        } else if (atomLoad > 0.35) {
-            kickToLife = -0.35 * w;
-            spinSwirl = 0.62 * w;
-            glow = -0.92 * w;
-        }
-    } else if (atomicNum == 6u) {
-        if (isAnabolic && energy > 0.40 && atomLoad >= 1.35) {
-            kickToLife = -0.60 * catPower * w;
-            spinSwirl = 0.42 * w;
-            glow = -0.70 * w;
-        } else if (atomLoad > 0.05 && atomLoad < 1.35) {
-            actScale = 0.28;
-            kickToLife = 0.16 * w;
-            glow = 0.42 * w;
-        }
+    } else if (atomicNum == 6u && atomLoad > 0.05 && atomLoad < 1.35) {
+        actScale = 0.28;
+        glow = 0.42 * w;
     }
 
-    return vec4f(kickToLife, spinSwirl, actScale, glow);
+    return vec2f(actScale, glow);
 }
 
 fn packDeltaActGlow(actScale: f32, glow: f32) -> f32 {
@@ -584,29 +360,24 @@ struct BioUnifiedAccum {
     dE: f32,
     dVit: f32,
     dPoi: f32,
-    steer: vec3f,
     bioChemCount: f32,
-    bioSteer: vec3f,
     nearHalogen: f32,
     nearTotalBio: f32,
+    nearForeignBio: f32,
     nearStressedBio: f32,
-    // Chemistry-side emergent autotrophic fixer + lipid bilayer accumulation
-    nearFixer: f32,
-    bestFixW: f32,
-    bestFixSp: u32,
-    bestFixKin: f32,
-    bestFixGene: u32,
-    bestAdjW: f32,
-    bestAdjSp: u32,
-    bestAdjKin: f32,
-    adjSpeciesMask: u32,
-    adjBlobCount: f32,
-    adjEnergySum: f32,
-    adjGradCount: f32,
-    adjGeneSum: f32,
-    adjKinCos: f32,
-    adjKinSin: f32,
-    adjKinW: f32,
+    // Tight contact assimilation & lipid synthesis (phase == 0u)
+    contactCount: f32,
+    contactEnergySum: f32,
+    contactLipidAllocSum: f32,
+    contactSpeciesMask: u32,
+    contactBestW: f32,
+    contactBestSp: u32,
+    contactBestKin: f32,
+    contactBestGene: u32,
+    contactBestGrad: u32,
+    contactKinCos: f32,
+    contactKinSin: f32,
+    contactKinW: f32,
     blobCentroid: vec3f,
     blobCentW: f32,
     lipidCentroid: vec3f,
@@ -617,16 +388,11 @@ struct BioUnifiedAccum {
     bestLipidSp: u32,
     bestLipidKin: f32,
     bestLipidGene: u32,
-    // Same-blob organism anatomy, heterogeneity mask, lipids, & gene sharing
+    // Same-blob organism anatomy, heterogeneity, lipids, & gene sharing
     blobCount: f32,
     blobWeightSum: f32,
     blobEnergySum: f32,
     blobVitSum: f32,
-    blobCohSum: f32,
-    blobAsymSum: f32,
-    blobSolarAtomSum: f32,
-    blobRedoxAtomSum: f32,
-    blobSpeedSum: f32,
     blobKinCos: f32,
     blobKinSin: f32,
     blobKinWeight: f32,
@@ -635,23 +401,17 @@ struct BioUnifiedAccum {
     blobLipidGradCount: f32,
     blobGradCount: f32,
     blobGeneSum: f32,
-    // Foreign-blob grazing & predation
-    nearForeignPrey: f32,
-    nearPredThreat: f32,
-    bestPredW: f32,
-    bestPredSp: u32,
-    bestPredKin: f32,
-    bestPredGene: u32,
-    bestPredGrad: u32,
-    bestPredE: f32,
-    predRepelDir: vec3f,
-    // Emergent saprotrophic decomposition
-    nearDecompPower: f32,
-    bestDecompW: f32,
-    bestDecompSp: u32,
-    bestDecompKin: f32,
-    bestDecompGene: u32,
-    // Inorganic mineral crust accumulation & bio-geochemical exchange
+    // Pure physical close-contact engulfment & predation harvest (`r < 0.44 * catRadius`)
+    contactPreyHarvest: f32,
+    contactEngulfPress: f32,
+    contactBestEngulfW: f32,
+    contactBestEngulfSp: u32,
+    contactBestEngulfKin: f32,
+    contactBestEngulfGene: u32,
+    contactBestEngulfGrad: u32,
+    contactBestEngulfE: f32,
+    contactBestEngulfAlloc: f32,
+    // Inorganic mineral crust accumulation & exchange
     nearMineralCount: f32,
     nearMinDist: f32,
     nearMineralBioMine: f32,
@@ -666,21 +426,13 @@ struct BioUnifiedAccum {
     nearPreSulf: f32,
     nearBe: f32,
     nearClayH: f32,
-    // Closed water-cycle & O2/CO2 exchange accumulators
+    // Water-cycle & O2/CO2 exchange
     nearWaterFluid: f32,
     nearOxygenGas: f32,
     nearCarbonFeed: f32,
-    // Inherited niche preference & rooted-vs-mobile trait consensus
-    nicheOcSum: f32,
-    nicheTempSum: f32,
-    nicheSolarSum: f32,
-    nicheRootSum: f32,
-    nicheWeight: f32,
-    bestFixNiche: f32,
-    bestAdjNiche: f32,
-    // Consensus-diffused MDP telemetry & directional sensory accumulators
-    preyDir: vec3f,
-    halogenRepelDir: vec3f,
+    // Option-2 bounded Bellman-Ford leader election & Particle MDP lateral Q-gossip
+    bestLeaderId: u32,
+    bestLeaderHops: u32,
     mdpVotes: vec4f,
     mdpVoteWeight: f32,
     bestMdpScore: f32,
@@ -692,11 +444,29 @@ fn initBioUnifiedAccum() -> BioUnifiedAccum {
     acc.actScale = 1.0;
     acc.bestMdpScore = -1.0;
     acc.nearMinDist = 99.0;
-    acc.bestFixGene = 7u;
+    acc.contactBestGene = 7u;
     acc.bestLipidGene = 7u;
-    acc.bestPredGene = 7u;
-    acc.bestDecompGene = 7u;
+    acc.contactBestEngulfGene = 7u;
+    acc.bestLeaderId = NO_LEADER;
+    acc.bestLeaderHops = 99u;
     return acc;
+}
+
+fn considerLeaderCandidate(
+    acc: ptr<function, BioUnifiedAccum>,
+    nbIdx: u32,
+    nbBlob: vec4u,
+) {
+    let rawId = select(nbIdx, nbBlob.x, nbBlob.x != NO_LEADER);
+    let rawHops = select(0u, nbBlob.y, nbBlob.x != NO_LEADER);
+    if (rawHops >= MAX_LEADER_HOPS) {
+        return;
+    }
+    let candHops = rawHops + 1u;
+    if (rawId < (*acc).bestLeaderId || (rawId == (*acc).bestLeaderId && candHops < (*acc).bestLeaderHops)) {
+        (*acc).bestLeaderId = rawId;
+        (*acc).bestLeaderHops = candHops;
+    }
 }
 
 fn accumulateBioUnifiedNeighbor(
@@ -707,6 +477,8 @@ fn accumulateBioUnifiedNeighbor(
     myValence: u32,
     myAtomLoad: f32,
     myLifeState: vec4f,
+    myBlobZ: u32,
+    nbIdx: u32,
     nbPos: vec3f,
     nbVel: vec3f,
     nbChemSpecies: f32,
@@ -716,7 +488,7 @@ fn accumulateBioUnifiedNeighbor(
     nbAtomLoad: f32,
     nbAtomicNum: u32,
     nbValence: u32,
-    nbPad: f32,
+    nbBlob: vec4u,
     nbMdp: MdpState,
     oc: vec4f,
     bio: BioLink,
@@ -745,16 +517,11 @@ fn accumulateBioUnifiedNeighbor(
     let nBio = max(u32(bio.bioColours), 1u);
     let myBioSp = min(unpackBioSpecies(myLifeState.w), nBio - 1u);
     let nbSp = min(nbBioSpecies, nBio - 1u);
-    let myTraits = getBioSpeciesTraits(nChem, nBio, myBioSp);
-    let nbTraits = getBioSpeciesTraits(nChem, nBio, nbSp);
 
     if (nbPhase == 0u) {
         let nbKind = bioRoleKind(nbAtomicNum, nbValence);
         if (nbKind == 4u) {
             (*acc).nearHalogen += wDist;
-            if (myPhase == 1u) {
-                (*acc).halogenRepelDir -= dToNb * wDist;
-            }
         }
         if (nbAtomicNum == 1u || nbAtomicNum == 6u) {
             (*acc).nearWaterFluid += wDist * select(0.35, 1.0, nbLifeState.y >= 0.5);
@@ -766,7 +533,6 @@ fn accumulateBioUnifiedNeighbor(
             (*acc).nearCarbonFeed += wDist;
         }
         if (myPhase == 0u) {
-            // Geochemical stoichiometric precursor clustering for primary mineral nucleation
             if (nbAtomicNum == 11u || nbAtomicNum == 6u) {
                 (*acc).nearPreSilica += wDist * select(0.55, 1.35, nbAtomicNum == 11u);
             }
@@ -786,27 +552,20 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).nearClayH += wDist;
             }
         } else if (myPhase == 1u) {
-            let eff = evalLifeFromAtomPair(myTraits, myLifeState, nbAtomicNum, nbValence, nbAtomLoad, r, bio);
+            let eff = evalLifeFromAtomPair(myLifeState, nbAtomicNum, nbValence, nbAtomLoad, r, bio);
             (*acc).dE += eff.x;
             (*acc).dVit += eff.y;
             (*acc).dPoi += eff.z;
-            (*acc).steer += dToNb * eff.w;
             (*acc).bioChemCount += 1.0;
-
-            // Gentle photosynthetic scavenging when cohesive autotroph meets free biogenic atoms
-            if (isBiogenicElement(nbAtomicNum, nbValence) && myTraits.x > 0.45) {
-                (*acc).bioSteer += dToNb * (wDist * 0.14);
-            }
         } else if (myPhase == 2u) {
-            // Amphiphilic bilayer intercepts dissolving halogens on behalf of sheltered cytoplasm
-            if (nbKind == 4u) {
-                (*acc).dPoi += 0.30 * wDist * bio.rate;
+            if (nbKind == 4u && r < bio.catRadius * 0.62) {
+                (*acc).dPoi += 0.28 * wDist * bio.rate;
             }
         }
         return;
     }
 
-    // Neighbor is an anchored crustal mineral (`nbPhase == 3u`)
+    // Neighbor is anchored crustal mineral (`nbPhase == 3u`)
     if (nbPhase == 3u) {
         let nbMinType = unpackBioSpecies(nbLifeState.w);
         let nbMinAngle = unpackKinPhase(nbLifeState.w);
@@ -834,7 +593,6 @@ fn accumulateBioUnifiedNeighbor(
             } else if (nbMinType == MINERAL_CARBONATE && nbMinTrap == 0u) {
                 (*acc).nearClayCat += 0.45 * wDist * clamp(nbInteg, 0.25, 1.2);
             }
-            // Crystal spacing guide: repel away from core overlap so epitaxial buds attach cleanly onto outer branches
             let minLatticeR = bio.catRadius * 0.34;
             if (elementFitsMineralType(myAtomicNum, myValence, nbMinType) && nbInteg > 0.25) {
                 if (r < minLatticeR) {
@@ -847,98 +605,75 @@ fn accumulateBioUnifiedNeighbor(
             return;
         }
 
-        // Living cytoplasm (`1u`) or bilayer (`2u`) encountering crustal mineral (`nbPhase == 3u`): Windfall vs Death Sentence
+        // Physical surface catalysis/weathering strictly on contact (`r < 0.68 * catRadius`, NO steering vectors!)
+        if (r >= bio.catRadius * 0.68) {
+            return;
+        }
         let minScale = max(bio.mineralRate, 0.20) * clamp(0.35 + 0.85 * nbInteg, 0.25, 1.2);
-        let mw = wDist * minScale;
+        let mw = (1.0 - r / (bio.catRadius * 0.68)) * minScale;
         (*acc).bioChemCount += 1.0;
 
         if (myPhase == 2u) {
-            // Lipid bilayer shields internals from brine/Be/acid mineral leaching at modest shell stress
             if (nbMinTrap == 1u || nbMinType == MINERAL_EVAPORITE) {
-                (*acc).dPoi += (0.18 + 0.24 * nbHaz) * mw;
+                (*acc).dPoi += (0.16 + 0.22 * nbHaz) * mw;
             }
             return;
         }
 
-        let coh = clamp(myTraits.x, 0.0, 1.0);
-        let asym = clamp(myTraits.w, 0.0, 1.0);
         let vit = clamp(myLifeState.y, 0.0, 1.0);
-        let haloAff = clamp(0.20 + 0.35 * coh + 0.35 * asym + 0.25 * vit, 0.0, 1.0);
         let myRedox = elemRedoxWeight(myAtomicNum);
-
         if (nbMinType == MINERAL_SILICATE) {
-            // Stable reef substrate: mild halogen detox & shelter from fast motion abrasion
             (*acc).dPoi -= 0.09 * mw;
             (*acc).dVit += 0.05 * mw;
-            (*acc).dE -= 0.04 * clamp(length(myVel) * 2.0, 0.0, 1.0) * mw;
         } else if (nbMinType == MINERAL_EVAPORITE) {
-            // Water-soluble salt / fluorite: lethal halogen & osmotic shock unless halotolerant
-            if (haloAff > 0.56) {
-                (*acc).dE += (0.24 + 0.16 * nbNutr) * haloAff * mw;
-                (*acc).steer += dToNb * (0.28 * mw);
-            } else {
-                let shock = (0.42 + 0.48 * max(nbHaz, select(0.25, 0.70, nbMinTrap == 1u))) * mw;
-                (*acc).dPoi += shock;
-                (*acc).dE -= shock * 0.58;
-                (*acc).steer -= dToNb * (0.52 * mw);
-            }
+            let toxEase = 1.0 - 0.55 * vit;
+            (*acc).dPoi += (0.30 + 0.40 * max(nbHaz, select(0.25, 0.70, nbMinTrap == 1u))) * toxEase * mw;
+            (*acc).dE -= 0.18 * toxEase * mw;
         } else if (nbMinType == MINERAL_CARBONATE) {
             if (nbMinTrap == 0u) {
-                // Pure Dolomite/Carbonate: rich C/O energy & cofactor windfall
-                (*acc).dE += (0.28 + 0.24 * nbNutr) * mw;
+                (*acc).dE += (0.28 + 0.22 * nbNutr) * mw;
                 (*acc).dVit += 0.22 * mw;
-                (*acc).steer += dToNb * (0.32 * mw);
             } else {
-                // Be-doped Beryl Carbonate Trap: attracts cells briefly then unleashes toxic beryllium shock
-                (*acc).dPoi += (0.56 + 0.48 * nbHaz) * mw;
-                (*acc).dE -= (0.24 + 0.26 * nbHaz) * mw;
-                (*acc).steer -= dToNb * (0.35 * mw);
+                (*acc).dPoi += (0.50 + 0.45 * nbHaz) * mw;
+                (*acc).dE -= (0.20 + 0.24 * nbHaz) * mw;
             }
         } else if (nbMinType == MINERAL_SULFIDE) {
             let overWater = smoothstep(0.32, 0.54, oc.w);
             if (nbMinTrap == 0u && overWater > 0.35) {
-                // Submerged hydrothermal chimney: massive chemosynthetic ATP windfall (works on night side too!)
-                (*acc).dE += (0.34 + 0.30 * nbNutr) * (0.55 + 0.75 * myRedox) * mw;
+                (*acc).dE += (0.34 + 0.28 * nbNutr) * (0.55 + 0.75 * myRedox) * mw;
                 (*acc).dVit += 0.24 * mw;
-                (*acc).steer += dToNb * (0.36 * mw);
             } else {
-                // Air-oxidizing sulfuric weathering burst on windy land
-                (*acc).dPoi += (0.40 + 0.36 * nbHaz) * mw;
-                (*acc).dE += (0.12 * myRedox - 0.18) * mw;
+                (*acc).dPoi += (0.36 + 0.34 * nbHaz) * mw;
             }
         } else {
-            // Hydrated Clay (MINERAL_CLAY): evolutionary cofactor windfall & toxin scavenger
             (*acc).dE += 0.15 * mw;
             (*acc).dVit += (0.34 + 0.26 * nbNutr) * mw;
             (*acc).dPoi -= 0.14 * mw;
             (*acc).nearClayCat += mw;
-            (*acc).steer += dToNb * (0.26 * mw);
         }
         return;
     }
 
     let nbEnergy = clamp(nbLifeState.x, 0.0, 1.6);
     let nbVit = clamp(nbLifeState.y, 0.0, 1.0);
-    let nbPoi = clamp(nbLifeState.z, 0.0, 1.0);
     let nbKin = unpackKinPhase(nbLifeState.w);
     let nbGene = unpackEncapGene(nbLifeState.w);
     let nbGrad = unpackGraduated(nbLifeState.w);
 
     if (myPhase == 3u) {
-        // Living cells and bilayers contacting an intact mineral actively bio-weather / mine it
         let redoxBoost = select(1.0, 1.55, nbPhase == 1u && elemRedoxWeight(nbAtomicNum) > 0.65);
         let encapBoost = select(1.0, 1.45, nbPhase == 2u || nbGrad == 1u);
         (*acc).nearMineralBioMine += wDist * clamp(nbEnergy, 0.25, 1.4) * encapBoost * redoxBoost;
         return;
     }
 
-    // Neighbor is an oriented amphiphilic lipid bilayer particle (`nbPhase == 2u`)
+    // Neighbor is amphiphilic lipid bilayer (`nbPhase == 2u`)
     if (nbPhase == 2u) {
         if (myPhase == 0u) {
             (*acc).nearLipidCount += 1.0;
             (*acc).nearLipidEnergySum += nbEnergy;
             if (nbGrad == 1u) {
-                (*acc).adjGradCount += 1.0;
+                (*acc).contactBestGrad = 1u;
             }
             (*acc).lipidCentroid += wDist * nbPos;
             (*acc).lipidCentW += wDist;
@@ -948,15 +683,6 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).bestLipidSp = nbSp;
                 (*acc).bestLipidKin = nbKin;
                 (*acc).bestLipidGene = nbGene;
-            }
-            let myKind = bioRoleKind(myAtomicNum, myValence);
-            if (myKind == 4u) {
-                (*acc).kick -= dToNb * (wDist * 1.55 * bio.rate);
-                (*acc).chemBioCount += 1.0;
-            } else if (isBiogenicElement(myAtomicNum, myValence)) {
-                (*acc).kick += dToNb * (wDist * 0.45 * bio.rate);
-                (*acc).glowSum += 0.40 * wDist;
-                (*acc).chemBioCount += 1.0;
             }
         } else if (myPhase == 1u) {
             let myKin = unpackKinPhase(myLifeState.w);
@@ -970,11 +696,9 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).blobKinCos += lw * cos(nbKin);
                 (*acc).blobKinSin += lw * sin(nbKin);
                 (*acc).blobKinWeight += lw;
-            } else {
-                (*acc).predRepelDir += dToNb * wDist;
+                considerLeaderCandidate(acc, nbIdx, nbBlob);
             }
         } else {
-            // Lateral energy, kin, and gene diffusion along own bilayer leaflets
             let myKin = unpackKinPhase(myLifeState.w);
             if (kinAngularDist(myKin, nbKin) < 0.32) {
                 let bw = max(wDist, 0.15);
@@ -989,75 +713,45 @@ fn accumulateBioUnifiedNeighbor(
                 (*acc).blobKinCos += (bw * 0.85) * cos(nbKin);
                 (*acc).blobKinSin += (bw * 0.85) * sin(nbKin);
                 (*acc).blobKinWeight += bw * 0.85;
+                considerLeaderCandidate(acc, nbIdx, nbBlob);
             }
         }
         return;
     }
 
     // Neighbor is living Particle Life cytoplasm (`nbPhase == 1u`)
-    let curVel = evalOceanCurrentVel(nbPos, oc, bio.oceanCurrentScale);
-    let nbSelfVel = nbVel - curVel;
-    let nbSelfSpeed = length(nbSelfVel);
-    let nbMotility = clamp(nbSelfSpeed / 0.16, 0.0, 1.5);
-    let nbSolarElem = elemSolarWeight(nbAtomicNum);
-    let nbRedoxElem = elemRedoxWeight(nbAtomicNum);
-
     (*acc).nearTotalBio += 1.0;
-    if (nbEnergy < 0.44 || nbPoi > 0.24) {
+    if (nbEnergy < 0.44 || nbLifeState.z > 0.24) {
         (*acc).nearStressedBio += wDist * 1.15;
     }
 
     if (myPhase == 0u) {
-        // Order-independent host telemetry for heterogeneous encapsulation gating
-        (*acc).adjSpeciesMask |= (1u << (nbSp % 24u));
-        (*acc).adjBlobCount += 1.0;
-        (*acc).adjEnergySum += nbEnergy;
-        if (nbGrad == 1u) {
-            (*acc).adjGradCount += 1.0;
-        }
-        (*acc).adjGeneSum += f32(nbGene);
-        (*acc).adjKinCos += wDist * cos(nbKin);
-        (*acc).adjKinSin += wDist * sin(nbKin);
-        (*acc).adjKinW += wDist;
-        (*acc).blobCentroid += wDist * nbPos;
-        (*acc).blobCentW += wDist;
-        let adjScore = wDist * max(nbEnergy, 0.25);
-        if (adjScore > (*acc).bestAdjW) {
-            (*acc).bestAdjW = adjScore;
-            (*acc).bestAdjSp = nbSp;
-            (*acc).bestAdjKin = nbKin;
-            (*acc).bestAdjNiche = nbPad;
-        }
-
-        // Check if nearby living blob particle (autotroph OR thriving heterotroph) can fix free biogenic C/H/O/S atom
-        let nbAutoInst = clamp(
-            (0.35 + 0.85 * nbTraits.x) * (0.45 + 0.85 * nbSolarElem) / (1.0 + 0.65 * nbMotility),
-            0.05,
-            1.4,
-        );
-        let nbConsumerGrow = clamp(
-            (0.28 + 0.90 * nbTraits.w) * (0.45 + 0.75 * nbMotility) * (0.42 + 0.65 * nbRedoxElem),
-            0.05,
-            1.35,
-        );
-        let fixCap = max(nbAutoInst, select(0.0, nbConsumerGrow * 0.78, nbEnergy > 0.66));
-        if (nbEnergy > 0.52 && fixCap > 0.34) {
-            let fixScore = wDist * fixCap * clamp(nbEnergy, 0.4, 1.4);
-            (*acc).nearFixer += fixScore;
-            if (fixScore > (*acc).bestFixW) {
-                (*acc).bestFixW = fixScore;
-                (*acc).bestFixSp = nbSp;
-                (*acc).bestFixKin = nbKin;
-                (*acc).bestFixGene = nbGene;
-                (*acc).bestFixNiche = nbPad;
+        let nbPol = evalCombinedMdpPolicy(nbBlob.z);
+        if (r < bio.catRadius * 0.62) {
+            (*acc).contactSpeciesMask |= (1u << (nbSp % 24u));
+            (*acc).contactCount += 1.0;
+            (*acc).contactEnergySum += nbEnergy;
+            (*acc).contactLipidAllocSum += nbPol.lipidAlloc;
+            if (nbGrad == 1u) {
+                (*acc).contactBestGrad = 1u;
+            }
+            (*acc).contactKinCos += wDist * cos(nbKin);
+            (*acc).contactKinSin += wDist * sin(nbKin);
+            (*acc).contactKinW += wDist;
+            let cScore = wDist * max(nbEnergy, 0.25);
+            if (cScore > (*acc).contactBestW) {
+                (*acc).contactBestW = cScore;
+                (*acc).contactBestSp = nbSp;
+                (*acc).contactBestKin = nbKin;
+                (*acc).contactBestGene = nbGene;
             }
         }
+        (*acc).blobCentroid += wDist * nbPos;
+        (*acc).blobCentW += wDist;
 
-        let tSwirl = cross(myPos, dToNb);
-        let eff = evalAtomFromLifePair(myAtomicNum, myValence, myAtomLoad, nbTraits, nbLifeState, r, bio);
-        (*acc).kick += dToNb * eff.x + tSwirl * eff.y;
-        (*acc).actScale = min((*acc).actScale, eff.z);
-        (*acc).glowSum += eff.w;
+        let effCat = evalAtomFromLifePair(myAtomicNum, myValence, myAtomLoad, nbLifeState, r, bio);
+        (*acc).actScale = min((*acc).actScale, effCat.x);
+        (*acc).glowSum += effCat.y;
         (*acc).chemBioCount += 1.0;
         return;
     }
@@ -1077,14 +771,11 @@ fn accumulateBioUnifiedNeighbor(
             (*acc).blobKinCos += (bw * 1.4) * cos(nbKin);
             (*acc).blobKinSin += (bw * 1.4) * sin(nbKin);
             (*acc).blobKinWeight += bw * 1.4;
-        } else {
-            let nbPredInst = clamp(
-                (0.20 + 0.95 * nbTraits.w) * (0.35 + 0.85 * nbMotility) * (0.55 + 0.65 * nbRedoxElem),
-                0.05,
-                1.60,
-            );
-            if (nbEnergy > 0.24 && nbPredInst > 0.32) {
-                (*acc).nearPredThreat += wDist * nbPredInst;
+            considerLeaderCandidate(acc, nbIdx, nbBlob);
+        } else if (r < bio.catRadius * 0.44 && nbEnergy > 0.35) {
+            let aNbMy = getBioMatrixA(nChem, nBio, nbSp, myBioSp);
+            if (aNbMy > 0.25) {
+                (*acc).contactEngulfPress += (1.0 - r / (bio.catRadius * 0.44)) * aNbMy;
             }
         }
         return;
@@ -1095,10 +786,10 @@ fn accumulateBioUnifiedNeighbor(
     let kinDist = kinAngularDist(myKin, nbKin);
     let aMyNb = getBioMatrixA(nChem, nBio, myBioSp, nbSp);
     let aNbMy = getBioMatrixA(nChem, nBio, nbSp, myBioSp);
-    let mutualCoh = aMyNb + aNbMy;
 
+    // Compatible mutual attractors blend seamlessly on contact into a unified colony
     let sameBlob = (r < bio.catRadius * 0.92) &&
-        ((kinDist < 0.24) || (r < bio.catRadius * 0.62 && (mutualCoh > 0.08 || (abs(aMyNb - aNbMy) > 0.45 && mutualCoh > -0.30) || length(myVel - nbVel) < 0.32)));
+        ((kinDist < 0.28) || (r < bio.catRadius * 0.68 && aMyNb > 0.05 && aNbMy > 0.05));
 
     if (sameBlob) {
         let bw = max(wDist, 0.15);
@@ -1109,25 +800,13 @@ fn accumulateBioUnifiedNeighbor(
         if (nbGrad == 1u) {
             (*acc).blobGradCount += 1.0;
         }
-        (*acc).blobCohSum += nbTraits.x;
-        (*acc).blobAsymSum += nbTraits.w;
-        (*acc).blobSolarAtomSum += nbSolarElem;
-        (*acc).blobRedoxAtomSum += nbRedoxElem;
-        (*acc).blobSpeedSum += nbSelfSpeed;
         (*acc).blobKinCos += bw * cos(nbKin);
         (*acc).blobKinSin += bw * sin(nbKin);
         (*acc).blobKinWeight += bw;
         (*acc).blobSpeciesMask |= (1u << (nbSp % 24u));
         (*acc).blobGeneSum += f32(nbGene);
-        (*acc).blobCentroid += bw * nbPos;
-        (*acc).blobCentW += bw;
-        if (hasValidBioNiche(nbPad)) {
-            (*acc).nicheOcSum += bw * unpackPrefOc(nbPad);
-            (*acc).nicheTempSum += bw * unpackPrefTempK(nbPad);
-            (*acc).nicheSolarSum += bw * unpackPrefSolar(nbPad);
-            (*acc).nicheRootSum += bw * unpackRootGene(nbPad);
-            (*acc).nicheWeight += bw;
-        }
+        considerLeaderCandidate(acc, nbIdx, nbBlob);
+
         let nbCtrl = u32(round(nbMdp.ctrl.w));
         if ((nbCtrl & 4096u) != 0u) {
             let nbAct = (nbCtrl >> 2u) & 3u;
@@ -1146,58 +825,32 @@ fn accumulateBioUnifiedNeighbor(
         return;
     }
 
-    // Foreign blob interaction: compare emergent predatory vs. prey/detrital roles
-    let mySelfSpeed = length(myVel - evalOceanCurrentVel(myPos, oc, bio.oceanCurrentScale));
-    let myMotility = clamp(mySelfSpeed / 0.16, 0.0, 1.5);
-    let myRedoxElem = elemRedoxWeight(myAtomicNum);
+    (*acc).nearForeignBio += wDist;
 
-    let myPredInst = clamp(
-        (0.24 + 0.95 * myTraits.w) * (0.40 + 0.85 * myMotility) * (0.68 + 0.52 * myRedoxElem),
-        0.05,
-        1.65,
-    );
-    let nbPredInst = clamp(
-        (0.24 + 0.95 * nbTraits.w) * (0.40 + 0.85 * nbMotility) * (0.68 + 0.52 * nbRedoxElem),
-        0.05,
-        1.65,
-    );
-    let nbDecompInst = clamp(
-        (0.30 + 0.90 * nbRedoxElem) * (0.55 + 0.55 * (1.0 - min(nbMotility, 1.0))),
-        0.10,
-        1.40,
-    );
-
-    if (mutualCoh < 0.48) {
-        if (myPredInst > nbPredInst * 0.85 && myPredInst > 0.24) {
-            (*acc).nearForeignPrey += wDist;
-            (*acc).bioSteer += dToNb * (wDist * 0.44);
-            (*acc).preyDir += dToNb * wDist;
+    // Pure physical close-contact competition/engulfment (`r < 0.44 * catRadius`):
+    // Driven purely by whether the combined attractor matrix physically compresses foreign cells into overlap.
+    let engulfR = bio.catRadius * 0.44;
+    if (r < engulfR) {
+        let myPol = evalCombinedMdpPolicy(myBlobZ);
+        let nbPol = evalCombinedMdpPolicy(nbBlob.z);
+        let wClose = 1.0 - r / max(engulfR, 1e-4);
+        let effPushMeIntoNb = aMyNb + myPol.dForeignBio * 0.45;
+        let effPushNbIntoMe = aNbMy + nbPol.dForeignBio * 0.45;
+        if (effPushMeIntoNb > effPushNbIntoMe + 0.08 && nbEnergy > 0.15) {
+            (*acc).contactPreyHarvest += wClose * clamp(nbEnergy, 0.2, 1.5) * clamp(effPushMeIntoNb - effPushNbIntoMe, 0.05, 1.4);
         }
-
-        let closingSpeed = max(0.0, dot(nbVel - myVel, -dToNb));
-        if (nbEnergy > 0.24 && nbPredInst > myPredInst * 0.82 && nbPredInst > 0.28) {
-            let threatScore = wDist * nbPredInst * (0.45 + max(0.0, aNbMy - aMyNb) + 0.65 * closingSpeed);
-            (*acc).nearPredThreat += threatScore;
-            (*acc).predRepelDir += dToNb * wDist;
-            if (threatScore > (*acc).bestPredW) {
-                (*acc).bestPredW = threatScore;
-                (*acc).bestPredSp = nbSp;
-                (*acc).bestPredKin = nbKin;
-                (*acc).bestPredGene = nbGene;
-                (*acc).bestPredGrad = nbGrad;
-                (*acc).bestPredE = nbEnergy;
+        if (nbEnergy > 0.22 && effPushNbIntoMe > effPushMeIntoNb + 0.06) {
+            let press = wClose * clamp(effPushNbIntoMe - effPushMeIntoNb, 0.05, 1.5) * clamp(nbEnergy, 0.3, 1.5);
+            (*acc).contactEngulfPress += press;
+            if (press > (*acc).contactBestEngulfW) {
+                (*acc).contactBestEngulfW = press;
+                (*acc).contactBestEngulfSp = nbSp;
+                (*acc).contactBestEngulfKin = nbKin;
+                (*acc).contactBestEngulfGene = nbGene;
+                (*acc).contactBestEngulfGrad = nbGrad;
+                (*acc).contactBestEngulfE = nbEnergy;
+                (*acc).contactBestEngulfAlloc = nbPol.lipidAlloc;
             }
-        }
-    }
-
-    if (nbEnergy > 0.22 && nbDecompInst > 0.38) {
-        let decScore = wDist * nbDecompInst;
-        (*acc).nearDecompPower += decScore;
-        if (decScore > (*acc).bestDecompW) {
-            (*acc).bestDecompW = decScore;
-            (*acc).bestDecompSp = nbSp;
-            (*acc).bestDecompKin = nbKin;
-            (*acc).bestDecompGene = nbGene;
         }
     }
 }
@@ -1287,7 +940,6 @@ fn attemptMineralCrystallize(
         }
         if (habFit > 0.18) {
             chooseType = mT;
-            // Slow geological accretion along crystal symmetry arms
             pCryst = clamp(0.14 * mRate * habFit * calmEnv * mineralHeadroom * bondEase * dtMin, 0.0, 0.014);
             let symSteps = select(6.0, 4.0, mT == MINERAL_EVAPORITE || mT == MINERAL_SULFIDE);
             let stepIdx = floor(hashFloat(pi, frameU, 61u) * symSteps);
@@ -1324,8 +976,7 @@ fn attemptMineralCrystallize(
 
     if (chooseType <= MINERAL_CLAY && pCryst > 0.0 && hashFloat(pi, frameU, 62u) < pCryst) {
         if (chooseType == MINERAL_SILICATE) {
-            nutr = 0.25;
-            haz = 0.0;
+            nutr = 0.25; haz = 0.0;
         } else if (chooseType == MINERAL_EVAPORITE) {
             nutr = select(0.30, 0.10, trapFlag == 1u);
             haz = select(0.45, 0.88, trapFlag == 1u);
@@ -1336,8 +987,7 @@ fn attemptMineralCrystallize(
             nutr = 0.90;
             haz = select(0.08, 0.72, trapFlag == 1u);
         } else {
-            nutr = 0.95;
-            haz = 0.0;
+            nutr = 0.95; haz = 0.0;
         }
         let grade = u32(clamp(round(nutr * 12.0 + clamp(acc.nearMineralCount, 0.0, 3.0)), 0.0, 15.0));
         let eBase = sphereEastBasis(pos);
@@ -1353,8 +1003,6 @@ fn attemptMineralCrystallize(
     return bioStepOnly(vec4f(0.0), vec4f(0.0));
 }
 
-// Dead material remains in the chemistry phase. The temporal pass consumes the
-// one-tick marker. Negative multiples of four decode as phase zero everywhere.
 const DEATH_STARVATION = 1u;
 const DEATH_CROWDING = 2u;
 const DEATH_PREDATION = 3u;
@@ -1369,12 +1017,7 @@ fn deadCell(cause: u32) -> vec4f {
     return vec4f(0.0, 0.0, 0.0, -4.0 * f32(cause));
 }
 
-// For energy-triggered decay, ask whether removing the environmental penalties
-// would have cleared the lethal threshold on this tick. Report the largest
-// contributor in that case. Test crowding next, then ordinary energy depletion.
 fn energyDeath(rawEnergy: f32, energyBeforeStep: f32, threshold: f32, dt: f32, crowd: f32, stress: vec4f) -> u32 {
-    // A cell can persist below the threshold for several ticks before it dies.
-    // In that case also recognize a pressure that kept it from recovering.
     let cutoff = select(threshold, energyBeforeStep, rawEnergy <= energyBeforeStep && energyBeforeStep < threshold);
     let largest = max(max(stress.x, stress.y), max(stress.z, stress.w));
     let crowded = crowd > 0.0 && rawEnergy + crowd * dt > cutoff;
@@ -1389,29 +1032,6 @@ fn energyDeath(rawEnergy: f32, energyBeforeStep: f32, threshold: f32, dt: f32, c
     return DEATH_STARVATION;
 }
 
-fn pickCohesiveProducerSpecies(
-    nChem: u32,
-    nBio: u32,
-    pi: u32,
-    frameU: u32,
-    salt: u32,
-) -> u32 {
-    var bestSp = u32(floor(hashFloat(pi, frameU, salt) * f32(nBio))) % max(nBio, 1u);
-    var bestScore = -9.0;
-    for (var k: u32 = 0u; k < 4u; k++) {
-        let cand = u32(floor(hashFloat(pi, frameU, salt + k) * f32(nBio))) % max(nBio, 1u);
-        let tr = getBioSpeciesTraits(nChem, nBio, cand);
-        let score = tr.x - 0.35 * tr.w;
-        if (score > bestScore) {
-            bestScore = score;
-            bestSp = cand;
-        }
-    }
-    return bestSp;
-}
-
-// Updates conserved phase-0 fluid compartment (`y`: 0=Gas/Vapor, 1=Liquid/Runoff, 2=SeaIce),
-// tropospheric altitude (`z` in `[0,1]`), and transient topsoil humus (`x` in `[0,1]`).
 fn updatePhase0FluidState(
     pi: u32,
     atomicNum: u32,
@@ -1439,7 +1059,6 @@ fn updatePhase0FluidState(
     var comp = clamp(round(curLifeState.y), 0.0, 2.0);
     var alt = clamp(curLifeState.z, 0.0, 1.0);
 
-    // Bootstrap uninitialized gas vs ocean liquid cleanly on frame 0
     if (curLifeState.y <= 0.001 && curLifeState.z <= 0.001 && oc.w >= 0.48 && (isWaterAtom || isSolubleIon)) {
         if (atomicNum == 1u || isSolubleIon || hashFloat(pi, frameU, 71u) < 0.72) {
             comp = 1.0;
@@ -1447,7 +1066,6 @@ fn updatePhase0FluidState(
     }
 
     if (valence == 0u) {
-        // Inert noble gases (He, Ne, Ar) remain purely atmospheric
         let convectTarget = clamp(0.18 + 0.55 * solar + 0.15 * oroLift, 0.08, 0.92);
         alt = clamp(mix(alt, convectTarget, clamp(0.45 * dtHyd, 0.0, 0.15)), 0.0, 1.0);
         return vec4f(soilHumus, 0.0, alt, 0.0);
@@ -1456,18 +1074,13 @@ fn updatePhase0FluidState(
     let inSea = oc.w >= 0.44;
     if (isWaterAtom) {
         if (inSea) {
-            // Sea-ice freeze/thaw cycle
             if (tHabK < 271.35) {
-                comp = 2.0;
-                alt = 0.0;
+                comp = 2.0; alt = 0.0;
             } else if (comp > 1.5 && tHabK >= 272.2) {
-                comp = 1.0;
-                alt = 0.0;
+                comp = 1.0; alt = 0.0;
             }
-            // Evaporation (Liquid -> Vapor) vs Rain/Fog condensation (Vapor -> Liquid)
             if (comp >= 0.5 && comp < 1.5) {
                 let pEvap = clamp(0.08 * seaEvapFlux * (0.65 + 0.65 * solar) * dtHyd, 0.0, 0.09);
-                // Keep free O2 reservoir mostly gaseous unless coupled with H
                 let waterBias = select(0.58, 1.0, atomicNum == 1u);
                 if (hashFloat(pi, frameU, 72u) < pEvap * waterBias) {
                     comp = 0.0;
@@ -1477,50 +1090,39 @@ fn updatePhase0FluidState(
                 let condenseDrive = smoothstep(0.68, 0.96, rh) * 0.65 + smoothstep(0.3, 4.5, precipMm) * 1.15;
                 let pCond = clamp(0.16 * condenseDrive * dtHyd, 0.0, 0.16);
                 if (hashFloat(pi, frameU, 73u) < pCond) {
-                    comp = 1.0;
-                    alt = 0.0;
+                    comp = 1.0; alt = 0.0;
                 }
             }
         } else {
-            // Continental Vapor -> Orographic / RH Rainout, and Liquid runoff -> Vapor evaporation
-            if (comp > 1.5) {
-                comp = 1.0;
-            }
+            if (comp > 1.5) { comp = 1.0; }
             if (comp < 0.5) {
                 let oroTrig = smoothstep(0.08, 0.85, oroLift) * (0.45 + 0.55 * rh);
                 let rainTrig = smoothstep(0.25, 4.0, precipMm) + smoothstep(0.74, 0.98, rh) * 0.65;
                 let pRain = clamp(0.18 * (oroTrig + rainTrig) * dtHyd, 0.0, 0.18);
                 if (hashFloat(pi, frameU, 74u) < pRain) {
-                    comp = 1.0;
-                    alt = 0.0;
+                    comp = 1.0; alt = 0.0;
                 }
             } else {
                 let pEvapLand = clamp(0.055 * (vpdLand * 0.45 + 0.45 * solar) * (1.0 - 0.65 * smoothstep(0.3, 4.0, precipMm)) * dtHyd, 0.0, 0.075);
                 if (hashFloat(pi, frameU, 75u) < pEvapLand) {
-                    comp = 0.0;
-                    alt = 0.24;
+                    comp = 0.0; alt = 0.24;
                 }
             }
         }
     } else if (isCarbonAtom) {
-        // Retrograde SST solubility for CO2-analog (C): cold/upwelling oceans absorb; warm seas/land emit gas
         if (inSea) {
             let coldDissolve = clamp((1.15 - smoothstep(276.0, 298.0, tHabK)) + 0.45 * upwell, 0.0, 1.5);
             if (comp < 0.5 && hashFloat(pi, frameU, 76u) < clamp(0.12 * coldDissolve * dtHyd, 0.0, 0.12)) {
-                comp = 1.0;
-                alt = 0.0;
+                comp = 1.0; alt = 0.0;
             } else if (comp >= 0.5 && tHabK > 292.0 && hashFloat(pi, frameU, 77u) < clamp(0.09 * smoothstep(292.0, 305.0, tHabK) * dtHyd, 0.0, 0.10)) {
-                comp = 0.0;
-                alt = 0.18;
+                comp = 0.0; alt = 0.18;
             }
         } else {
             comp = 0.0;
         }
     } else if (isSolubleIon) {
         comp = select(0.0, 1.0, inSea || soilHumus > 0.25);
-        if (comp >= 0.5) {
-            alt = 0.0;
-        }
+        if (comp >= 0.5) { alt = 0.0; }
     } else {
         comp = 0.0;
     }
@@ -1544,7 +1146,7 @@ fn finalizeBioUnified(
     valence: u32,
     atomLoad: f32,
     curLifeState: vec4f,
-    myPad: f32,
+    curBlob: vec4u,
     curMdp: MdpState,
     windRaw: vec3f,
     oc: vec4f,
@@ -1552,7 +1154,6 @@ fn finalizeBioUnified(
     uvSample: vec4f,
     hydroSample: vec2f,
     terrainSample: vec4f,
-    envGrads: BioEnvGrads,
     acc: BioUnifiedAccum,
     bio: BioLink,
 ) -> BioStepResult {
@@ -1581,7 +1182,7 @@ fn finalizeBioUnified(
     let uvStress = uvRes.y * mix(1.0, max(0.38, 1.0 - 0.50 * seaFogCondense - 0.32 * rainWash), hBlend);
     let frameU = u32(max(bio.frame, 0.0)) + u32(max(bio.seedHash, 0.0));
 
-    // Inorganic Crustal Mineral (`myPhase == 3u`): stability, dual-layer wind/current erosion & thermal geochemistry
+    // Inorganic Crustal Mineral (`myPhase == 3u`)
     if (myPhase == 3u) {
         if (bio.mineralEnabled <= 0.5) {
             return bioStepOnly(vec4f(clamp(curLifeState.x, 0.1, 1.25), curLifeState.y, curLifeState.z, curLifeState.w), vec4f(0.0));
@@ -1592,7 +1193,6 @@ fn finalizeBioUnified(
         let integ = clamp(curLifeState.x, 0.02, 1.25);
         let nutr = clamp(curLifeState.y, 0.0, 1.0);
         var haz = clamp(curLifeState.z, 0.0, 1.0);
-        // Geological weathering is comparatively slow (~4x slower than metabolic chemistry & life)
         let dtMin = bio.dt * max(bio.mineralRate, 0.0) * 0.24;
         let liveGrade = u32(clamp(round(acc.nearMineralCount * 1.35 + nutr * 2.5), 0.0, 15.0));
 
@@ -1612,7 +1212,6 @@ fn finalizeBioUnified(
             waterErode = (inWater * (0.65 + 3.0 * curNorm) + landFrac * rainWash * 2.2 * hBlend) * evapDissolveT;
             airErode = (1.0 - inWater) * (0.07 * windNorm + 0.18 * windNorm * windNorm);
         } else if (mType == MINERAL_CARBONATE) {
-            // Carbonate exhibits retrograde solubility: cold polar seas dissolve faster than warm tropical waters
             let coldCarbDissolve = mix(1.0, clamp(1.38 - 0.65 * smoothstep(278.0, 303.0, tHabK), 0.70, 1.55), tBlend);
             waterErode = (inWater * (0.14 + 1.05 * curNorm) + landFrac * rainWash * 0.45 * hBlend) * coldCarbDissolve;
             airErode = (1.0 - inWater) * (0.09 + 0.65 * windNorm) + freezeThaw;
@@ -1626,7 +1225,6 @@ fn finalizeBioUnified(
                 haz = clamp(haz + 0.48 * hotOx * dtMin, 0.0, 1.0);
             }
         } else {
-            // Hydrated Clay: stable underwater/moist coasts, desiccates faster under hot continental heat, UV, high VPD, or frost
             waterErode = inWater * (0.04 + 0.20 * curNorm);
             let clayHeat = mix(1.0, clamp(0.75 + 0.75 * smoothstep(294.0, 316.0, tHabK), 0.75, 1.55), tBlend) * (1.0 + 0.30 * uvStress);
             let clayDry = mix(1.0, clamp(0.75 + 0.45 * smoothstep(1.2, 4.0, vpdLand) - 0.35 * smoothstep(0.4, 0.95, rh) - 0.45 * rainWash, 0.35, 1.50), hBlend);
@@ -1640,7 +1238,6 @@ fn finalizeBioUnified(
         }
         nextInteg = clamp(nextInteg, 0.0, 1.25);
 
-        // Slow weathered spalling / dissolution (`3 -> 0`), kicking freed elements down active wind/current plumes
         let pSpall = clamp(erodeRate * (1.20 - 0.72 * clamp(nextInteg, 0.0, 1.0)) * dtMin * 1.15, 0.0, 0.045);
         if (nextInteg <= 0.10 || (erodeRate > 0.04 && hashFloat(pi, frameU, 65u) < pSpall)) {
             let flowPlume = select(windSim, curSim, inWater >= 0.45) * 6.5;
@@ -1703,6 +1300,7 @@ fn finalizeBioUnified(
     let nChem = max(u32(bio.chemColours), 1u);
     let nBio = max(u32(bio.bioColours), 1u);
 
+    // Phase 0: Fluid Chemistry (emergent mineral nucleation + strictly close-contact assimilation driven by MDP allocation)
     if (myPhase == 0u) {
         let chemForce = finalizeChemBioForce(acc, bio);
         let bondEase = 1.0 / (1.0 + 0.55 * max(atomLoad, 0.0));
@@ -1724,14 +1322,13 @@ fn finalizeBioUnified(
             return bioStepOnly(nextFluid, chemForce);
         }
 
-        let adjColors = countOneBits(acc.adjSpeciesMask);
-        let adjCount = acc.adjBlobCount;
-        let adjAvgE = acc.adjEnergySum / max(adjCount, 1.0);
-        let hasAdj = adjCount > 0.5;
-        let adjGene = select(
+        let contactCount = acc.contactCount;
+        let contactAvgE = acc.contactEnergySum / max(contactCount, 1.0);
+        let avgLipidAlloc = acc.contactLipidAllocSum / max(contactCount, 1.0);
+        let contactGene = select(
             acc.bestLipidGene,
-            u32(clamp(round(acc.adjGeneSum / max(adjCount, 1.0)), 0.0, 15.0)),
-            hasAdj,
+            u32(clamp(round(f32(acc.contactBestGene)), 0.0, 15.0)),
+            contactCount > 0.5,
         );
         let avgLipidE = acc.nearLipidEnergySum / max(acc.nearLipidCount, 1.0);
         let eBase = sphereEastBasis(pos);
@@ -1746,25 +1343,21 @@ fn finalizeBioUnified(
         let clayCatBoost = 1.0 + 0.85 * clamp(acc.nearClayCat, 0.0, 1.5);
         let landEnvFertile = clamp(0.36 + 0.68 * landHydration + 0.35 * curLifeState.x + 0.22 * clamp(acc.nearLipidCount * 0.25, 0.0, 1.0), 0.28, 1.35);
         let envMedia = mix(0.55 + 0.85 * upwell, landEnvFertile, landFrac) * clayCatBoost;
-        let hostGrad = acc.adjGradCount >= 1.5;
+        let hostGrad = acc.contactBestGrad == 1u;
 
-        // 0A. Deferred biogenic lipid bilayer synthesis (`0 -> 2`, strictly C/H/O only; works across ocean and land)
-        let kinCoherence = length(vec2f(acc.adjKinCos, acc.adjKinSin)) / max(acc.adjKinW, 1e-4);
-        if (isLipidElement(atomicNum, valence) && adjCount >= 3.0 && kinCoherence > 0.80) {
-            let matureDeNovo = (adjColors >= encapReqColors(adjGene)) && (adjCount >= encapReqSize(adjGene)) && (adjAvgE > 0.54);
-            let expandExisting = (acc.nearLipidCount >= 1.0) && (adjColors >= 3u) && (adjCount >= 3.0) && (max(adjAvgE, avgLipidE) > 0.48);
-            let maxLocalLipids = select(7.0, 12.0, hostGrad);
+        // 0A. Emergent Lipid Bilayer Synthesis (`0 -> 2`): driven strictly by host MDP `lipidAlloc` lever on close contact
+        if (isLipidElement(atomicNum, valence) && contactCount >= 1.0 && avgLipidAlloc > 0.24 && max(contactAvgE, avgLipidE) > 0.48) {
+            let maxLocalLipids = select(7.5, 11.5, hostGrad);
             let lipidHeadroom = clamp(1.0 - acc.nearLipidCount / maxLocalLipids, 0.0, 1.0);
-            if ((matureDeNovo || expandExisting) && lipidHeadroom > 0.05) {
-                let zipBoost = select(1.0, 1.65, expandExisting && acc.nearLipidCount < 5.0) * select(1.0, 1.50, hostGrad);
+            if (lipidHeadroom > 0.05) {
                 let pLipid = clamp(
-                    0.85 * zipBoost * q10Bio * solar * envMedia * clamp(max(adjAvgE, avgLipidE), 0.5, 1.4) * lipidHeadroom * bondEase * dtBio,
+                    0.75 * avgLipidAlloc * q10Bio * max(solar, 0.12) * envMedia * clamp(max(contactAvgE, avgLipidE), 0.5, 1.4) * lipidHeadroom * bondEase * dtBio,
                     0.0,
-                    0.20,
+                    0.18,
                 );
                 if (hashFloat(pi, frameU, 30u) < pLipid) {
-                    let hostSp = min(select(select(acc.bestLipidSp, acc.bestAdjSp, acc.bestAdjW > 0.0), acc.bestFixSp, acc.bestFixW > 0.0), nBio - 1u);
-                    let hostKin = select(select(acc.bestLipidKin, acc.bestAdjKin, acc.bestAdjW > 0.0), acc.bestFixKin, acc.bestFixW > 0.0);
+                    let hostSp = min(select(acc.bestLipidSp, acc.contactBestSp, acc.contactBestW > 0.0), nBio - 1u);
+                    let hostKin = select(acc.bestLipidKin, acc.contactBestKin, acc.contactBestW > 0.0);
                     var initOrient = -outwardDir;
                     if (acc.nearLipidCount >= 1.5 && acc.lipidCentW > 1e-4 && acc.blobCentW > 1e-4) {
                         let bLen = length(acc.blobCentroid);
@@ -1780,124 +1373,75 @@ fn finalizeBioUnified(
                         }
                     }
                     let lipidGrad = select(0u, 1u, hostGrad);
-                    return bioStepOnly(
-                        vec4f(0.78, 0.06, 0.0, packLifeMetaGrad(2u, hostSp, hostKin, adjGene, lipidGrad)),
+                    return BioStepResult(
+                        vec4f(0.76, 0.06, 0.0, packLifeMetaGrad(2u, hostSp, hostKin, contactGene, lipidGrad)),
                         vec4f(initOrient, 2.0),
+                        emptyMdpState(),
+                        vec4u(pi, 0u, 0u, 0u),
                     );
                 }
             }
         }
 
-        // 0B. Transmembrane nutrient import into encapsulated protocells OR autotrophic/consumer assimilation (`0 -> 1`)
-        // (No arbitrary colony-size cap: only extreme physical steric saturation blocks import.)
+        // 0B. Close-Contact Cytoplasm Assimilation (`0 -> 1`): no hard-coded fixer presets, strictly physical contact growth
         let stericHeadroom = clamp(1.0 - acc.nearTotalBio / 220.0, 0.0, 1.0);
-        if (acc.nearLipidCount >= 1.0 && adjCount >= 1.0) {
-            if (stericHeadroom > 0.02 && max(adjAvgE, avgLipidE) > 0.50) {
-                let fixPow = clamp(max(acc.nearFixer, acc.nearLipidCount * 0.6), 0.4, 3.0);
-                let pImport = clamp(
-                    0.32 * select(1.0, 1.25, hostGrad) * q10Bio * max(solar, 0.08) * envMedia * fixPow * stericHeadroom * bondEase * dtBio,
-                    0.0,
-                    0.10,
-                );
-                if (hashFloat(pi, frameU, 10u) < pImport) {
-                    let hostSp = min(select(acc.bestAdjSp, acc.bestFixSp, acc.bestFixW > 0.0), nBio - 1u);
-                    let hostKin = select(acc.bestAdjKin, acc.bestFixKin, acc.bestFixW > 0.0);
-                    let hostNiche = select(acc.bestAdjNiche, acc.bestFixNiche, acc.bestFixW > 0.0);
-                    var nextSp = hostSp;
-                    if (nBio > 1u && hashFloat(pi, frameU, 11u) < encapNoveltyDrive(adjGene, adjColors)) {
-                        nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
-                    }
-                    let childGene = mutateEncapGene(adjGene, pi, frameU, 17u, 0.06);
-                    let childGrad = select(0u, 1u, hostGrad && (acc.nearLipidCount >= 1.0 || acc.adjGradCount >= 3.0));
-                    let childTraits = getBioSpeciesTraits(nChem, nBio, nextSp);
-                    let defRoot = clamp(0.56 + 0.55 * (childTraits.x - childTraits.w * 0.65), 0.08, 0.95);
-                    let childPrefOc = select(oc.w, unpackPrefOc(hostNiche), hasValidBioNiche(hostNiche));
-                    let childPrefT = select(tHabK, unpackPrefTempK(hostNiche), hasValidBioNiche(hostNiche));
-                    let childPrefSol = select(clamp(uvSample.y / 12.0, 0.0, 1.0), unpackPrefSolar(hostNiche), hasValidBioNiche(hostNiche));
-                    let childRoot = select(defRoot, unpackRootGene(hostNiche), hasValidBioNiche(hostNiche));
-                    let childIsProd = childTraits.x >= childTraits.w * 0.72;
-                    let childAct = unpackMdpAction(hostNiche);
-                    let childPad = packBioNiche(childPrefOc, childPrefT, childPrefSol, childRoot, select(0.0, childRoot, childIsProd), childIsProd, childAct);
-                    let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_THRIVING, childAct, 12u, 1u)));
-                    return BioStepResult(
-                        vec4f(0.68, 0.06, 0.0, packLifeMetaGrad(1u, nextSp, hostKin, childGene, childGrad)),
-                        vec4f(-outwardDir * 2.2, childPad),
-                        childMdp,
-                    );
+        if (contactCount >= 1.0 && stericHeadroom > 0.02 && contactAvgE > 0.48) {
+            let growthAlloc = clamp(1.0 - 0.55 * avgLipidAlloc, 0.25, 1.0);
+            let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
+            let pAssimilate = clamp(
+                0.38 * growthAlloc * q10Bio * max(solar, 0.08) * envMedia * clamp(contactCount * 0.5, 0.5, 2.8) * elemAffinity * stericHeadroom * bondEase * dtBio,
+                0.0,
+                0.10,
+            );
+            if (hashFloat(pi, frameU, 10u) < pAssimilate) {
+                var nextSp = min(acc.contactBestSp, nBio - 1u);
+                let pMut = clamp(0.032 * clayCatBoost * (1.0 + 0.75 * uvStress) * growthAlloc, 0.01, 0.14);
+                if (nBio > 1u && hashFloat(pi, frameU, 11u) < pMut) {
+                    nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.contactSpeciesMask, pi, frameU, 40u);
                 }
-            }
-        } else if (acc.nearFixer > 0.0) {
-            if (stericHeadroom > 0.02) {
-                let elemAffinity = 0.85 + 0.35 * elemSolarWeight(atomicNum);
-                let pFix = clamp(
-                    0.36 * q10Bio * max(solar, 0.08) * envMedia * min(acc.nearFixer, 3.0) * elemAffinity * stericHeadroom * bondEase * dtBio,
-                    0.0,
-                    0.10,
+                let childGene = mutateGene(acc.contactBestGene, pi, frameU, 17u, 0.05);
+                let childGrad = select(0u, 1u, hostGrad && acc.nearLipidCount >= 1.0);
+                let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, 0u, 12u, 1u)));
+                return BioStepResult(
+                    vec4f(0.68, 0.06, 0.0, packLifeMetaGrad(1u, nextSp, acc.contactBestKin, childGene, childGrad)),
+                    vec4f(0.0),
+                    childMdp,
+                    vec4u(pi, 0u, 0u, 0u),
                 );
-                if (hashFloat(pi, frameU, 10u) < pFix) {
-                    var nextSp = min(acc.bestFixSp, nBio - 1u);
-                    let pDiff = select(0.18, 0.07, adjColors >= 6u);
-                    if (nBio > 1u && hashFloat(pi, frameU, 11u) < pDiff) {
-                        nextSp = pickCompatibleNovelSpecies(nChem, nBio, nextSp, acc.adjSpeciesMask, pi, frameU, 40u);
-                    }
-                    let childGene = mutateEncapGene(acc.bestFixGene, pi, frameU, 17u, 0.05);
-                    let childTraits = getBioSpeciesTraits(nChem, nBio, nextSp);
-                    let defRoot = clamp(0.56 + 0.55 * (childTraits.x - childTraits.w * 0.65), 0.08, 0.95);
-                    let parentNiche = acc.bestFixNiche;
-                    let childPrefOc = select(oc.w, unpackPrefOc(parentNiche), hasValidBioNiche(parentNiche));
-                    let childPrefT = select(tHabK, unpackPrefTempK(parentNiche), hasValidBioNiche(parentNiche));
-                    let childPrefSol = select(clamp(uvSample.y / 12.0, 0.0, 1.0), unpackPrefSolar(parentNiche), hasValidBioNiche(parentNiche));
-                    let childRoot = select(defRoot, unpackRootGene(parentNiche), hasValidBioNiche(parentNiche));
-                    let childIsProd = childTraits.x >= childTraits.w * 0.72;
-                    let childAct = unpackMdpAction(parentNiche);
-                    let childPad = packBioNiche(childPrefOc, childPrefT, childPrefSol, childRoot, select(0.0, childRoot, childIsProd), childIsProd, childAct);
-                    let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.66, 0.0, 0.0, packMdpCtrl(MDP_STATE_THRIVING, childAct, 12u, 1u)));
-                    return BioStepResult(
-                        vec4f(0.66, 0.06, 0.0, packLifeMeta(1u, nextSp, acc.bestFixKin, childGene)),
-                        vec4f(0.0, 0.0, 0.0, childPad),
-                        childMdp,
-                    );
-                }
             }
         }
 
-        // 0C. Abiogenesis / spore floor in sunlit water OR moist vegetated land (balanced producer + hunter/consumer lineages)
+        // 0C. Neutral Abiogenesis / Spore Nucleation (`0 -> 1`): uniform random species + tabula-rasa priors
         let wetLandSpore = (oc.w < 0.46) && (rainWash > 0.12 || landHydration > 0.45) && (tHabK > 274.5) && (elevKm < 3.6);
-        if (acc.nearTotalBio < 1.5 && acc.nearLipidCount < 0.5 && (oc.w >= 0.46 || wetLandSpore)) {
+        if (acc.nearTotalBio < 1.2 && acc.nearLipidCount < 0.5 && (oc.w >= 0.46 || wetLandSpore)) {
             let siteFertility = select(0.50 + upwell, clamp(0.45 + 0.85 * landHydration, 0.25, 1.45), wetLandSpore);
             let pSpore = clamp(0.0034 * q10Bio * max(solar, 0.04) * siteFertility * dtBio, 0.0, 0.0065);
             if (hashFloat(pi, frameU, 13u) < pSpore) {
-                let randSp = u32(floor(hashFloat(pi, frameU, 14u) * f32(nBio))) % nBio;
-                let prodBias = select(0.42, 0.76, wetLandSpore);
-                let sp = select(randSp, pickCohesiveProducerSpecies(nChem, nBio, pi, frameU, 14u), hashFloat(pi, frameU, 18u) < prodBias);
+                let sp = u32(floor(hashFloat(pi, frameU, 14u) * f32(nBio))) % nBio;
                 let freshKin = hashFloat(pi, frameU, 15u) * TWO_PI;
                 let freshGene = u32(floor(hashFloat(pi, frameU, 16u) * 16.0)) & 15u;
-                let spTraits = getBioSpeciesTraits(nChem, nBio, sp);
-                let rootJitter = (hashFloat(pi, frameU, 34u) - 0.5) * 0.56;
-                let rootGene0 = clamp(0.56 + 0.55 * (spTraits.x - spTraits.w * 0.65) + rootJitter, 0.04, 0.96);
-                let isProd0 = spTraits.x >= spTraits.w * 0.72;
-                let initAct = select(MDP_ACT_HUNT, MDP_ACT_FORAGE, isProd0);
-                let sporePad = packBioNiche(oc.w, tHabK, clamp(uvSample.y / 12.0, 0.0, 1.0), rootGene0, select(0.0, rootGene0, isProd0), isProd0, initAct);
-                let sporeMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, sp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_THRIVING, initAct, 12u, 1u)));
+                let initAct = u32(floor(hashFloat(pi, frameU, 18u) * 4.0)) & 3u;
+                let sporeMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, sp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, initAct, 8u, 1u)));
                 return BioStepResult(
                     vec4f(0.68, 0.06, 0.0, packLifeMeta(1u, sp, freshKin, freshGene)),
-                    vec4f(0.0, 0.0, 0.0, sporePad),
+                    vec4f(0.0),
                     sporeMdp,
+                    vec4u(pi, 0u, 0u, 0u),
                 );
             }
-        }
-
-        // 0D. Geochemical nucleation into crustal minerals (`0 -> 3`) when unassimilated
-        let crystBioRes = attemptMineralCrystallize(
-            pi, pos, atomicNum, valence, bondEase,
-            solar, upwell, oc, tHabK, tSample.w, hydroSample, landFrac, windNorm, curNorm, frameU, acc, bio,
-        );
-        if (unpackPhase(crystBioRes.nextLifeState.w) == 3u) {
-            return crystBioRes;
         }
 
         return bioStepOnly(nextFluid, chemForce);
     }
+
+    // Leader election step (for all living `phase == 1u || phase == 2u`)
+    var nextLeaderId = pi;
+    var nextLeaderHops = 0u;
+    if (acc.bestLeaderId < pi && acc.bestLeaderHops <= MAX_LEADER_HOPS) {
+        nextLeaderId = acc.bestLeaderId;
+        nextLeaderHops = acc.bestLeaderHops;
+    }
+    let outBlob = vec4u(nextLeaderId, nextLeaderHops, curBlob.z, curBlob.w);
 
     let myBioSp = min(unpackBioSpecies(curLifeState.w), nBio - 1u);
     let myKin = unpackKinPhase(curLifeState.w);
@@ -1905,7 +1449,7 @@ fn finalizeBioUnified(
     let myGrad = unpackGraduated(curLifeState.w);
     let dtVit = dtBio * 1.8;
 
-    // Amphiphilic Lipid Bilayer (`myPhase == 2u`): sustained by host cytoplasm + lateral diffusion, dissolves back to C/H/O on rupture
+    // Phase 2: Amphiphilic Lipid Bilayer (`myPhase == 2u`)
     if (myPhase == 2u) {
         let totalWeight = 1.0 + acc.blobWeightSum;
         let avgE = (curLifeState.x + acc.blobEnergySum) / totalWeight;
@@ -1916,11 +1460,8 @@ fn finalizeBioUnified(
         if (acc.blobKinWeight > 0.01) {
             let goalKin = wrapAngle(atan2(acc.blobKinSin, acc.blobKinCos));
             var dAngle = goalKin - myKin;
-            if (dAngle > PI) {
-                dAngle -= TWO_PI;
-            } else if (dAngle < -PI) {
-                dAngle += TWO_PI;
-            }
+            if (dAngle > PI) { dAngle -= TWO_PI; }
+            else if (dAngle < -PI) { dAngle += TWO_PI; }
             nextKin = wrapAngle(myKin + dAngle * clamp(3.5 * dtBio, 0.0, 0.30));
         }
 
@@ -1935,21 +1476,18 @@ fn finalizeBioUnified(
 
         let lipHealthy = (acc.blobCount >= 1.0 || acc.blobLipidCount >= 2.0);
         let gradNow = (myGrad == 1u && lipHealthy && (acc.blobGradCount >= 1.5 || acc.blobCount >= 8.0)) ||
-            (acc.blobGradCount >= 3.0 && acc.blobCount >= 20.0);
+            (acc.blobGradCount >= 3.0 && acc.blobCount >= 16.0);
         let heatLipidStress = (smoothstep(307.0, 323.0, tHabK) * tBlend + 0.65 * oceanBleachBoost) * 0.09;
         let coldLipidStab = mix(1.0, 0.78, smoothstep(278.0, 266.0, tHabK) * tBlend);
-        let upkeep = select(0.55, select(0.055, 0.036, gradNow), lipHealthy);
+        let upkeep = select(0.45, select(0.055, 0.036, gradNow), lipHealthy);
         let poisonPenalty = 0.24 * poi;
         let landPenalty = 0.045 * landFrac * mix(1.0, clamp(0.28 + 1.35 * aridStress - 0.30 * landHydration, 0.16, 2.1), hBlend);
         let nextEnergy = clamp(eDiffused - (upkeep + poisonPenalty + landPenalty + heatLipidStress) * dtVit, 0.02, 1.45);
         let hostIsGrad = gradNow && (nextEnergy >= 0.36) && (poi < 0.72);
 
-        let hostColors = countOneBits(acc.blobSpeciesMask);
-        let simpleHostStress = (acc.blobCount >= 1.0 && hostColors <= 2u && acc.blobLipidCount >= 2.0);
-        let orphanStress = (acc.blobCount < 0.5 && nextEnergy < 0.52);
-        if (nextEnergy <= 0.14 || poi >= 0.85 || orphanStress || simpleHostStress) {
-            let pDissolve = select(clamp(0.65 * coldLipidStab * dtBio, 0.0, 0.18), clamp(2.4 * dtBio, 0.0, 0.35), simpleHostStress);
-            if (hashFloat(pi, frameU, 31u) < pDissolve) {
+        let orphanStress = (acc.blobCount < 0.5 && nextEnergy < 0.45);
+        if (nextEnergy <= 0.14 || poi >= 0.85 || orphanStress) {
+            if (hashFloat(pi, frameU, 31u) < clamp(0.65 * coldLipidStab * dtBio, 0.0, 0.18)) {
                 var cause = DEATH_MEMBRANE;
                 if (poi >= 0.85) { cause = DEATH_POISON; }
                 else if (nextEnergy <= 0.14) {
@@ -1962,8 +1500,8 @@ fn finalizeBioUnified(
                 );
             }
         }
-        if (acc.nearPredThreat > 1.15) {
-            let pBreach = clamp(0.20 * (acc.nearPredThreat - 1.0) * select(1.0, 0.42, hostIsGrad) * dtBio, 0.0, 0.05);
+        if (acc.contactEngulfPress > 0.35) {
+            let pBreach = clamp(0.24 * acc.contactEngulfPress * select(1.0, 0.45, hostIsGrad) * dtBio, 0.0, 0.06);
             if (hashFloat(pi, frameU, 32u) < pBreach) {
                 return bioStepOnly(
                     deadCell(DEATH_PREDATION),
@@ -1972,131 +1510,62 @@ fn finalizeBioUnified(
             }
         }
 
-        return bioStepOnly(
+        return BioStepResult(
             vec4f(nextEnergy, vit, poi, packLifeMetaGrad(2u, myBioSp, nextKin, nextGene, select(0u, 1u, hostIsGrad))),
             vec4f(0.0),
+            emptyMdpState(),
+            outBlob,
         );
     }
 
-    // Current particle is living Particle Life cytoplasm (`myPhase == 1u`)
-    let myTraits = getBioSpeciesTraits(nChem, nBio, myBioSp);
+    // Phase 1: Living Cytoplasm (`myPhase == 1u`)
     let curVel = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
     let mySelfSpeed = length(vel - curVel);
+    let motility = clamp(mySelfSpeed / 0.16, 0.0, 1.5);
+    let curPol = evalCombinedMdpPolicy(curBlob.z);
 
-    // Average local blob traits & stoichiometry over self + cohesive same-blob neighbors
     let nMembers = 1.0 + acc.blobCount;
     let avgBlobE = (curLifeState.x + acc.blobEnergySum) / nMembers;
     let avgBlobVit = (curLifeState.y + acc.blobVitSum) / nMembers;
-    let avgCoh = (myTraits.x + acc.blobCohSum) / nMembers;
-    let avgAsym = (myTraits.w + acc.blobAsymSum) / nMembers;
-    let avgSolarFrac = (elemSolarWeight(atomicNum) + acc.blobSolarAtomSum) / nMembers;
-    let avgRedoxFrac = (elemRedoxWeight(atomicNum) + acc.blobRedoxAtomSum) / nMembers;
-    let avgSelfSpeed = (mySelfSpeed + acc.blobSpeedSum) / nMembers;
-
     let mySpeciesMask = acc.blobSpeciesMask | (1u << (myBioSp % 24u));
     let myDistinctColors = countOneBits(mySpeciesMask);
     let membraneShield = clamp(acc.blobLipidCount / 6.0, 0.0, 1.0);
     let lipPresent = (acc.blobLipidCount >= 0.8) || (acc.blobLipidGradCount >= 0.5) || (acc.blobGradCount >= 4.0);
-    let isGradMaintain = (myGrad == 1u) && (acc.blobCount >= 18.0) && (curLifeState.x >= 0.38) && (curLifeState.z < 0.65) && lipPresent;
-    let isGradSpread = (acc.blobGradCount >= 2.5) && (acc.blobCount >= 24.0) && (avgBlobE >= 0.62) && (curLifeState.z < 0.40) && ((acc.blobLipidCount >= 1.0) || (acc.blobGradCount >= 5.0));
-    let isGradNow = isGradMaintain || isGradSpread;
-    let isGradNowF = select(0.0, 1.0, isGradNow);
+    let isGradMaintain = (myGrad == 1u) && (acc.blobCount >= 14.0) && (curLifeState.x >= 0.38) && (curLifeState.z < 0.65) && lipPresent;
+    let isGradSpread = (acc.blobGradCount >= 2.5) && (acc.blobCount >= 18.0) && (avgBlobE >= 0.60) && (curLifeState.z < 0.40) && ((acc.blobLipidCount >= 1.0) || (acc.blobGradCount >= 5.0));
+    let isGradEmergent = (acc.blobLipidCount >= 4.0) && (acc.blobCount >= 16.0) && (myDistinctColors >= 5u) && (avgBlobE >= 0.72) && (curLifeState.z < 0.25);
+    let isGradNow = isGradMaintain || isGradSpread || isGradEmergent;
     let nextGene = select(
         myGene,
         u32(clamp(round(mix(f32(myGene), (f32(myGene) + acc.blobGeneSum) / nMembers, clamp(2.5 * dtBio, 0.0, 0.25))), 0.0, 15.0)),
         acc.blobCount > 0.0,
     );
 
-    let motility = clamp(avgSelfSpeed / 0.16, 0.0, 1.5);
-    let lightExposure = clamp(1.12 - 0.0025 * acc.nearTotalBio, 0.70, 1.0);
-
-    let autoCap = clamp(
-        (0.42 + 0.90 * avgCoh) * (0.50 + 0.85 * avgSolarFrac) * lightExposure / (1.0 + 0.42 * motility),
-        0.12,
-        1.55,
-    );
-    let predCap = clamp(
-        (0.24 + 0.95 * avgAsym) * (0.40 + 0.85 * motility) * (0.68 + 0.52 * avgRedoxFrac),
-        0.05,
-        1.65,
-    );
-    let decompCap = clamp(
-        (0.30 + 0.90 * avgRedoxFrac) * (0.55 + 0.55 * (1.0 - min(motility, 1.0))),
-        0.10,
-        1.40,
-    );
-    let haloTol = clamp(0.25 + 0.65 * avgRedoxFrac + 0.25 * avgCoh, 0.0, 1.0);
-
-    // Evolved Zone Niche & Rooted-vs-Mobile Producer Style (stored in p._pad across frames)
-    let consumerDrive = max(predCap * 1.08, decompCap * 0.86) * (1.0 + 0.45 * clamp(avgAsym - avgCoh * 0.65, 0.0, 0.65));
-    let isProducer = (autoCap >= consumerDrive * 1.15) && (avgSolarFrac >= 0.28);
-    let initPrefSol = clamp(uvSample.y / 12.0, 0.0, 1.0);
-    let rootVar = (hashFloat(pi, 0u, 36u) - 0.5) * 0.44;
-    let initRoot = clamp(0.56 + 0.55 * (avgCoh - avgAsym * 0.65) + rootVar, 0.05, 0.96);
-    var prefOc = select(oc.w, unpackPrefOc(myPad), hasValidBioNiche(myPad));
-    var prefTempK = select(tHabK, unpackPrefTempK(myPad), hasValidBioNiche(myPad));
-    var prefSolar = select(initPrefSol, unpackPrefSolar(myPad), hasValidBioNiche(myPad));
-    var rootGene = select(initRoot, unpackRootGene(myPad), hasValidBioNiche(myPad));
-
-    if (acc.nicheWeight > 0.05) {
-        let nw = acc.nicheWeight;
-        let consOc = acc.nicheOcSum / nw;
-        let consTemp = acc.nicheTempSum / nw;
-        let consSol = acc.nicheSolarSum / nw;
-        let consRoot = acc.nicheRootSum / nw;
-        let nAlpha = clamp(1.8 * dtBio, 0.0, 0.22);
-        prefOc = mix(prefOc, consOc, nAlpha);
-        prefTempK = mix(prefTempK, consTemp, nAlpha);
-        prefSolar = mix(prefSolar, consSol, nAlpha);
-        rootGene = mix(rootGene, consRoot, nAlpha);
-    }
-
-    // Slow somatic acclimation toward places where the organism thrives + occasional trait drift
-    if (curLifeState.x > 0.72 && curLifeState.z < 0.25) {
-        let acclimAlpha = clamp(0.08 * dtBio, 0.0, 0.035);
-        prefOc = mix(prefOc, oc.w, acclimAlpha);
-        prefTempK = mix(prefTempK, tHabK, acclimAlpha);
-        prefSolar = mix(prefSolar, initPrefSol, acclimAlpha);
-    }
-    // Rooted autotrophs anchor on habitable land, coastal shelves/upwelling reefs, or mineral substrates
-    let landAnchor = landFrac * smoothstep(268.0, 276.0, tHabK);
-    let coastShelfAnchor = smoothstep(0.30, 0.56, oc.w) * clamp(max(upwell * 0.85, 1.0 - smoothstep(0.55, 0.92, oc.w)), 0.0, 1.0);
-    let mineralShelfAnchor = clamp(acc.nearMineralCount * 0.50, 0.0, 1.0);
-    let anchorSubstrate = clamp(max(landAnchor, max(coastShelfAnchor, mineralShelfAnchor)), 0.0, 1.0);
-    let holdfastRaw = clamp((rootGene - 0.42) / 0.45, 0.0, 1.0);
-    let holdfast = select(0.0, holdfastRaw * anchorSubstrate, isProducer);
-
     let normChem = select(0.0, 1.0 / (1.0 + 0.35 * max(acc.bioChemCount - 1.0, 0.0)), acc.bioChemCount > 0.0);
-    let grazeVitBoost = select(0.0, 0.24 * min(acc.nearForeignPrey, 2.2) * predCap, acc.nearForeignPrey > 0.12 && predCap > 0.34);
-    let vitRaw = curLifeState.y + (acc.dVit * normChem + grazeVitBoost - 0.13 * rate * curLifeState.y) * dtVit;
+    let vitRaw = curLifeState.y + (acc.dVit * normChem - 0.13 * rate * curLifeState.y) * dtVit;
     let vitDiffAlpha = select(0.0, clamp(2.4 * dtBio, 0.0, 0.26), acc.blobCount > 0.0);
     let vit = clamp(mix(vitRaw, avgBlobVit, vitDiffAlpha), 0.0, 1.0);
-    let detoxRate = 0.24 + 0.45 * vit + 0.35 * max(0.0, haloTol - 0.40);
-    let poiIn = acc.dPoi * normChem * (1.0 - 0.65 * max(0.0, haloTol - 0.50)) * (1.0 - 0.72 * membraneShield);
+    let detoxRate = 0.22 + 0.48 * vit;
+    let poiIn = acc.dPoi * normChem * (1.0 - 0.72 * membraneShield);
     let poi = clamp(curLifeState.z + (poiIn - detoxRate * curLifeState.z) * dtVit, 0.0, 1.0);
 
-    // Intra-blob energy sharing (sunlit skin feeds interior; hunter head shares prey energy with tail)
+    // Intra-blob energy & kin phase synchronization
     let diffAlpha = select(0.0, clamp(2.8 * dtBio, 0.0, 0.28), acc.blobCount > 0.0);
     let eDiffused = mix(curLifeState.x, avgBlobE, diffAlpha);
 
-    // Intra-blob kin signature consensus + slow stochastic drift when isolated
     var nextKin = myKin;
     if (acc.blobKinWeight > 0.01) {
         let goalKin = wrapAngle(atan2(acc.blobKinSin, acc.blobKinCos));
         var dAngle = goalKin - myKin;
-        if (dAngle > PI) {
-            dAngle -= TWO_PI;
-        } else if (dAngle < -PI) {
-            dAngle += TWO_PI;
-        }
+        if (dAngle > PI) { dAngle -= TWO_PI; }
+        else if (dAngle < -PI) { dAngle += TWO_PI; }
         nextKin = wrapAngle(myKin + dAngle * clamp(3.0 * dtBio, 0.0, 0.25));
     } else {
         let jitter = (hashFloat(pi, frameU, 19u) * 2.0 - 1.0) * 0.004;
         nextKin = wrapAngle(myKin + jitter);
     }
 
-    // Direct measured moisture & fertility (no artificial high baseline in bone-dry deserts)
-    let coastalMoisture = smoothstep(0.08, 0.45, oc.w) * 0.42;
+    // Pure physical environmental energetics (no hard-coded producer vs consumer traits)
     let rawLandMoisture = clamp(
         0.10 + 0.62 * smoothstep(0.22, 0.90, rh) + 0.55 * rainWash + 0.28 * seaFogCondense - 0.28 * aridStress + 0.16 * membraneShield,
         0.06,
@@ -2105,96 +1574,76 @@ fn finalizeBioUnified(
     let moistureFactor = mix(1.0, mix(1.0, rawLandMoisture, hBlend), landFrac);
     let carbWaterBoost = clamp(0.84 + 0.14 * min(acc.nearCarbonFeed + acc.nearWaterFluid, 2.5), 0.80, 1.25);
     let o2RespireBoost = clamp(0.76 + 0.16 * min(acc.nearOxygenGas + ridgeVentMask * 1.4, 2.5), 0.72, 1.25);
+    let coastalMoisture = smoothstep(0.08, 0.45, oc.w) * 0.42;
     let landFertilityScale = clamp(mix(1.0, rawLandMoisture + coastalMoisture, hBlend), 0.08, 1.32) * (1.0 - 0.34 * smoothstep(2.2, 5.2, elevKm));
+    let activeFeedScale = 1.0 - 0.35 * curPol.torpor;
 
-    // Rooted autotrophs gain rhizosphere nutrient/mineral pumping; mobile autotrophs thrive in sunlit currents
-    let rootNutrPump = 1.0 + 0.34 * holdfast * clamp(0.45 + 0.45 * acc.nearMineralCount + 0.45 * acc.nearWaterFluid + 0.35 * landHydration, 0.5, 1.45);
-    let autoRatio = clamp((autoCap - predCap * 0.6) / 0.55, 0.0, 1.0);
-    let uvAcclim = clamp(0.32 * autoRatio + 0.38 * prefSolar * autoRatio, 0.0, 0.72);
-    let nightDormancy = clamp((0.18 - solar) / 0.18, 0.0, 1.0) * autoRatio * clamp(1.0 - motility * 0.65, 0.25, 1.0);
+    let solarElem = elemSolarWeight(atomicNum);
+    let redoxElem = elemRedoxWeight(atomicNum);
+    let solarGain = 0.58 * q10Bio * solar * (0.20 + 0.85 * solarElem) * mix(0.55 + 0.75 * upwell, landFertilityScale, landFrac) * moistureFactor * carbWaterBoost * activeFeedScale;
+    let engulfGain = 0.55 * min(acc.contactPreyHarvest, 2.5) * o2RespireBoost * activeFeedScale;
+    let detritusGain = 0.24 * min(acc.nearStressedBio, 2.5) * (0.25 + 0.75 * redoxElem) * o2RespireBoost * activeFeedScale;
+    let chemBonus = 0.26 * acc.dE * normChem * q10Bio;
 
-    let solarGain = 0.66 * q10Bio * solar * mix(0.55 + 0.85 * upwell, landFertilityScale, landFrac) * autoCap * moistureFactor * carbWaterBoost * rootNutrPump;
-    let haloGain = select(0.0, 0.24 * min(acc.nearHalogen + ridgeVentMask, 2.5) * haloTol, haloTol > 0.52);
-    let detritusGain = 0.32 * min(acc.nearStressedBio, 2.5) * decompCap * o2RespireBoost;
-    let grazeEnvGainBase = 0.48 * min(acc.nearForeignPrey, 2.5) * predCap * o2RespireBoost;
-    let chemBonus = 0.24 * acc.dE * normChem * q10Bio * (1.0 + 0.35 * landFrac) * rootNutrPump;
     let coldTorpor = mix(1.0, clamp(0.56 + 0.44 * smoothstep(270.0, 297.0, tHabK), 0.46, 1.15), tBlend);
-    let rootBurnDiscount = 1.0 - 0.32 * holdfast;
-    let nightBurnDiscount = 1.0 - 0.78 * nightDormancy;
-    let basalBurnBase = (0.13 + 0.065 * motility * motility + 0.025 * avgAsym) * coldTorpor * rootBurnDiscount * nightBurnDiscount * (1.0 - 0.14 * membraneShield - 0.26 * isGradNowF);
+    let basalBurn = (0.11 + 0.055 * motility * motility + 0.036 * curPol.agitation + 0.018 * curPol.lipidAlloc)
+        * coldTorpor * (1.0 - 0.48 * curPol.torpor) * (1.0 - 0.16 * membraneShield - 0.18 * select(0.0, 1.0, isGradNow));
 
-    // Inter-species competition only (arbitrary own-blob crowd cap removed so blobs & forests scale freely)
-    let foreignBio = max(0.0, acc.nearTotalBio - acc.blobCount);
-    let foreignCrowdScale = mix(1.0, 0.35, isGradNowF * membraneShield);
-    let crowdPenalty = 0.032 * max(0.0, foreignBio - 12.0) * foreignCrowdScale;
-    let poisonPenalty = 0.28 * poi * (1.0 - 0.65 * clamp(haloTol - 0.35, 0.0, 1.0));
-    let desiccationShield = clamp(0.55 * membraneShield + 0.32 * holdfast, 0.0, 0.85);
+    // Pure physical steric crowding (no arbitrary own-blob cap or foreign bonus tricks)
+    let crowdPenalty = 0.018 * max(0.0, acc.nearTotalBio - 42.0) * (1.0 - 0.45 * membraneShield);
+    let poisonPenalty = 0.26 * poi;
     let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend + 0.55 * oceanBleachBoost;
     let frostShock = smoothstep(271.0, 249.0, tHabK) * tBlend;
-    let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield) * (1.0 - 0.28 * holdfast);
-    let uvStressPenalty = 0.16 * uvStress * (1.0 - 0.72 * membraneShield) * (1.0 - uvAcclim);
-    let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * (1.0 - clamp(haloTol, 0.0, 1.0)) * 0.022 * hBlend;
-    let nightDesicEase = 1.0 - 0.55 * nightDormancy;
-    let landPenalty = (0.062 * landFrac * nightDesicEase * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.10, 2.0), hBlend) + oceanEvapOsmotic) * (1.0 - desiccationShield);
+    let thermStressPenalty = (heatShock * 0.20 + frostShock * 0.14) * (1.0 - 0.62 * membraneShield);
+    let uvStressPenalty = 0.14 * uvStress * (1.0 - 0.72 * membraneShield);
+    let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * 0.018 * hBlend;
+    let landPenalty = (0.055 * landFrac * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.10, 2.0), hBlend) + oceanEvapOsmotic)
+        * (1.0 - 0.68 * membraneShield) * (1.0 - 0.35 * curPol.torpor);
+
+    let netDE = solarGain + engulfGain + detritusGain + 0.06 * vit + chemBonus
+        - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;
+    let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, 1.85);
 
     // -------------------------------------------------------------------------
-    // Consensus-Diffused Tabular MDP + Evolutionary Per-Species Priors
+    // Particle-Level MDP (Fast Local Reflex in {0..3} -> Action in {0..3})
     // -------------------------------------------------------------------------
     let priorQPack = getSpeciesMdpPriorPack(nChem, nBio, myBioSp);
     let mdpBits = u32(round(curMdp.ctrl.w));
     let mdpInit = (mdpBits & 4096u) != 0u;
     var qPack = select(priorQPack, curMdp.qPack, mdpInit);
-    let prevState = select(MDP_STATE_THRIVING, mdpBits & 3u, mdpInit);
-    let prevAction = select(
-        select(select(MDP_ACT_HUNT, MDP_ACT_FORAGE, isProducer), unpackMdpAction(myPad), hasValidBioNiche(myPad)),
-        (mdpBits >> 2u) & 3u,
-        mdpInit,
-    );
-    var prevDwell = select(12u, (mdpBits >> 4u) & 255u, mdpInit);
+    let prevState = select(MDP_STATE_ABUNDANT, mdpBits & 3u, mdpInit);
+    let prevAction = select(u32(floor(hashFloat(pi, frameU, 45u) * 4.0)) & 3u, (mdpBits >> 2u) & 3u, mdpInit);
+    var prevDwell = select(10u, (mdpBits >> 4u) & 255u, mdpInit);
     let prevMdpE = select(curLifeState.x, curMdp.ctrl.x, mdpInit);
     let prevMdpPoi = select(curLifeState.z, curMdp.ctrl.y, mdpInit);
-    var emaReward = select(0.0, curMdp.ctrl.z, mdpInit);
 
-    // 1) Classify discrete ecological state s_t in {STARVING, THREATENED, THRIVING, DORMANT}
-    let threatLevel = max(poi * 1.15, max(acc.nearHalogen * 0.85, acc.nearPredThreat * 1.35));
-    var curState: u32 = MDP_STATE_THRIVING;
-    if (threatLevel > 0.26) {
-        curState = MDP_STATE_THREATENED;
-    } else if (avgBlobE < 0.62 || eDiffused < 0.54) {
-        curState = MDP_STATE_STARVING;
-    } else if (nightDormancy > 0.42 || solar < 0.14 || (crowdPenalty + landPenalty) > 0.075) {
-        curState = MDP_STATE_DORMANT;
+    var curState: u32 = MDP_STATE_ABUNDANT;
+    if (poi > 0.18 || acc.nearHalogen > 0.30 || acc.contactEngulfPress > 0.18) {
+        curState = MDP_STATE_HAZARD;
+    } else if (avgBlobE < 0.56 || eDiffused < 0.50) {
+        curState = MDP_STATE_LOW_ENERGY;
+    } else if (solar < 0.16 || acc.nearTotalBio > 42.0) {
+        curState = MDP_STATE_DARK_CROWDED;
     }
 
-    // 2) Lateral Q-table gossip across thriving kin neighbors + gentle prior anchor (active state row only to keep ALU low)
+    // Lateral Q-gossip across connected same-blob peers (pure online diffusion without resetting to priors)
     let hasGossip = acc.bestMdpScore > -0.5;
-    let gossipAlpha = clamp(2.0 * dtBio, 0.0, 0.16);
-    let priorAnchor = clamp(0.16 * dtBio, 0.0, 0.024);
+    let gossipAlpha = clamp(2.2 * dtBio, 0.0, 0.18);
     let activeMyRow = getQRow(qPack, curState);
     let activePeerRow = select(activeMyRow, getQRow(acc.bestMdpQPack, curState), hasGossip);
-    let activePriorRow = getQRow(priorQPack, curState);
     var blendedActiveRow = 0u;
     for (var aa = 0u; aa < 4u; aa++) {
         let qSelf = unpackMdpQ(activeMyRow, aa);
         let qPeer = unpackMdpQ(activePeerRow, aa);
-        let qPrior = unpackMdpQ(activePriorRow, aa);
-        let qStep = mix(qSelf, qPeer, select(0.0, gossipAlpha, hasGossip));
-        let qAnch = clamp(mix(qStep, qPrior, priorAnchor), -1.45, 1.45);
-        blendedActiveRow |= quantizeMdpQ(qAnch) << (aa * 8u);
+        let qStep = clamp(mix(qSelf, qPeer, select(0.0, gossipAlpha, hasGossip)), -1.45, 1.45);
+        blendedActiveRow |= quantizeMdpQ(qStep) << (aa * 8u);
     }
     qPack = setQRow(qPack, curState, blendedActiveRow);
 
-    // 3) Emergency threat breaks non-evasive dwell hysteresis immediately
-    if (curState == MDP_STATE_THREATENED && threatLevel > 0.45 && prevAction != MDP_ACT_EVADE && prevDwell > 4u) {
-        prevDwell = 0u;
-    }
-
-    // 4) Select coordinated blob action via Q(s_t, a) + swarm vote consensus + hysteresis
     let curStateRow = getQRow(qPack, curState);
     let voteDenom = max(acc.mdpVoteWeight, 1e-4);
     let votesNorm = acc.mdpVotes / voteDenom;
-    let voteStrength = clamp(acc.mdpVoteWeight / 2.0, 0.0, 1.0) * 0.44;
-    let epsAmp = select(0.08, 0.03, curState == MDP_STATE_THREATENED);
+    let voteStrength = clamp(acc.mdpVoteWeight / 2.2, 0.0, 1.0) * 0.32;
 
     var bestAct: u32 = prevAction;
     var bestScore: f32 = -1e9;
@@ -2209,8 +1658,8 @@ fn finalizeBioUnified(
         else if (aa == 2u) { voteFrac = votesNorm.z; }
         else if (aa == 3u) { voteFrac = votesNorm.w; }
 
-        let dwellBonus = select(0.0, 0.20, aa == prevAction && prevDwell > 0u);
-        let epsNoise = (hashFloat(pi, frameU, 41u + aa) - 0.5) * epsAmp;
+        let dwellBonus = select(0.0, 0.14, aa == prevAction && prevDwell > 0u);
+        let epsNoise = (hashFloat(pi, frameU, 41u + aa) - 0.5) * 0.12;
         let candScore = qVal + voteStrength * voteFrac + dwellBonus + epsNoise;
         if (candScore > bestScore) {
             bestScore = candScore;
@@ -2219,118 +1668,64 @@ fn finalizeBioUnified(
     }
 
     let nextAction = bestAct;
-    var nextDwell = select(select(0u, prevDwell - 1u, prevDwell > 0u), 26u, nextAction != prevAction);
-    if (nextAction == prevAction && prevDwell == 0u && voteStrength > 0.22) {
-        nextDwell = 16u;
-    }
+    let nextDwell = select(select(0u, prevDwell - 1u, prevDwell > 0u), 18u, nextAction != prevAction);
 
-    // 5) Real energetic & survival tradeoffs from chosen MDP action
-    let actionGrazeMult = select(1.0, 1.18, nextAction == MDP_ACT_HUNT);
-    let actionBurnMult = select(1.0, 0.76, nextAction == MDP_ACT_CONSOLIDATE);
-    let actionBurnAdd = select(
-        select(select(0.0, 0.008, nextAction == MDP_ACT_FORAGE), 0.020, nextAction == MDP_ACT_HUNT),
-        0.030,
-        nextAction == MDP_ACT_EVADE,
-    );
-    let actionStressMult = select(1.0, 0.85, nextAction == MDP_ACT_CONSOLIDATE || nextAction == MDP_ACT_EVADE);
-
-    let grazeEnvGain = grazeEnvGainBase * actionGrazeMult;
-    let basalBurn = basalBurnBase * actionBurnMult + actionBurnAdd;
-
-    let netDE = solarGain + haloGain + detritusGain + grazeEnvGain + 0.06 * vit + chemBonus
-        - basalBurn - crowdPenalty - (poisonPenalty + landPenalty + thermStressPenalty) * actionStressMult - uvStressPenalty;
-    let energyCap = mix(select(1.62, 1.78, isProducer), 1.98, holdfast);
-    let nextEnergy = clamp(eDiffused + netDE * dtVit, 0.04, energyCap);
-
-    // 6) 1-Step Temporal-Difference Bellman update Q(prevState, prevAction)
+    // 1-step Bellman TD update + real scalar reward passed to live Species MDP
     let dERate = (nextEnergy - prevMdpE) / max(dtVit, 0.015);
     let dPoiRate = (poi - prevMdpPoi) / max(dtVit, 0.015);
-    let threatPen = acc.nearPredThreat * 0.45 + acc.nearHalogen * 0.35 + poi * 0.65;
+    let hazardPen = poi * 0.55 + acc.nearHalogen * 0.30 + acc.contactEngulfPress * 0.85;
     let rewardMdp = clamp(
-        netDE * 1.45 + dERate * 0.16 - dPoiRate * 0.26 - threatPen * 0.55 + select(0.0, 0.12, nextEnergy > 0.78),
+        netDE * 1.45 + dERate * 0.16 - dPoiRate * 0.28 - hazardPen + select(0.0, 0.12, nextEnergy > 0.78),
         -1.4,
         1.4,
     );
-    emaReward = mix(emaReward, rewardMdp, clamp(1.5 * dtBio, 0.02, 0.15));
     let alphaQ = clamp(2.4 * dtBio, 0.02, 0.16);
     let prevRow = getQRow(qPack, prevState);
     let oldQ = unpackMdpQ(prevRow, prevAction);
-    let targetQ = rewardMdp + 0.82 * maxNextQ;
-    let updatedQ = clamp(mix(oldQ, targetQ, alphaQ), -1.45, 1.45);
+    let updatedQ = clamp(mix(oldQ, rewardMdp + 0.84 * maxNextQ, alphaQ), -1.45, 1.45);
     qPack = setQRow(qPack, prevState, setMdpQ(prevRow, prevAction, updatedQ));
-    let nextMdp = MdpState(qPack, vec4f(nextEnergy, poi, emaReward, packMdpCtrl(curState, nextAction, nextDwell, 1u)));
 
-    // Inter-blob Grazing: foreign hunter eats vulnerable prey (~48% assimilated into hunter biomass, ~52% respired)
-    if (acc.nearPredThreat > 0.0) {
-        let haloShield = 1.0 / (1.0 + 1.4 * acc.nearHalogen);
-        let pGraze = clamp(
-            0.44 * min(acc.nearPredThreat, 3.0) * haloShield * (1.0 - 0.25 * vit) * (1.0 - 0.58 * membraneShield) * select(1.0, 0.58, isGradNow) * dtBio,
+    // Store immediate scalar reward in `.z` for `blobScatterPass` -> Species MDP TD update
+    let nextMdp = MdpState(qPack, vec4f(nextEnergy, poi, rewardMdp, packMdpCtrl(curState, nextAction, nextDwell, 1u)));
+
+    // Telemetry packed in `bioForceOut[pi]` (ZERO directional steering vectors!)
+    let sensTelemetry = vec4f(solar, min(acc.nearForeignBio, 8.0), min(acc.nearHalogen, 8.0), clamp(netDE, -4.0, 4.0));
+
+    // Pure Physical Close-Contact Engulfment (`r < 0.44 * catRadius`)
+    if (acc.contactEngulfPress > 0.32) {
+        let haloShield = 1.0 / (1.0 + 1.2 * acc.nearHalogen);
+        let pAbsorb = clamp(
+            0.44 * min(acc.contactEngulfPress, 3.0) * haloShield * (1.0 - 0.22 * vit) * (1.0 - 0.52 * membraneShield) * select(1.0, 0.58, isGradNow) * dtBio,
             0.0,
-            0.09,
+            0.10,
         );
-        if (hashFloat(pi, frameU, 20u) < pGraze) {
+        if (hashFloat(pi, frameU, 20u) < pAbsorb) {
             let outcome = hashFloat(pi, frameU, 21u);
-            if (outcome < 0.48) {
-                let predSp = min(acc.bestPredSp, nBio - 1u);
-                var nextSpAssimilated = predSp;
-                if (outcome >= 0.34 && myBioSp != predSp && getBioMatrixA(nChem, nBio, predSp, myBioSp) > -0.15) {
-                    nextSpAssimilated = myBioSp;
-                }
-                let fedE = clamp(max(0.96, max(curLifeState.x, acc.bestPredE) * 0.52 + 0.58), 0.96, 1.42);
-                let fedVit = clamp(max(vit, 0.28) + 0.44, 0.0, 1.0);
-                let preyGrad = select(0u, 1u, acc.bestPredGrad == 1u && acc.bestPredE >= 0.55);
-                let predMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSpAssimilated), vec4f(fedE, poi * 0.6, 0.25, packMdpCtrl(MDP_STATE_THRIVING, MDP_ACT_HUNT, 14u, 1u)));
+            if (outcome < 1.0 - 0.40 * acc.contactBestEngulfAlloc) {
+                let engSp = min(acc.contactBestEngulfSp, nBio - 1u);
+                let fedE = clamp(max(0.92, max(curLifeState.x, acc.contactBestEngulfE) * 0.50 + 0.54), 0.92, 1.42);
+                let fedVit = clamp(max(vit, 0.25) + 0.40, 0.0, 1.0);
+                let preyGrad = select(0u, 1u, acc.contactBestEngulfGrad == 1u);
+                let inheritedMdp = MdpState(qPack, vec4f(fedE, poi * 0.6, rewardMdp, packMdpCtrl(curState, nextAction, nextDwell, 1u)));
                 return BioStepResult(
-                    vec4f(fedE, fedVit, poi * 0.6, packLifeMetaGrad(1u, nextSpAssimilated, acc.bestPredKin, acc.bestPredGene, preyGrad)),
-                    vec4f(0.0, 0.0, 0.0, 0.75),
-                    predMdp,
+                    vec4f(fedE, fedVit, poi * 0.6, packLifeMetaGrad(1u, engSp, acc.contactBestEngulfKin, acc.contactBestEngulfGene, preyGrad)),
+                    sensTelemetry,
+                    inheritedMdp,
+                    outBlob,
                 );
             } else {
-                let repelLen = length(acc.predRepelDir);
-                let expel = select(vec3f(0.0), -(acc.predRepelDir / repelLen) * 1.4, repelLen > 1e-4);
                 return bioStepOnly(
                     deadCell(DEATH_PREDATION),
-                    vec4f(expel, packDeltaActGlow(0.8, -0.9)),
+                    vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.8, -0.9)),
                 );
             }
         }
     }
 
-    // Emergent Decomposition: ~80% returned to Chemistry (restoring immutable chemSpecies), ~20% assimilated
-    let stress = clamp(
-        smoothstep(0.45, 0.14, nextEnergy) * 0.95 +
-        smoothstep(0.24, 0.78, poi) * 0.80 +
-        smoothstep(14.0, 28.0, foreignBio) * select(0.55, 0.18, isGradNow && membraneShield > 0.3) +
-        landFrac * 0.12,
-        0.0,
-        1.5,
-    );
-    if (acc.nearDecompPower > 0.0 && stress > 0.12) {
-        let gradDecompScale = select(1.0, mix(0.28, 0.08, membraneShield), isGradNow && poi < 0.50 && nextEnergy > 0.35);
-        let pDecomp = clamp(0.55 * stress * min(acc.nearDecompPower, 3.0) * gradDecompScale * dtBio, 0.0, 0.105);
-        if (hashFloat(pi, frameU, 22u) < pDecomp) {
-            let decRoll = hashFloat(pi, frameU, 23u);
-            if (decRoll < 0.80) {
-                return bioStepOnly(
-                    deadCell(DEATH_DECOMPOSITION),
-                    vec4f(0.0, 0.0, 0.0, packDeltaActGlow(0.85, -0.85)),
-                );
-            } else {
-                let decSp = min(acc.bestDecompSp, nBio - 1u);
-                let decMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, decSp), vec4f(0.64, poi * 0.5, 0.0, packMdpCtrl(MDP_STATE_STARVING, MDP_ACT_FORAGE, 10u, 1u)));
-                return BioStepResult(
-                    vec4f(0.64, vit * 0.6, poi * 0.5, packLifeMeta(1u, decSp, acc.bestDecompKin, acc.bestDecompGene)),
-                    vec4f(0.0, 0.0, 0.0, 0.55),
-                    decMdp,
-                );
-            }
-        }
-    }
-
-    // Natural senescence / turnover back to Chemistry (dormant plants endure darkness down to lower reserves)
-    let decayThreshold = select(0.08, 0.036, isGradNow || nightDormancy > 0.35 || nextAction == MDP_ACT_CONSOLIDATE);
+    // Natural decomposition / lysis of dying cells (`poi >= 0.90` or starved below decayThreshold)
+    let decayThreshold = select(0.075, 0.042, isGradNow || curPol.torpor > 0.25);
     if (nextEnergy <= decayThreshold || poi >= 0.90) {
-        let pDecay = clamp(select(0.45, 0.12, isGradNow || nightDormancy > 0.35 || nextAction == MDP_ACT_CONSOLIDATE) * dtBio, 0.0, 0.14);
+        let pDecay = clamp(select(0.42, 0.14, isGradNow || curPol.torpor > 0.25) * dtBio, 0.0, 0.14);
         if (hashFloat(pi, frameU, 24u) < pDecay) {
             let depletion = energyDeath(eDiffused + netDE * dtVit, eDiffused, decayThreshold, dtVit, crowdPenalty,
                 vec4f(poisonPenalty, thermStressPenalty, uvStressPenalty, landPenalty));
@@ -2341,116 +1736,22 @@ fn finalizeBioUnified(
         }
     }
 
-    // Strong Evolutionary Filter for Complex Organism Graduation:
-    // Both heterotrophs (post-engulfment) and thriving autotrophs (canopy/kelp) can graduate.
-    var outGrad = 0u;
-    if (isGradMaintain) {
-        outGrad = 1u;
-    } else if (isGradSpread) {
-        if (hashFloat(pi, frameU, 25u) < clamp(4.5 * dtBio, 0.0, 0.68)) {
-            outGrad = 1u;
-        }
-    } else {
-        let hasSemiFormedShell = acc.blobLipidCount >= 4.0;
-        let hasLargeMass = acc.blobCount >= 28.0;
-        let hasEndosymbiosis = myDistinctColors >= 7u;
-        let canAutoGrad = (autoCap >= 0.46) && (solarGain >= 0.20) && (acc.nearCarbonFeed + acc.nearWaterFluid >= 0.25);
-        let recentlyConsumed = (acc.nearForeignPrey >= 0.18 && predCap >= 0.34) || (vit >= 0.32 && avgBlobVit >= 0.30) || canAutoGrad;
-        let metabolicSurplus = nextEnergy >= 0.85 && avgBlobE >= 0.82 && poi < 0.22;
-        if (hasSemiFormedShell && hasLargeMass && hasEndosymbiosis && recentlyConsumed && metabolicSurplus) {
-            if (hashFloat(pi, frameU, 27u) < clamp(1.8 * dtBio, 0.0, 0.32)) {
-                outGrad = 1u;
-            }
-        }
-    }
-
-    // Controlled post-encapsulation somatic innovation (no forced mega-blob bud splitting cap)
+    let outGrad = select(0u, 1u, isGradNow);
     var outSp = myBioSp;
-    var outKin = nextKin;
-    var outGene = nextGene;
-    let maxNovelColors = select(8u, 12u, outGrad == 1u);
-    let clayInnovBoost = 1.0 + 1.25 * clamp(acc.nearClayCat, 0.0, 1.5);
-    let uvMutBoost = 1.0 + 0.85 * uvStress * (1.0 - 0.55 * membraneShield);
-    if ((acc.blobLipidCount >= 2.0 || acc.nearClayCat >= 0.65) && nextEnergy > 0.80 && myDistinctColors < maxNovelColors && acc.blobCount >= 7.0) {
-        let pInnov = clamp(0.018 * clayInnovBoost * uvMutBoost * encapNoveltyDrive(nextGene, myDistinctColors) * dtBio, 0.0, 0.015);
+    if ((acc.blobLipidCount >= 1.5 || acc.nearClayCat >= 0.65) && nextEnergy > 0.78 && myDistinctColors < 12u && acc.blobCount >= 5.0) {
+        let clayInnov = 1.0 + 1.2 * clamp(acc.nearClayCat, 0.0, 1.5);
+        let uvInnov = 1.0 + 0.8 * uvStress * (1.0 - 0.55 * membraneShield);
+        let pInnov = clamp(0.012 * clayInnov * uvInnov * dtBio, 0.0, 0.012);
         if (hashFloat(pi, frameU, 26u) < pInnov) {
             outSp = pickCompatibleNovelSpecies(nChem, nBio, myBioSp, mySpeciesMask, pi, frameU, 50u);
-            let mutRootDelta = (hashFloat(pi, frameU, 35u) - 0.5) * 0.24;
-            rootGene = clamp(rootGene + mutRootDelta, 0.04, 0.96);
         }
     }
-
-    // Emergent Habitat Preference × Movement Style Spatial Taxis (zone homing + phototaxis + hydrotaxis)
-    let ocErr = prefOc - oc.w;
-    let tempErr = clamp((prefTempK - tHabK) / 16.0, -1.0, 1.0);
-    let solarGoal = clamp(0.45 + 0.55 * prefSolar, 0.45, 0.96);
-    let sunDrive = select(
-        0.0,
-        clamp(solarGoal - solar, -0.35, 1.0) - select(0.0, uvStress * 0.45 * (1.0 - uvAcclim), uvStress > 0.45),
-        isProducer,
-    );
-    let moistDrive = select(0.18, 0.65, isProducer) * clamp(1.0 - landHydration, 0.0, 1.0) * smoothstep(0.08, 0.55, landFrac + (1.0 - prefOc) * 0.4);
-    let nicheMismatch = clamp(abs(ocErr) * 1.4 + abs(tempErr) * 0.8, 0.0, 1.2);
-    let rawZoneSteer =
-        envGrads.gradOc * (ocErr * 0.42) +
-        envGrads.gradTemp * (tempErr * 0.022) +
-        envGrads.gradSolar * (sunDrive * 0.036) +
-        envGrads.gradMoist * (moistDrive * 0.28);
-    // Rooted plants creep gently via stolons/canopy edges; mobile autotrophs & predators swim actively
-    let styleMobilityWeight = select(
-        0.52 * (0.35 + 0.65 * nicheMismatch),
-        mix(0.85, 0.24, holdfast),
-        isProducer,
-    );
-    let zoneSteer = rawZoneSteer * styleMobilityWeight * clamp(0.75 + 0.5 * motility, 0.6, 1.35);
-
-    // 7) Translate chosen MDP action into directional organism behavior
-    var chemSteerGain = normChem * 1.4;
-    var bioSteerGain = max(rate, 0.2);
-    var zoneSteerGain = max(rate, 0.25);
-    var mdpDirSteer = vec3f(0.0);
-
-    if (nextAction == MDP_ACT_FORAGE) {
-        chemSteerGain *= 1.38;
-        zoneSteerGain *= 1.42;
-    } else if (nextAction == MDP_ACT_HUNT) {
-        bioSteerGain *= 1.48;
-        let preyLen = length(acc.preyDir);
-        if (preyLen > 1e-4) {
-            let pUnit = acc.preyDir / preyLen;
-            mdpDirSteer += pUnit * (0.45 * clamp(predCap, 0.2, 1.5) * max(rate, 0.25));
-        }
-    } else if (nextAction == MDP_ACT_EVADE) {
-        let avoidRaw = acc.halogenRepelDir * 1.2 - acc.predRepelDir;
-        let avoidLen = length(avoidRaw);
-        if (avoidLen > 1e-4) {
-            mdpDirSteer += (avoidRaw / avoidLen) * (0.72 * max(rate, 0.25));
-        }
-    } else {
-        // MDP_ACT_CONSOLIDATE: damp external wander and pull gently inward toward blob center
-        zoneSteerGain *= 0.48;
-        if (acc.blobCentW > 0.2) {
-            let centDir = acc.blobCentroid / acc.blobCentW - pos;
-            let tangCent = centDir - dot(centDir, pos) * pos;
-            let tcLen = length(tangCent);
-            if (tcLen > 1e-4) {
-                mdpDirSteer += (tangCent / tcLen) * (0.26 * max(rate, 0.25));
-            }
-        }
-    }
-
-    var st = acc.steer * chemSteerGain + acc.bioSteer * bioSteerGain + zoneSteer * zoneSteerGain + mdpDirSteer;
-    let stLen = length(st);
-    let maxSt = 1.65 * max(rate, 0.1);
-    if (stLen > maxSt) {
-        st *= maxSt / stLen;
-    }
-    let outNichePad = packBioNiche(prefOc, prefTempK, prefSolar, rootGene, holdfast, isProducer, nextAction);
 
     return BioStepResult(
-        vec4f(nextEnergy, vit, poi, packLifeMetaGrad(1u, outSp, outKin, outGene, outGrad)),
-        vec4f(st, outNichePad),
+        vec4f(nextEnergy, vit, poi, packLifeMetaGrad(1u, outSp, nextKin, nextGene, outGrad)),
+        sensTelemetry,
         nextMdp,
+        outBlob,
     );
 }
 
@@ -2465,7 +1766,6 @@ struct BioLinkAccum {
     rConnectAng: f32,
     rSearchAng: f32,
 
-    // Previous frame persisted slot state for hysteresis & anti-flicker rate limiting
     hasPrev0: bool,
     prevFade0: u32,
     prevCooldown0: u32,
@@ -2480,13 +1780,11 @@ struct BioLinkAccum {
     prevDir1: vec2f,
     prevLen1: f32,
 
-    // Tracked partner continuations (within hysteresis rDisconnect = rSearchAng)
     trackTang0: vec2f,
     trackScore0: f32,
     trackTang1: vec2f,
     trackScore1: f32,
 
-    // Fresh exclusive single-blob candidates (within strict rConnectAng)
     c0Tang: vec2f,
     c0Dir: vec2f,
     c0Score: f32,
@@ -2529,7 +1827,6 @@ fn initBioLinkAccum(
     acc.rConnectAng = rConnect / R;
     acc.rSearchAng = rDisconnect / R;
 
-    // Decode slot 0 persisted state from prevVal.xy (tag bit 1024 prevents stale phase-0 valence reuse)
     let m0 = u32(max(floor(prevVal.x), 0.0));
     let isBioSlot0 = (m0 & 1024u) != 0u && prevVal.x >= 1024.25;
     acc.prevFade0 = select(0u, min(m0 & 15u, 8u), isBioSlot0);
@@ -2538,14 +1835,11 @@ fn initBioLinkAccum(
     let candLen0 = length(candTang0);
     let validPrev0 = isBioSlot0 && (acc.prevFade0 > 0u) && (candLen0 <= acc.rSearchAng * 1.15);
     acc.hasPrev0 = validPrev0;
-    if (!validPrev0) {
-        acc.prevFade0 = 0u;
-    }
+    if (!validPrev0) { acc.prevFade0 = 0u; }
     acc.prevTang0 = select(vec2f(0.0), candTang0, validPrev0);
     acc.prevLen0 = select(0.0, candLen0, validPrev0);
     acc.prevDir0 = select(vec2f(0.0), candTang0 / candLen0, validPrev0 && candLen0 > 1e-6);
 
-    // Decode slot 1 persisted state from prevVal.zw
     let m1 = u32(max(floor(prevVal.z), 0.0));
     let isBioSlot1 = (m1 & 1024u) != 0u && prevVal.z >= 1024.25;
     acc.prevFade1 = select(0u, min(m1 & 15u, 8u), isBioSlot1);
@@ -2554,9 +1848,7 @@ fn initBioLinkAccum(
     let candLen1 = length(candTang1);
     let validPrev1 = isBioSlot1 && (acc.prevFade1 > 0u) && (candLen1 <= acc.rSearchAng * 1.15);
     acc.hasPrev1 = validPrev1;
-    if (!validPrev1) {
-        acc.prevFade1 = 0u;
-    }
+    if (!validPrev1) { acc.prevFade1 = 0u; }
     acc.prevTang1 = select(vec2f(0.0), candTang1, validPrev1);
     acc.prevLen1 = select(0.0, candLen1, validPrev1);
     acc.prevDir1 = select(vec2f(0.0), candTang1 / candLen1, validPrev1 && candLen1 > 1e-6);
@@ -2565,7 +1857,6 @@ fn initBioLinkAccum(
     acc.trackScore0 = 99.0;
     acc.trackTang1 = vec2f(0.0);
     acc.trackScore1 = 99.0;
-
     acc.c0Tang = vec2f(0.0);
     acc.c0Dir = vec2f(0.0);
     acc.c0Score = 99.0;
@@ -2609,10 +1900,9 @@ fn accumulateBioLinkNeighbor(
         return;
     }
 
-    // Strict exclusive single-entity coherence: only members with matching kinPhase connect
     let nbKin = unpackKinPhase(nbLs.w);
     let kinDist = kinAngularDist((*acc).myKin, nbKin);
-    let maxKin = select(0.085, 0.11, (*acc).myPhase == 2u);
+    let maxKin = select(0.11, 0.14, (*acc).myPhase == 2u);
     if (kinDist >= maxKin) {
         return;
     }
@@ -2628,7 +1918,6 @@ fn accumulateBioLinkNeighbor(
     }
     let dir2 = tang / sinA;
 
-    // Check partner continuation for existing hysteresis tracks (within rSearchAng = rDisconnect)
     if ((*acc).hasPrev0 && (*acc).prevLen0 > 1e-6) {
         let dirMatch0 = dot(dir2, (*acc).prevDir0);
         let lenDiff0 = abs(sinA - (*acc).prevLen0);
@@ -2652,13 +1941,11 @@ fn accumulateBioLinkNeighbor(
         }
     }
 
-    // Only initiate NEW links inside the stricter exclusive connect radius
     if (sinA >= (*acc).rConnectAng) {
         return;
     }
 
     if ((*acc).myPhase == 2u) {
-        // Track closest clockwise (+b2) and counter-clockwise (-b2) perimeter lipids
         let side = dot(dir2, (*acc).b2);
         let absSide = abs(side);
         if (absSide < 0.20 && sinA > (*acc).rConnectAng * 0.50) {
@@ -2682,7 +1969,6 @@ fn accumulateBioLinkNeighbor(
         return;
     }
 
-    // Phase 1: nearest exclusive same-blob neighbor + second distinct-angle neighbor inside rConnectAng
     if (sinA < (*acc).c0Score) {
         let prevTang = (*acc).c0Tang;
         let prevDir = (*acc).c0Dir;

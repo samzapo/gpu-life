@@ -5,6 +5,7 @@ struct LifeMdpEntry {
   life: vec4f,
   qPack: vec4u,
   ctrl: vec4f,
+  blob: vec4u,
 }
 struct Field {
   source: vec4f,

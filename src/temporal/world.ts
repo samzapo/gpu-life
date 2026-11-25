@@ -200,20 +200,27 @@ export async function readCheckpoint(
     await staging.mapAsync(GPUMapMode.READ);
     const bytes = staging.getMappedRange().slice(0);
     const particleCount = particles.size / 48;
+    const lifeWordStride =
+      life.size >= particleCount * 64
+        ? 16
+        : life.size >= particleCount * 48
+          ? 12
+          : 4;
     const rawLifeF32 = new Float32Array(bytes, particles.size, life.size / 4);
     const rawLifeU32 = new Uint32Array(bytes, particles.size, life.size / 4);
     const compactLife = new Float32Array(particleCount * 4);
-    const mdpWords = life.size >= particleCount * 48 ? new Uint32Array(particleCount * 8) : undefined;
+    const mdpWordCount = lifeWordStride > 4 ? lifeWordStride - 4 : 0;
+    const mdpWords = mdpWordCount > 0 ? new Uint32Array(particleCount * mdpWordCount) : undefined;
     if (mdpWords) {
       for (let i = 0; i < particleCount; i++) {
-        const s = i * 12;
+        const s = i * lifeWordStride;
         const d = i * 4;
         compactLife[d + 0] = rawLifeF32[s + 0];
         compactLife[d + 1] = rawLifeF32[s + 1];
         compactLife[d + 2] = rawLifeF32[s + 2];
         compactLife[d + 3] = rawLifeF32[s + 3];
-        const md = i * 8;
-        for (let k = 0; k < 8; k++) mdpWords[md + k] = rawLifeU32[s + 4 + k];
+        const md = i * mdpWordCount;
+        for (let k = 0; k < mdpWordCount; k++) mdpWords[md + k] = rawLifeU32[s + 4 + k];
       }
     } else {
       compactLife.set(rawLifeF32.subarray(0, particleCount * 4));

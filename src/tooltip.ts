@@ -5,10 +5,11 @@ import type { LocalHydroSample } from './earth/hydroData.ts';
 import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D.ts';
 import type { ViewLayerMode } from './options.ts';
 import {
-  MDP_ACTION_FORAGE,
+  MDP_ACTION_EXPAND,
   MDP_ACTION_LABELS,
+  MDP_ACTION_SHORT_LABELS,
   type MdpActionId,
-  unpackMdpActionFromPad,
+  unpackThreeMdpFromPad,
 } from './mdp.ts';
 
 export interface HoverSimSnapshot {
@@ -238,6 +239,10 @@ export interface EmergentBlobSummary {
   role: EmergentBlobRole;
   mdpAction: MdpActionId;
   mdpPolicyLabel: string;
+  cellMdpAction: MdpActionId;
+  blobMdpAction: MdpActionId;
+  speciesMdpAction: MdpActionId;
+  mdpTripletLabel: string;
 }
 
 export function kinAngularDist(a: number, b: number): number {
@@ -283,7 +288,9 @@ export function summarizeAndClassifyBlob(
   let redoxSum = 0;
   let speedSum = 0;
   let geneSum = 0;
-  const mdpActionCounts = [0, 0, 0, 0];
+  const cellActCounts = [0, 0, 0, 0];
+  const blobActCounts = [0, 0, 0, 0];
+  const spActCounts = [0, 0, 0, 0];
 
   for (let idxPos = 0; idxPos < memberIndices.length; idxPos++) {
     const id = memberIndices[idxPos];
@@ -305,7 +312,10 @@ export function summarizeAndClassifyBlob(
       lipidCount++;
     } else {
       cytoplasmCount++;
-      mdpActionCounts[unpackMdpActionFromPad(p?.[11] ?? 0)]++;
+      const mdp3 = unpackThreeMdpFromPad(p?.[11] ?? 0);
+      cellActCounts[mdp3.pAct]++;
+      blobActCounts[mdp3.hasBlob ? mdp3.bAct : mdp3.pAct]++;
+      spActCounts[mdp3.sAct]++;
       spSet.add(meta.bioSpecies);
       const tr = speciesTraits[meta.bioSpecies] ?? [0.5, 0.25, 0.25, 0.35];
       if (el) {
@@ -366,14 +376,24 @@ export function summarizeAndClassifyBlob(
     role = 'mixotroph';
   }
 
-  let dominantAct: MdpActionId = MDP_ACTION_FORAGE;
-  let bestActCount = -1;
-  for (let a = 0; a < 4; a++) {
-    if (mdpActionCounts[a] > bestActCount) {
-      bestActCount = mdpActionCounts[a];
-      dominantAct = a as MdpActionId;
+  const pickArgmax = (counts: number[]): MdpActionId => {
+    let bestAct: MdpActionId = MDP_ACTION_EXPAND;
+    let bestC = -1;
+    for (let a = 0; a < 4; a++) {
+      if (counts[a] > bestC) {
+        bestC = counts[a];
+        bestAct = a as MdpActionId;
+      }
     }
-  }
+    return bestAct;
+  };
+  const cellMdpAction = pickArgmax(cellActCounts);
+  const blobMdpAction = pickArgmax(blobActCounts);
+  const speciesMdpAction = pickArgmax(spActCounts);
+  const dominantAct = blobMdpAction;
+  const bShort = MDP_ACTION_SHORT_LABELS[blobMdpAction] ?? 'Expand';
+  const sShort = MDP_ACTION_SHORT_LABELS[speciesMdpAction] ?? 'Expand';
+  const cShort = MDP_ACTION_SHORT_LABELS[cellMdpAction] ?? 'Expand';
 
   return {
     size: memberIndices.length,
@@ -400,7 +420,11 @@ export function summarizeAndClassifyBlob(
     haloTol,
     role,
     mdpAction: dominantAct,
-    mdpPolicyLabel: MDP_ACTION_LABELS[dominantAct] ?? 'Foraging',
+    mdpPolicyLabel: MDP_ACTION_LABELS[dominantAct] ?? 'Expand / Absorb',
+    cellMdpAction,
+    blobMdpAction,
+    speciesMdpAction,
+    mdpTripletLabel: `Blob:${bShort} · Sp:${sShort} · Cell:${cShort}`,
   };
 }
 
@@ -1258,7 +1282,7 @@ export function analyzeReactionAt(
       envChips: surfEnvChips,
       title,
       body: `${statusDesc}${gradDetail}${landDetail}${mineralNote}`,
-      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · Policy: ${blob.mdpPolicyLabel} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
+      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · MDP [${blob.mdpTripletLabel}] · ${encapTag} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,
       targetIdx: bestIdx,
