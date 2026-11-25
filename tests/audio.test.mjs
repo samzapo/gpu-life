@@ -934,3 +934,123 @@ test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-t
     globalThis.AudioWorkletNode = prevAudioWorkletNode;
   }
 });
+
+test('GlobeCyberSynth unlocks cleanly on touchend/click even after an earlier non-activating pointerdown resume stalls', async () => {
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevAudioWorkletNode = globalThis.AudioWorkletNode;
+
+  let ctxState = 'suspended';
+  let resumeCalls = 0;
+  let resumeCallDuringTouchStart = 0;
+  const masterTargets = [];
+  const postedMsgs = [];
+
+  class AutoplayPolicyMockAudioContext {
+    constructor() {
+      this.sampleRate = 48000;
+      this.outputLatency = 0.04;
+      this.currentTime = 0.25;
+      this.destination = { connect() {} };
+      this.audioWorklet = {
+        addModule: async () => {},
+      };
+    }
+    get state() { return ctxState; }
+    addEventListener() {}
+    suspend() { ctxState = 'suspended'; return Promise.resolve(); }
+    resume() {
+      resumeCalls++;
+      if (resumeCalls === 1) {
+        resumeCallDuringTouchStart = resumeCalls;
+        // Simulate real browser behavior on non-activating pointerdown/touchstart:
+        // AudioContext remains 'suspended' and resume() Promise never settles.
+        return new Promise(() => {});
+      }
+      ctxState = 'running';
+      return Promise.resolve();
+    }
+    createGain() {
+      const node = {
+        connect() {},
+        disconnect() {},
+        gain: {
+          value: 0,
+          setValueAtTime(v) { node.gain.value = v; },
+          linearRampToValueAtTime() {},
+          exponentialRampToValueAtTime() {},
+          cancelScheduledValues() {},
+          setTargetAtTime(v) {
+            node.gain.value = v;
+            masterTargets.push(v);
+          },
+        },
+      };
+      return node;
+    }
+    createAnalyser() {
+      return {
+        connect() {},
+        disconnect() {},
+        fftSize: 256,
+        frequencyBinCount: 128,
+        smoothingTimeConstant: 0,
+        minDecibels: -86,
+        maxDecibels: -12,
+        getFloatTimeDomainData(arr) { arr.fill(0); },
+        getByteFrequencyData(arr) { arr.fill(0); },
+      };
+    }
+  }
+
+  class SimpleMockWorkletNode {
+    constructor() {
+      this.port = {
+        onmessage: null,
+        postMessage: (msg) => { postedMsgs.push(msg); },
+      };
+    }
+    connect() {}
+    disconnect() {}
+  }
+
+  globalThis.AudioWorkletNode = SimpleMockWorkletNode;
+  globalThis.window = {
+    AudioContext: AutoplayPolicyMockAudioContext,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+  };
+  globalThis.document = {
+    get hidden() { return false; },
+  };
+
+  let synth;
+  try {
+    synth = new GlobeCyberSynth();
+    synth.setVolume(0.65);
+    synth.setEnabled(true, false);
+
+    // 1. Non-activating touchstart/pointerdown starts unlock() and hangs resume() while suspended
+    void synth.unlock();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(resumeCallDuringTouchStart, 1);
+    assert.equal(ctxState, 'suspended');
+    assert.equal(synth.isRunning(), false);
+
+    // 2. Activating touchend/click must still invoke ctx.resume() synchronously and unlock audio
+    await synth.unlock();
+    assert.equal(resumeCalls, 2);
+    assert.equal(ctxState, 'running');
+    assert.equal(synth.isRunning(), true);
+    assert.equal(synth.isWorkletActive(), true);
+    assert.ok(Math.abs(masterTargets.at(-1) - 0.65 * 0.85) < 1e-6);
+    assert.equal(postedMsgs.filter((m) => m.type === 'state').at(-1)?.active, true);
+  } finally {
+    synth?.setEnabled(false, true);
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+    globalThis.AudioWorkletNode = prevAudioWorkletNode;
+  }
+});

@@ -2997,7 +2997,7 @@ for (const evType of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touch
     evType,
     (ev) => {
       if (ev.target instanceof Element && ev.target.closest('#music-toggle')) return;
-      if (cyberSynth.isEnabled() && cyberSynth.getState() !== 'running') {
+      if (cyberSynth.isEnabled() && !cyberSynth.isRunning()) {
         void cyberSynth.unlock().then(() => syncMusicButtonUi(0));
       }
     },

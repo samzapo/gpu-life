@@ -162,7 +162,6 @@ export class GlobeCyberSynth {
   // Primary Worklet nodes & state
   private workletNode: AudioWorkletNode | null = null;
   private workletInitPromise: Promise<boolean> | null = null;
-  private unlockPromise: Promise<void> | null = null;
 
   private masterGain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
@@ -342,11 +341,17 @@ export class GlobeCyberSynth {
           enabled: this.streamlinesEnabled,
           bands: this.streamBands16,
         });
-        node.port.postMessage({
-          type: 'state',
-          active: this.enabled && this.unlocked && ctx.state === 'running',
-          streamlinesEnabled: this.streamlinesEnabled,
-        });
+        const readyToPlay = Boolean(this.enabled && !this.wasHidden && ctx.state === 'running');
+        if (readyToPlay) {
+          this.unlocked = true;
+          this.syncMasterGain();
+        } else {
+          node.port.postMessage({
+            type: 'state',
+            active: false,
+            streamlinesEnabled: this.streamlinesEnabled,
+          });
+        }
         return true;
       })
       .catch(() => false)
@@ -466,18 +471,7 @@ export class GlobeCyberSynth {
     }
   }
 
-  unlock(): Promise<void> {
-    if (this.unlockPromise) return this.unlockPromise;
-    const p = this.unlockInner().finally(() => {
-      if (this.unlockPromise === p) {
-        this.unlockPromise = null;
-      }
-    });
-    this.unlockPromise = p;
-    return p;
-  }
-
-  private async unlockInner(): Promise<void> {
+  async unlock(): Promise<void> {
     if (
       this.ctx &&
       this.ctx.state === 'running' &&
@@ -514,20 +508,34 @@ export class GlobeCyberSynth {
     const ctx = this.ctx;
     const canWorklet = Boolean(ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined');
 
-    // Call ctx.resume() synchronously inside the user-gesture turn before awaiting addModule.
-    const resumePromise =
-      ctx.state === 'suspended' ? ctx.resume().catch(() => {}) : Promise.resolve();
+    // Kick off worklet module load independently (deduped via workletInitPromise)
     const workletPromise =
       canWorklet && !this.workletNode && this.audioMode !== 'fallback'
-        ? this.ensureSynthWorklet(ctx)
+        ? this.ensureSynthWorklet(ctx).then((ok) => {
+            if (!ok && this.ctx === ctx && this.audioMode !== 'fallback') {
+              this.initFallbackGraph(ctx);
+              if (ctx.state === 'running' && this.enabled && !this.wasHidden) {
+                this.unlocked = true;
+                this.syncMasterGain();
+              }
+            }
+            return ok;
+          })
         : Promise.resolve(this.audioMode === 'worklet' && this.workletNode !== null);
 
-    const [, workletOk] = await Promise.all([resumePromise, workletPromise]);
-    if (this.ctx !== ctx) return;
-
-    if (canWorklet && !workletOk && this.audioMode !== 'fallback') {
-      this.initFallbackGraph(ctx);
+    // Always invoke ctx.resume() synchronously inside the current gesture turn:
+    // non-activating events (e.g. pointerdown/touchstart) may leave an earlier resume()
+    // promise permanently pending, so subsequent touchend/click gestures must never wait on it.
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+      } catch {
+        // Ignore until next valid user activation gesture
+      }
     }
+
+    await workletPromise;
+    if (this.ctx !== ctx) return;
 
     if (ctx.state === 'running') {
       this.unlocked = true;
@@ -563,11 +571,15 @@ export class GlobeCyberSynth {
     if (!this.masterGain) {
       this.masterGain = ctx.createGain();
       this.masterGain.gain.value = 0;
+    } else {
+      try { this.masterGain.disconnect(); } catch { /* ignore */ }
     }
     if (!this.analyser) {
       const mTap = makeInstantAnalyser(ctx);
       this.analyser = mTap.node;
       this.masterBins = mTap.bins;
+    } else {
+      try { this.analyser.disconnect(); } catch { /* ignore */ }
     }
     this.buildFallbackGraph(ctx);
     this.drumBank = buildCyberDrumBank(ctx);
