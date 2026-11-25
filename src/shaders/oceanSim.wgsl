@@ -224,12 +224,36 @@ fn integrateOceanParticle(
 
     var holdfast = 0.0;
     var isProducer = false;
+    var mdpAction = MDP_ACT_FORAGE;
+    var hasMdpAction = false;
     if (myPhase == 1u && bioSteer.w >= 2097151.5) {
         let packed = u32(round(bioSteer.w));
         holdfast = f32((packed >> 16u) & 15u) / 15.0;
         isProducer = ((packed >> 20u) & 1u) == 1u;
+        mdpAction = (packed >> 22u) & 3u;
+        hasMdpAction = true;
     } else if (myPhase == 1u) {
         isProducer = bioSteer.w < -0.04;
+    }
+
+    var holdfastEff = holdfast;
+    var mdpDriveScale = 1.0;
+    var mdpDragMult = 1.0;
+    if (hasMdpAction) {
+        if (mdpAction == MDP_ACT_FORAGE) {
+            holdfastEff = holdfast * 0.84;
+            mdpDriveScale = 1.15;
+        } else if (mdpAction == MDP_ACT_HUNT) {
+            holdfastEff = holdfast * 0.70;
+            mdpDriveScale = 1.28;
+        } else if (mdpAction == MDP_ACT_EVADE) {
+            holdfastEff = holdfast * 0.26;
+            mdpDriveScale = 1.38;
+        } else {
+            holdfastEff = select(holdfast, min(1.0, holdfast * 1.18 + 0.08), isProducer);
+            mdpDriveScale = 0.56;
+            mdpDragMult = 0.90;
+        }
     }
 
     var cTarget = vec3f(0.0);
@@ -237,10 +261,10 @@ fn integrateOceanParticle(
         let cur3D = oc.x * eEast + oc.y * eNorth;
         cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * smoothstep(0.35, 0.55, oc.w);
         // Mobile buoyant marine producers experience light surface windage/Stokes drift; rooted kelp holdfasts resist washout
-        if (isProducer && holdfast < 0.35) {
+        if (isProducer && holdfastEff < 0.35) {
             cTarget += ((windRaw.x * eEast + windRaw.y * eNorth) / max(windRefSpeed, 6.0)) * (0.045 * max(windStrength, 0.0));
         }
-        cTarget *= mix(1.0, 0.16, holdfast);
+        cTarget *= mix(1.0, 0.16, holdfastEff);
         let cLen = length(cTarget);
         if (cLen > 1.15) {
             cTarget *= 1.15 / cLen;
@@ -262,14 +286,14 @@ fn integrateOceanParticle(
     let vitality = baseVitality * thermFluid;
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
-    let soilGrip = mix(0.94, mix(0.84, 0.46, holdfast), select(0.0, 1.0, isProducer));
+    let soilGrip = mix(0.94, mix(0.84, 0.46, holdfastEff), select(0.0, 1.0, isProducer));
     let substrateDrag = mix(1.0, soilGrip, landFrac) * frostDrag;
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
-    let slopeResist = select(vec3f(0.0), -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.06 * smoothstep(0.4, 3.0, elevKm)) * mix(1.0, 0.12, holdfast), landFrac > 0.40);
+    let slopeResist = select(vec3f(0.0), -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.06 * smoothstep(0.4, 3.0, elevKm)) * mix(1.0, 0.12, holdfastEff), landFrac > 0.40);
     let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
     let vRel = vTang - cTarget;
-    let anchoredForce = netForce * vitality * mix(1.0, 0.28, holdfast);
-    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag) + ((anchoredForce + linBioSteer) + slopeResist) * sim.dt;
+    let anchoredForce = netForce * vitality * mix(1.0, 0.28, holdfastEff);
+    p.vel = cTarget + vRel * (sim.friction * toxicDrag * substrateDrag * mdpDragMult) + ((anchoredForce + linBioSteer) * mdpDriveScale + slopeResist) * sim.dt;
 
     p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 

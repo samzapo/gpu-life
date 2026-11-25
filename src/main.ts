@@ -31,6 +31,10 @@ import {
   type Element2D,
 } from './periodicTable2D';
 import type { UnifiedEngineRefs } from './engineTypes';
+import {
+  buildSpeciesMdpPriors,
+  MDP_SPECIES_STRIDE,
+} from './mdp';
 import structsShader from './shaders/structs.wgsl?raw';
 import projectionShader from './shaders/projection.wgsl?raw';
 import bgRenderShader from './shaders/bgRender.wgsl?raw';
@@ -360,6 +364,7 @@ speciesTraits = computeSpeciesTraitsFromMatrix(oceanMatrixData, oceanColourAmt).
 
 const particleStride = 48; // 12 floats: pos(3), colour(1), vel(3), omega(1), orient(3), pad(1)
 const valenceStride = 16;
+const lifeMdpStride = 48; // 12 words: life(vec4f) + mdpQPack(vec4u) + mdpCtrl(vec4f)
 const GRID_TEX_W = 360;
 const GRID_TEX_H = 181;
 const WATERMAN_INV_W = 640;
@@ -1396,12 +1401,20 @@ function writeWorldRuleAndColourBuffers() {
     oceanColourAmt,
   );
   speciesTraits = table;
+  const mdpPriorsFlat = buildSpeciesMdpPriors(table, oceanColourAmt, oceanSeed);
   const rules = new Float32Array(
-    chemistryData.length + oceanMatrixData.length + traitsFlat.length,
+    chemistryData.length +
+      oceanMatrixData.length +
+      traitsFlat.length +
+      mdpPriorsFlat.length,
   );
   rules.set(chemistryData, 0);
   rules.set(oceanMatrixData, chemistryData.length);
   rules.set(traitsFlat, chemistryData.length + oceanMatrixData.length);
+  rules.set(
+    mdpPriorsFlat,
+    chemistryData.length + oceanMatrixData.length + traitsFlat.length,
+  );
   device.queue.writeBuffer(worldRulesBuffer, 0, rules.buffer);
 
   const totalPalette = colourAmt + oceanColourAmt;
@@ -1630,15 +1643,16 @@ function unpackParticlesF32(f32: Float32Array, n: number): number[][] {
       f32[b + 9],
       f32[b + 10],
       f32[b + 7],
+      f32[b + 11],
     ];
   }
   return out;
 }
 
-function unpackVec4F32(f32: Float32Array, n: number): number[][] {
+function unpackVec4F32(f32: Float32Array, n: number, floatStride: number = 4): number[][] {
   const out: number[][] = new Array(n);
   for (let i = 0; i < n; i++) {
-    const b = i * 4;
+    const b = i * floatStride;
     out[i] = [f32[b], f32[b + 1], f32[b + 2], f32[b + 3]];
   }
   return out;
@@ -1671,10 +1685,11 @@ async function readVec4Buffer(
   buf: GPUBuffer | undefined,
   totalAmt: number,
   count: number = 16,
+  floatStride: number = 4,
 ): Promise<number[][]> {
   if (!device || !buf) return [];
   const n = Math.min(count, totalAmt);
-  const byteLength = n * valenceStride;
+  const byteLength = n * floatStride * 4;
   const staging = device.createBuffer({
     size: byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -1683,7 +1698,7 @@ async function readVec4Buffer(
   enc.copyBufferToBuffer(buf, 0, staging, 0, byteLength);
   device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
-  const out = unpackVec4F32(new Float32Array(staging.getMappedRange()), n);
+  const out = unpackVec4F32(new Float32Array(staging.getMappedRange()), n, floatStride);
   staging.unmap();
   staging.destroy();
   return out;
@@ -1705,24 +1720,30 @@ async function readUnifiedWorldBuffers(
   }
 
   const enc = device.createCommandEncoder();
-  const stg: Record<string, { buf: GPUBuffer; count: number; isVec4: boolean }> = {};
-  const queueRead = (name: string, src: GPUBuffer, byteLength: number, isVec4: boolean) => {
+  const stg: Record<string, { buf: GPUBuffer; count: number; isVec4: boolean; floatStride: number }> = {};
+  const queueRead = (
+    name: string,
+    src: GPUBuffer,
+    byteLength: number,
+    isVec4: boolean,
+    floatStride: number = 4,
+  ) => {
     const buf = device!.createBuffer({
       size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     enc.copyBufferToBuffer(src, 0, buf, 0, byteLength);
-    stg[name] = { buf, count: n, isVec4 };
+    stg[name] = { buf, count: n, isVec4, floatStride };
   };
 
-  queueRead('particles', particleBuffers[alternate], n * particleStride, false);
-  queueRead('lifeState', lifeStateBuffers[alternate], n * valenceStride, true);
+  queueRead('particles', particleBuffers[alternate], n * particleStride, false, 12);
+  queueRead('lifeState', lifeStateBuffers[alternate], n * lifeMdpStride, true, 12);
   if (includeExtras) {
     if (valenceBuffer) {
-      queueRead('valence', valenceBuffer, n * valenceStride, true);
+      queueRead('valence', valenceBuffer, n * valenceStride, true, 4);
     }
     if (bioForceBuffer) {
-      queueRead('bioForce', bioForceBuffer, n * valenceStride, true);
+      queueRead('bioForce', bioForceBuffer, n * valenceStride, true, 4);
     }
   }
 
@@ -1734,7 +1755,9 @@ async function readUnifiedWorldBuffers(
       const entry = stg[k];
       if (!entry) return [];
       const f32 = new Float32Array(entry.buf.getMappedRange());
-      return entry.isVec4 ? unpackVec4F32(f32, entry.count) : unpackParticlesF32(f32, entry.count);
+      return entry.isVec4
+        ? unpackVec4F32(f32, entry.count, entry.floatStride)
+        : unpackParticlesF32(f32, entry.count);
     };
     return {
       particles: readArr('particles'),
@@ -1990,6 +2013,7 @@ async function computeWorldStats() {
   let encapSpeciesSum = 0;
   let nakedSpeciesSum = 0;
   let encapGeneSum = 0;
+  const mdpBlobActions: [number, number, number, number] = [0, 0, 0, 0];
 
   for (const seedIdx of bioIndices) {
     if (visited[seedIdx]) continue;
@@ -2121,6 +2145,7 @@ async function computeWorldStats() {
       emergentRoles.halophileBlobs++;
       emergentRoles.halophileParticles += comp.length;
     }
+    mdpBlobActions[summary.mdpAction] = (mdpBlobActions[summary.mdpAction] ?? 0) + 1;
   }
 
   return {
@@ -2173,6 +2198,7 @@ async function computeWorldStats() {
     avgEncapGene: blobCount > 0 ? encapGeneSum / blobCount : 7,
     encapStrategies,
     emergentRoles,
+    mdpBlobActions,
   };
 }
 
@@ -2484,7 +2510,7 @@ function refreshHalo() {
             attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
           },
           {
-            arrayStride: valenceStride,
+            arrayStride: lifeMdpStride,
             stepMode: 'instance',
             attributes: [{ shaderLocation: 1, offset: 12, format: 'float32' }],
           },
@@ -2537,7 +2563,10 @@ const game = new TemporalGame({
       gameTracking!,
       tickNumber,
       frameCount,
-      { valence: valenceBuffer!, bioForce: bioForceBuffer! },
+      {
+        valence: valenceBuffer!,
+        bioForce: bioForceBuffer!,
+      },
     );
   },
   restore(state) {
@@ -2545,7 +2574,23 @@ const game = new TemporalGame({
       return;
     tooltipManager.invalidateInspectionFrame();
     device.queue.writeBuffer(particleBuffers[alternate], 0, state.particles);
-    device.queue.writeBuffer(lifeStateBuffers[alternate], 0, state.life);
+    const pCount = Math.floor(state.life.length / 4);
+    const combinedLife = new Float32Array(pCount * 12);
+    const combinedU32 = new Uint32Array(combinedLife.buffer);
+    const mdpWords = state.inspection?.mdp;
+    for (let i = 0; i < pCount; i++) {
+      const s = i * 4;
+      const d = i * 12;
+      combinedLife[d + 0] = state.life[s + 0];
+      combinedLife[d + 1] = state.life[s + 1];
+      combinedLife[d + 2] = state.life[s + 2];
+      combinedLife[d + 3] = state.life[s + 3];
+      if (mdpWords && mdpWords.length >= (i + 1) * 8) {
+        const ms = i * 8;
+        for (let k = 0; k < 8; k++) combinedU32[d + 4 + k] = mdpWords[ms + k];
+      }
+    }
+    device.queue.writeBuffer(lifeStateBuffers[alternate], 0, combinedLife);
     device.queue.writeBuffer(gameTracking, 0, state.episodes);
     device.queue.writeBuffer(gameTracking, state.episodes.byteLength, state.deathHistory);
     if (state.inspection && valenceBuffer && bioForceBuffer) {
@@ -2802,7 +2847,7 @@ function observeGlobeAudioCenter(nowMs: number) {
       label: 'audioParticleStage',
     });
     audioLifeStage = device.createBuffer({
-      size: n * valenceStride,
+      size: n * lifeMdpStride,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       label: 'audioLifeStage',
     });
@@ -2813,7 +2858,7 @@ function observeGlobeAudioCenter(nowMs: number) {
   const lStage = audioLifeStage;
   const enc = device.createCommandEncoder();
   enc.copyBufferToBuffer(particleBuffers[alternate], 0, pStage, 0, n * particleStride);
-  enc.copyBufferToBuffer(lifeStateBuffers[alternate], 0, lStage, 0, n * valenceStride);
+  enc.copyBufferToBuffer(lifeStateBuffers[alternate], 0, lStage, 0, n * lifeMdpStride);
   device.queue.submit([enc.finish()]);
 
   audioObserveInFlight = true;
@@ -3195,11 +3240,11 @@ window.complexLife = {
     readParticleBuffer(particleBuffers, alternate, particleAmt, count),
   readValence: (count: number = 16) => readVec4Buffer(valenceBuffer, particleAmt, count),
   readOceanState: (count: number = 16) =>
-    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count),
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 12),
   readAirBioReact: (count: number = 16) =>
     readVec4Buffer(bioForceBuffer, particleAmt, count),
   readLifeState: (count: number = 16) =>
-    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count),
+    readVec4Buffer(lifeStateBuffers?.[alternate], particleAmt, count, 12),
   readBioForce: (count: number = 16) =>
     readVec4Buffer(bioForceBuffer, particleAmt, count),
   readWorldState: async (count: number = 16) =>
@@ -3530,7 +3575,7 @@ document.addEventListener('visibilitychange', () => {
       ],
     },
     {
-      arrayStride: valenceStride,
+      arrayStride: lifeMdpStride,
       stepMode: 'instance',
       attributes: [
         { shaderLocation: 5, offset: 0, format: 'float32x4' },
@@ -4209,7 +4254,7 @@ function startWorld() {
 
   lifeStateBuffers = [
     device.createBuffer({
-      size: particleAmt * valenceStride,
+      size: particleAmt * lifeMdpStride,
       usage:
         GPUBufferUsage.STORAGE |
         GPUBufferUsage.VERTEX |
@@ -4218,7 +4263,7 @@ function startWorld() {
       label: 'lifeState0',
     }),
     device.createBuffer({
-      size: particleAmt * valenceStride,
+      size: particleAmt * lifeMdpStride,
       usage:
         GPUBufferUsage.STORAGE |
         GPUBufferUsage.VERTEX |
@@ -4244,7 +4289,13 @@ function startWorld() {
   });
 
   worldRulesBuffer = device.createBuffer({
-    size: Math.max((chemistryData.length + oceanMatrixData.length + oceanColourAmt * 4) * 4, 16),
+    size: Math.max(
+      (chemistryData.length +
+        oceanMatrixData.length +
+        oceanColourAmt * (4 + MDP_SPECIES_STRIDE)) *
+        4,
+      16,
+    ),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'worldRulesBuffer',
   });
@@ -4691,8 +4742,17 @@ function startWorld() {
   }
 
   device.queue.writeBuffer(particleBuffers[0], 0, particleData.buffer);
-  device.queue.writeBuffer(lifeStateBuffers[0], 0, lifeData.buffer);
-  device.queue.writeBuffer(lifeStateBuffers[1], 0, new Float32Array(particleAmt * 4));
+  const lifeMdpInit = new Float32Array(particleAmt * 12);
+  for (let i = 0; i < particleAmt; i++) {
+    const s = i * 4;
+    const d = i * 12;
+    lifeMdpInit[d + 0] = lifeData[s + 0];
+    lifeMdpInit[d + 1] = lifeData[s + 1];
+    lifeMdpInit[d + 2] = lifeData[s + 2];
+    lifeMdpInit[d + 3] = lifeData[s + 3];
+  }
+  device.queue.writeBuffer(lifeStateBuffers[0], 0, lifeMdpInit.buffer);
+  device.queue.writeBuffer(lifeStateBuffers[1], 0, new Float32Array(particleAmt * 12));
   device.queue.writeBuffer(valenceBuffer, 0, new Float32Array(particleAmt * 4));
   device.queue.writeBuffer(bioForceBuffer, 0, new Float32Array(particleAmt * 4));
 

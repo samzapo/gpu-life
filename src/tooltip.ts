@@ -4,6 +4,12 @@ import type { LocalUvSample } from './earth/uvData.ts';
 import type { LocalHydroSample } from './earth/hydroData.ts';
 import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D.ts';
 import type { ViewLayerMode } from './options.ts';
+import {
+  MDP_ACTION_FORAGE,
+  MDP_ACTION_LABELS,
+  type MdpActionId,
+  unpackMdpActionFromPad,
+} from './mdp.ts';
 
 export interface HoverSimSnapshot {
   elements: Element2D[];
@@ -230,6 +236,8 @@ export interface EmergentBlobSummary {
   decompCap: number;
   haloTol: number;
   role: EmergentBlobRole;
+  mdpAction: MdpActionId;
+  mdpPolicyLabel: string;
 }
 
 export function kinAngularDist(a: number, b: number): number {
@@ -275,8 +283,10 @@ export function summarizeAndClassifyBlob(
   let redoxSum = 0;
   let speedSum = 0;
   let geneSum = 0;
+  const mdpActionCounts = [0, 0, 0, 0];
 
-  for (const id of memberIndices) {
+  for (let idxPos = 0; idxPos < memberIndices.length; idxPos++) {
+    const id = memberIndices[idxPos];
     const p = particles[id];
     const ls = lifeState[id] ?? [0.65, 0, 0, 1];
     const meta = unpackLifeMeta(ls);
@@ -295,6 +305,7 @@ export function summarizeAndClassifyBlob(
       lipidCount++;
     } else {
       cytoplasmCount++;
+      mdpActionCounts[unpackMdpActionFromPad(p?.[11] ?? 0)]++;
       spSet.add(meta.bioSpecies);
       const tr = speciesTraits[meta.bioSpecies] ?? [0.5, 0.25, 0.25, 0.35];
       if (el) {
@@ -324,7 +335,7 @@ export function summarizeAndClassifyBlob(
   const avgAsym = cytoplasmCount > 0 ? asymSum / bioN : 0.35;
   const avgSolarFrac = cytoplasmCount > 0 ? solarSum / bioN : 0.65;
   const avgRedoxFrac = cytoplasmCount > 0 ? redoxSum / bioN : 0.35;
-  const avgMotility = cytoplasmCount > 0 ? Math.max(0, Math.min(1.5, speedSum / bioN / 0.45)) : 0;
+  const avgMotility = cytoplasmCount > 0 ? Math.max(0, Math.min(1.5, speedSum / bioN / 0.16)) : 0;
   const lightExposure = Math.max(0.64, Math.min(1.0, 1.16 - 0.008 * Math.min(cytoplasmCount, 65)));
 
   const autoCap = Math.max(
@@ -333,7 +344,7 @@ export function summarizeAndClassifyBlob(
   );
   const predCap = Math.max(
     0.05,
-    Math.min(1.6, (0.2 + 0.95 * avgAsym) * (0.35 + 0.85 * avgMotility) * (0.55 + 0.65 * avgRedoxFrac)),
+    Math.min(1.65, (0.24 + 0.95 * avgAsym) * (0.40 + 0.85 * avgMotility) * (0.68 + 0.52 * avgRedoxFrac)),
   );
   const decompCap = Math.max(
     0.1,
@@ -345,14 +356,23 @@ export function summarizeAndClassifyBlob(
   if (avgPoi > 0.12 || (haloTol >= 0.66 && nearbyHalogens >= 4)) {
     role = 'halophile';
   } else if (
-    (avgEnergy < 0.36 && decompCap >= 0.45) ||
-    (decompCap > autoCap * 1.12 && decompCap > predCap * 1.05 && avgRedoxFrac >= 0.42)
+    (avgEnergy < 0.44 && decompCap >= 0.45) ||
+    (decompCap > autoCap * 1.15 && decompCap > predCap * 1.12 && avgRedoxFrac >= 0.46 && avgMotility < 0.30)
   ) {
     role = 'decomposer';
-  } else if (autoCap >= 0.48 && predCap >= 0.48 && avgAsym >= 0.4 && avgMotility >= 0.35) {
+  } else if (predCap > autoCap * 0.94 && avgMotility >= 0.28 && avgAsym >= 0.32) {
+    role = autoCap >= 0.46 && autoCap >= predCap * 0.78 ? 'mixotroph' : 'consumer';
+  } else if (autoCap >= 0.46 && predCap >= 0.46 && avgAsym >= 0.36 && avgMotility >= 0.30) {
     role = 'mixotroph';
-  } else if (predCap > autoCap * 1.08 && avgMotility >= 0.32 && avgAsym >= 0.36) {
-    role = 'consumer';
+  }
+
+  let dominantAct: MdpActionId = MDP_ACTION_FORAGE;
+  let bestActCount = -1;
+  for (let a = 0; a < 4; a++) {
+    if (mdpActionCounts[a] > bestActCount) {
+      bestActCount = mdpActionCounts[a];
+      dominantAct = a as MdpActionId;
+    }
   }
 
   return {
@@ -379,6 +399,8 @@ export function summarizeAndClassifyBlob(
     decompCap,
     haloTol,
     role,
+    mdpAction: dominantAct,
+    mdpPolicyLabel: MDP_ACTION_LABELS[dominantAct] ?? 'Foraging',
   };
 }
 
@@ -1236,7 +1258,7 @@ export function analyzeReactionAt(
       envChips: surfEnvChips,
       title,
       body: `${statusDesc}${gradDetail}${landDetail}${mineralNote}`,
-      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
+      meta: `Atom #${bestIdx} (${sym0}) · Tissue #${bestBioSp} · ${habitatTag} · Policy: ${blob.mdpPolicyLabel} · ${encapTag} · ${strategyGeneStr} · Blob E=${blob.avgEnergy.toFixed(2)} · Motility ${blob.avgMotility.toFixed(2)}`,
       element: selectedElement,
       targetPhase: 1,
       targetIdx: bestIdx,

@@ -23,6 +23,7 @@ export interface Snapshot {
   inspection?: {
     valence: Float32Array<ArrayBuffer>;
     bioForce: Float32Array<ArrayBuffer>;
+    mdp?: Uint32Array<ArrayBuffer>;
   };
 }
 export interface Colony {
@@ -198,7 +199,25 @@ export async function readCheckpoint(
     device.queue.submit([encoder.finish()]);
     await staging.mapAsync(GPUMapMode.READ);
     const bytes = staging.getMappedRange().slice(0);
-    const particleCount = life.size / (4 * Float32Array.BYTES_PER_ELEMENT);
+    const particleCount = particles.size / 48;
+    const rawLifeF32 = new Float32Array(bytes, particles.size, life.size / 4);
+    const rawLifeU32 = new Uint32Array(bytes, particles.size, life.size / 4);
+    const compactLife = new Float32Array(particleCount * 4);
+    const mdpWords = life.size >= particleCount * 48 ? new Uint32Array(particleCount * 8) : undefined;
+    if (mdpWords) {
+      for (let i = 0; i < particleCount; i++) {
+        const s = i * 12;
+        const d = i * 4;
+        compactLife[d + 0] = rawLifeF32[s + 0];
+        compactLife[d + 1] = rawLifeF32[s + 1];
+        compactLife[d + 2] = rawLifeF32[s + 2];
+        compactLife[d + 3] = rawLifeF32[s + 3];
+        const md = i * 8;
+        for (let k = 0; k < 8; k++) mdpWords[md + k] = rawLifeU32[s + 4 + k];
+      }
+    } else {
+      compactLife.set(rawLifeF32.subarray(0, particleCount * 4));
+    }
     return {
       tick,
       frame,
@@ -213,9 +232,10 @@ export async function readCheckpoint(
           bioForceOffset,
           inspection.bioForce.size / 4,
         ),
+        ...(mdpWords ? { mdp: mdpWords } : {}),
       },
       particles: new Float32Array(bytes, 0, particles.size / 4),
-      life: new Float32Array(bytes, particles.size, life.size / 4),
+      life: compactLife,
       episodes: new Uint32Array(
         bytes,
         particles.size + life.size,

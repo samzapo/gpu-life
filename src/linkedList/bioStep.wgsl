@@ -11,8 +11,8 @@ struct LinkedList {
 @group(0) @binding(1) var oceanTex: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
 @group(0) @binding(3) var<storage, read> input: array<Particle>;
-@group(0) @binding(4) var<storage, read> lifeStateIn: array<vec4f>;
-@group(0) @binding(5) var<storage, read_write> lifeStateOut: array<vec4f>;
+@group(0) @binding(4) var<storage, read> lifeStateIn: array<LifeMdpState>;
+@group(0) @binding(5) var<storage, read_write> lifeStateOut: array<LifeMdpState>;
 @group(0) @binding(6) var<storage, read> valence: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> bioForceOut: array<vec4f>;
 @group(0) @binding(8) var<storage, read> heads: HeadsRead;
@@ -31,8 +31,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let p = input[pi];
-    let curLife = lifeStateIn[pi];
+    let curEntry = lifeStateIn[pi];
+    let curLife = curEntry.life;
     let myPhase = unpackPhase(curLife.w);
+    let curMdp = MdpState(curEntry.qPack, curEntry.ctrl);
     let nChem = max(u32(bio.chemColours), 1u);
     let mySc = min(u32(p.colour), nChem - 1u);
     let mySBase = mySc * SPECIES_STRIDE;
@@ -52,9 +54,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (bio.enabled <= 0.5 && bio.mineralEnabled <= 0.5) {
         let zeroGrads = BioEnvGrads(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
         let resOff = finalizeBioUnified(
-            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, p._pad, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, zeroGrads, initBioUnifiedAccum(), bio,
+            pi, p.pos, p.vel, myAtomicNum, myValence, myAtomLoad, curLife, p._pad, curMdp, windRaw, oc, tSample, uvSample, hydroSample, terrainSample, zeroGrads, initBioUnifiedAccum(), bio,
         );
-        lifeStateOut[pi] = resOff.nextLifeState;
+        lifeStateOut[pi] = LifeMdpState(resOff.nextLifeState, resOff.nextMdpState.qPack, resOff.nextMdpState.ctrl);
         bioForceOut[pi] = resOff.bioForce;
         return;
     }
@@ -84,8 +86,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             let nbAtomicNum = u32(matrix[nbSBase + 7u]);
                             let nbV = valence[ip.idx];
                             let nbAtomLoad = select(0.0, nbV.x + nbV.y + nbV.z, ip.phase == 0u);
-                            let nbLife = lifeStateIn[ip.idx];
+                            let nbEntry = lifeStateIn[ip.idx];
+                            let nbLife = nbEntry.life;
                             let nbPart = input[ip.idx];
+                            var nbMdp = emptyMdpState();
+                            if (myPhase == 1u && ip.phase == 1u) {
+                                nbMdp = MdpState(nbEntry.qPack, nbEntry.ctrl);
+                            }
                             accumulateBioUnifiedNeighbor(
                                 p.pos,
                                 p.vel,
@@ -104,6 +111,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 nbAtomicNum,
                                 nbValence,
                                 nbPart._pad,
+                                nbMdp,
                                 oc,
                                 bio,
                                 &acc,
@@ -126,6 +134,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         myAtomLoad,
         curLife,
         p._pad,
+        curMdp,
         windRaw,
         oc,
         tSample,
@@ -136,6 +145,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         acc,
         bio,
     );
-    lifeStateOut[pi] = res.nextLifeState;
+    lifeStateOut[pi] = LifeMdpState(res.nextLifeState, res.nextMdpState.qPack, res.nextMdpState.ctrl);
     bioForceOut[pi] = res.bioForce;
 }

@@ -508,7 +508,8 @@ export class TemporalGame {
         state.episodes.byteLength +
         state.deathHistory.byteLength +
         (state.inspection?.valence.byteLength ?? 0) +
-        (state.inspection?.bioForce.byteLength ?? 0);
+        (state.inspection?.bioForce.byteLength ?? 0) +
+        (state.inspection?.mdp?.byteLength ?? 0);
       const slots = Math.max(
         3,
         Math.min(41, Math.floor((48 << 20) / checkpointBytes)),

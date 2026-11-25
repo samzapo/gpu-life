@@ -210,3 +210,72 @@ fn wrapAngle(angle: f32) -> f32 {
     }
     return a;
 }
+
+const MDP_SPECIES_STRIDE: u32 = 16u;
+const MDP_STATE_STARVING: u32 = 0u;
+const MDP_STATE_THREATENED: u32 = 1u;
+const MDP_STATE_THRIVING: u32 = 2u;
+const MDP_STATE_DORMANT: u32 = 3u;
+
+const MDP_ACT_FORAGE: u32 = 0u;
+const MDP_ACT_HUNT: u32 = 1u;
+const MDP_ACT_EVADE: u32 = 2u;
+const MDP_ACT_CONSOLIDATE: u32 = 3u;
+
+struct MdpState {
+    qPack: vec4u,
+    ctrl: vec4f,
+}
+
+struct LifeMdpState {
+    life: vec4f,
+    qPack: vec4u,
+    ctrl: vec4f,
+}
+
+fn emptyMdpState() -> MdpState {
+    return MdpState(vec4u(0u), vec4f(0.0));
+}
+
+fn quantizeMdpQ(q: f32) -> u32 {
+    let norm = clamp((q + 1.5) / 3.0, 0.0, 1.0);
+    return u32(round(norm * 255.0)) & 255u;
+}
+
+fn dequantizeMdpQ(qByte: u32) -> f32 {
+    return (f32(qByte & 255u) / 255.0) * 3.0 - 1.5;
+}
+
+fn unpackMdpQ(rowPacked: u32, actionIdx: u32) -> f32 {
+    let shift = (actionIdx & 3u) * 8u;
+    return dequantizeMdpQ((rowPacked >> shift) & 255u);
+}
+
+fn setMdpQ(rowPacked: u32, actionIdx: u32, val: f32) -> u32 {
+    let shift = (actionIdx & 3u) * 8u;
+    let clearMask = ~(255u << shift);
+    return (rowPacked & clearMask) | (quantizeMdpQ(val) << shift);
+}
+
+fn packMdpCtrl(prevState: u32, action: u32, dwell: u32, initBit: u32) -> f32 {
+    let packed = (prevState & 3u) | ((action & 3u) << 2u) | (min(dwell, 255u) << 4u) | ((initBit & 1u) << 12u);
+    return f32(packed);
+}
+
+fn getQRow(qPack: vec4u, stateIdx: u32) -> u32 {
+    let s = stateIdx & 3u;
+    if (s == 0u) { return qPack.x; }
+    if (s == 1u) { return qPack.y; }
+    if (s == 2u) { return qPack.z; }
+    return qPack.w;
+}
+
+fn setQRow(qPack: vec4u, stateIdx: u32, rowVal: u32) -> vec4u {
+    let s = stateIdx & 3u;
+    var out = qPack;
+    if (s == 0u) { out.x = rowVal; }
+    else if (s == 1u) { out.y = rowVal; }
+    else if (s == 2u) { out.z = rowVal; }
+    else { out.w = rowVal; }
+    return out;
+}

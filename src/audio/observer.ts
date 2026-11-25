@@ -201,6 +201,7 @@ export function observeScreenAudioState(
   let chemElemCarbonW = 0;
   let domChemElem = 5;
   let bestChemScore = -1;
+  const lifeStride = lifeStateF32.length >= count * 12 ? 12 : 4;
 
   for (let i = 0; i < n; i++) {
     const pBase = i * 12;
@@ -240,7 +241,7 @@ export function observeScreenAudioState(
     const laneIdx = Math.max(0, Math.min(3, Math.floor((dxNorm * 0.5 + 0.5) * 4)));
     totalW += w;
 
-    const lBase = i * 4;
+    const lBase = i * lifeStride;
     const ls0 = lifeStateF32[lBase];
     const ls1 = lifeStateF32[lBase + 1];
     const ls2 = lifeStateF32[lBase + 2];
@@ -308,7 +309,16 @@ export function observeScreenAudioState(
     }
 
     const metaBias = particlesF32[pBase + 11] || 0;
-    if (metaBias < -0.08) {
+    if (metaBias >= 2097151.5) {
+      const packedNiche = Math.round(metaBias);
+      if (((packedNiche >>> 20) & 1) === 1) {
+        bioProdW += bw;
+        laneBioProd[laneIdx] += bw;
+      } else {
+        bioConsW += bw;
+        laneBioCons[laneIdx] += bw;
+      }
+    } else if (metaBias < -0.08) {
       bioProdW += bw;
       laneBioProd[laneIdx] += bw;
     } else if (metaBias > 0.14) {

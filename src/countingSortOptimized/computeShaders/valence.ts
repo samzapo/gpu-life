@@ -13,7 +13,7 @@ ${valenceSimShader}
 @group(0) @binding(1) var<uniform> sim: Sim;
 @group(0) @binding(2) var<storage, read> matrix: array<f32>;
 @group(0) @binding(3) var<storage, read> input: array<Particle>;
-@group(0) @binding(4) var<storage, read> lifeState: array<vec4f>;
+@group(0) @binding(4) var<storage, read> lifeState: array<LifeMdpState>;
 @group(0) @binding(5) var<storage, read_write> valenceOut: array<vec4f>;
 @group(0) @binding(6) var<storage, read> sorted: array<SortParticle>;
 @group(0) @binding(7) var<storage, read> prefixSumIndices: array<u32>;
@@ -48,7 +48,7 @@ fn getCellBioLink(
         if (ip.idx == pi || ip.phase != (*acc).myPhase) {
             continue;
         }
-        accumulateBioLinkNeighbor(ip.pos, ip.phase, lifeState[ip.idx], acc);
+        accumulateBioLinkNeighbor(ip.pos, ip.phase, lifeState[ip.idx].life, acc);
     }
 }
 
@@ -58,7 +58,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (pi >= arrayLength(&valenceOut)) {
         return;
     }
-    let myLs = lifeState[pi];
+    let myLs = lifeState[pi].life;
     let myPhase = unpackPhase(myLs.w);
     let p = input[pi];
     let numCells = u32(sim.cellAmt);

@@ -20,7 +20,7 @@ ${oceanSimShader}
 @group(0) @binding(5) var<storage, read> matrix: array<f32>;
 @group(0) @binding(6) var<storage, read> input: array<Particle>;
 @group(0) @binding(7) var<storage, read_write> output: array<Particle>;
-@group(0) @binding(8) var<storage, read> lifeStateNext: array<vec4f>;
+@group(0) @binding(8) var<storage, read> lifeStateNext: array<LifeMdpState>;
 @group(0) @binding(9) var<storage, read> valence: array<vec4f>;
 @group(0) @binding(10) var<storage, read> bioForce: array<vec4f>;
 @group(0) @binding(11) var<storage, read> sorted: array<SortParticle>;
@@ -116,7 +116,7 @@ fn getBioCellForce(
         if (ip.idx == pi) {
             continue;
         }
-        let nbLs = lifeStateNext[ip.idx];
+        let nbLs = lifeStateNext[ip.idx].life;
         let nbPhase = unpackPhase(nbLs.w);
         if (nbPhase == 0u) {
             continue;
@@ -169,7 +169,7 @@ fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32) -> Fo
                     if (dot(dVec, dVec) >= maxChord2) {
                         continue;
                     }
-                    let nbLs = lifeStateNext[ip.idx];
+                    let nbLs = lifeStateNext[ip.idx].life;
                     let nbPhase = unpackPhase(nbLs.w);
                     if (nbPhase == 0u) {
                         continue;
@@ -206,7 +206,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let p = input[pi];
-    let ls = lifeStateNext[pi];
+    let ls = lifeStateNext[pi].life;
     let myPhase = unpackPhase(ls.w);
     if (myPhase == 3u) {
         output[pi] = integrateMineralParticle(p, ls, bioForce[pi]);
