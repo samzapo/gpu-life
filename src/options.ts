@@ -438,10 +438,15 @@ export const copyConfigBtn = withTooltip(
   'Copy Configuration JSON',
   'Copy all current simulation, chemistry, ocean, bioChem, opacity, and camera settings to clipboard for prompts or reuse.',
 );
+export const copyStateBtn = withTooltip(
+  advanced.addButton({ title: 'Copy Sim State' }),
+  'Copy Reproducible Simulation State',
+  'Capture settings, camera, frame, audio telemetry, and compressed GPU particle/life/MDP buffers to clipboard (or modal download) so an exact moment can be reproduced.',
+);
 export const pasteConfigBtn = withTooltip(
   advanced.addButton({ title: 'Paste / Load Config' }),
   'Paste / Load Configuration',
-  'Open config box to paste a saved JSON config or URL from another run, or reset defaults & clear browser cache.',
+  'Open box to paste a saved JSON config, simulation state snapshot, or URL from another run, load a .json file, or reset defaults.',
 );
 
 // Earth & Wind / Ocean folder (emulating earth.nullschool.net layers, levels & projections)

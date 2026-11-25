@@ -132,6 +132,7 @@ import {
   coastlinesBinding,
   colourAmt as colourAmtOptn,
   copyConfigBtn,
+  copyStateBtn,
   earthParams,
   engineSelect,
   getCachedConfig,
@@ -198,6 +199,13 @@ import {
   saveCachedConfig,
   type SimConfigV1,
 } from './config';
+import {
+  isSerializedSimStateInput,
+  parseSimStateInput,
+  serializeSimState,
+  type DecodedSimState,
+  type SimStateExportV1,
+} from './simState';
 import {
   kinAngularDist,
   summarizeAndClassifyBlob,
@@ -912,8 +920,15 @@ function scheduleSaveConfig() {
   }, 220);
 }
 
-async function importConfiguration(rawInput: string | SimConfigV1): Promise<SimConfigV1> {
-  const cfg = parseConfigInput(rawInput);
+async function importConfiguration(
+  rawInput: string | SimConfigV1 | SimStateExportV1,
+): Promise<SimConfigV1> {
+  if (isSerializedSimStateInput(rawInput)) {
+    const decoded = await parseSimStateInput(rawInput as string | SimStateExportV1);
+    await restoreDecodedSimState(decoded);
+    return exportCurrentConfig();
+  }
+  const cfg = parseConfigInput(rawInput as string | SimConfigV1);
 
   let resetWorld = false;
   let nextViewLayer: ViewLayerMode | null = null;
@@ -1623,6 +1638,8 @@ declare global {
           halophileParticles: number;
         };
       }>;
+      exportSimState: () => Promise<SimStateExportV1>;
+      importSimState: (raw: string | SimStateExportV1) => Promise<SimConfigV1>;
     };
   }
 }
@@ -1775,6 +1792,126 @@ async function readUnifiedWorldBuffers(
       stg[k].buf.destroy();
     }
   }
+}
+
+async function captureCurrentSimState(): Promise<SimStateExportV1> {
+  if (!device || !particleBuffers || !lifeStateBuffers) {
+    throw new Error('Simulation GPU buffers are not initialized yet.');
+  }
+  const n = particleAmt;
+  const activeAlternate: 0 | 1 = alternate === 1 ? 1 : 0;
+  const enc = device.createCommandEncoder();
+  const stageEntries: Record<string, { buf: GPUBuffer }> = {};
+  const queueCopy = (key: string, src: GPUBuffer, byteLength: number) => {
+    const buf = device!.createBuffer({
+      size: byteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    enc.copyBufferToBuffer(src, 0, buf, 0, byteLength);
+    stageEntries[key] = { buf };
+  };
+
+  queueCopy('particles', particleBuffers[activeAlternate], n * particleStride);
+  queueCopy('lifeMdp', lifeStateBuffers[activeAlternate], n * lifeMdpStride);
+  if (bioForceBuffer) {
+    queueCopy('bioForce', bioForceBuffer, n * valenceStride);
+  }
+  if (valenceBuffer) {
+    queueCopy('valence', valenceBuffer, n * valenceStride);
+  }
+  if (gameTracking) {
+    queueCopy('gameTracking', gameTracking, n * Uint32Array.BYTES_PER_ELEMENT * 2);
+  }
+
+  device.queue.submit([enc.finish()]);
+  const keys = Object.keys(stageEntries);
+  try {
+    await Promise.all(keys.map((k) => stageEntries[k].buf.mapAsync(GPUMapMode.READ)));
+    const readBytes = (k: string): Uint8Array | undefined => {
+      const entry = stageEntries[k];
+      if (!entry) return undefined;
+      return new Uint8Array(entry.buf.getMappedRange()).slice();
+    };
+    const particles = readBytes('particles');
+    const lifeMdp = readBytes('lifeMdp');
+    if (!particles || !lifeMdp) {
+      throw new Error('Failed to read core particle/life simulation buffers.');
+    }
+    const config = exportCurrentConfig();
+    return serializeSimState({
+      config,
+      runtime: {
+        engine,
+        particleCount: n,
+        alternate: activeAlternate,
+        frameCount,
+        uvUtcMs: uvUtcOverrideMs ?? Date.now(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+        viewport: [
+          viewState.width,
+          viewState.height,
+          typeof window !== 'undefined' ? Number(window.devicePixelRatio || 1) : 1,
+        ],
+        audio: {
+          enabled: cyberSynth.isEnabled(),
+          state: cyberSynth.getState(),
+          volume: cyberSynth.getVolume(),
+          lastObservation: lastAudioObservation,
+        },
+      },
+      particles,
+      lifeMdp,
+      bioForce: readBytes('bioForce'),
+      valence: readBytes('valence'),
+      gameTracking: readBytes('gameTracking'),
+    });
+  } finally {
+    for (const k of keys) {
+      try {
+        stageEntries[k].buf.unmap();
+      } catch {
+        // Already unmapped
+      }
+      stageEntries[k].buf.destroy();
+    }
+  }
+}
+
+async function restoreDecodedSimState(decoded: DecodedSimState): Promise<void> {
+  await importConfiguration(decoded.config);
+  if (!device || !particleBuffers || !lifeStateBuffers) {
+    throw new Error('Simulation GPU buffers are unavailable for restore.');
+  }
+  if (decoded.runtime.uvUtcMs !== undefined) {
+    uvUtcOverrideMs = decoded.runtime.uvUtcMs;
+    uploadUvToGpu();
+  }
+  tooltipManager.invalidateInspectionFrame();
+  alternate = decoded.runtime.alternate === 1 ? 1 : 0;
+  frameCount = decoded.runtime.frameCount;
+
+  const targetAlternate = alternate;
+  const writeBytes = (buf: GPUBuffer, data: Uint8Array) => {
+    const ab = data.buffer as ArrayBuffer;
+    device!.queue.writeBuffer(buf, 0, ab, data.byteOffset, data.byteLength);
+  };
+  writeBytes(particleBuffers[targetAlternate], decoded.particles);
+  writeBytes(lifeStateBuffers[targetAlternate], decoded.lifeMdp);
+  if (decoded.bioForce && bioForceBuffer) {
+    writeBytes(bioForceBuffer, decoded.bioForce);
+  }
+  if (decoded.valence && valenceBuffer) {
+    writeBytes(valenceBuffer, decoded.valence);
+  }
+  if (decoded.gameTracking && gameTracking) {
+    writeBytes(gameTracking, decoded.gameTracking);
+  }
+
+  frameBuf[0] = frameCount;
+  simData[18] = frameCount;
+  bioUniformData[9] = frameCount;
+  if (simBuffer) setSim(device, simData, simBuffer, frameCount);
+  syncBioUniformState();
 }
 
 async function captureHoverSnapshot(): Promise<HoverSimSnapshot | null> {
@@ -3255,6 +3392,8 @@ window.complexLife = {
       bioForce: [],
     },
   getWorldStats: computeWorldStats,
+  exportSimState: captureCurrentSimState,
+  importSimState: (raw: string | SimStateExportV1) => importConfiguration(raw),
 };
 
 function syncCanvasDimensions() {
@@ -5166,10 +5305,14 @@ const configModalStatus = document.getElementById('configModalStatus') as HTMLEl
 const configCloseBtn = document.getElementById('configCloseBtn') as HTMLButtonElement | null;
 const configLinkBtn = document.getElementById('configLinkBtn') as HTMLButtonElement | null;
 const configCopyBtn = document.getElementById('configCopyBtn') as HTMLButtonElement | null;
+const configDownloadBtn = document.getElementById('configDownloadBtn') as HTMLButtonElement | null;
+const configUploadBtn = document.getElementById('configUploadBtn') as HTMLButtonElement | null;
+const configFileInput = document.getElementById('configFileInput') as HTMLInputElement | null;
 const configApplyBtn = document.getElementById('configApplyBtn') as HTMLButtonElement | null;
 const configResetBtn = document.getElementById('configResetBtn') as HTMLButtonElement | null;
 
 let copyBtnResetTimer: number | undefined;
+let copyStateBtnResetTimer: number | undefined;
 
 function setModalStatus(msg: string, isErr = false) {
   if (!configModalStatus) return;
@@ -5177,10 +5320,10 @@ function setModalStatus(msg: string, isErr = false) {
   configModalStatus.classList.toggle('err', isErr);
 }
 
-function openConfigModal(initialMsg = '') {
+function openConfigModal(initialMsg = '', initialValue?: string) {
   if (!configModal || !configTextarea) return;
   tooltipManager.hide();
-  configTextarea.value = JSON.stringify(exportCurrentConfig(), null, 2);
+  configTextarea.value = initialValue ?? JSON.stringify(exportCurrentConfig(), null, 2);
   setModalStatus(initialMsg, false);
   configModal.hidden = false;
   if (window.matchMedia('(pointer: coarse)').matches) {
@@ -5245,6 +5388,42 @@ copyConfigBtn.on('click', async () => {
   }
 });
 
+copyStateBtn.on('click', async () => {
+  copyStateBtn.title = 'Copying…';
+  try {
+    const snapshot = await captureCurrentSimState();
+    const json = JSON.stringify(snapshot);
+    const kb = Math.round(json.length / 1024);
+    let copied = false;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(json);
+        copied = true;
+      } catch {
+        copied = false;
+      }
+    }
+    if (copied) {
+      copyStateBtn.title = `Copied (${kb} KB) ✓`;
+      if (copyStateBtnResetTimer !== undefined) window.clearTimeout(copyStateBtnResetTimer);
+      copyStateBtnResetTimer = window.setTimeout(() => {
+        copyStateBtn.title = 'Copy Sim State';
+      }, 2000);
+    } else {
+      copyStateBtn.title = 'Copy Sim State';
+      openConfigModal(
+        `Clipboard permission unavailable — copy or download the ${kb} KB sim state snapshot below.`,
+        json,
+      );
+    }
+  } catch (err) {
+    copyStateBtn.title = 'Copy Sim State';
+    const msg = err instanceof Error ? err.message : 'Unable to capture simulation state.';
+    openConfigModal(msg);
+    setModalStatus(msg, true);
+  }
+});
+
 pasteConfigBtn.on('click', () => {
   openConfigModal();
 });
@@ -5277,19 +5456,77 @@ configCopyBtn?.addEventListener('click', async () => {
   const text = configTextarea.value.trim() || JSON.stringify(exportCurrentConfig(), null, 2);
   const copied = await copyConfigTextWithFallback(text);
   if (copied) {
-    setModalStatus('Copied JSON configuration to clipboard.');
+    setModalStatus('Copied JSON to clipboard.');
   } else {
     configTextarea.select();
     setModalStatus('Tap & hold selected JSON to Copy.');
   }
 });
 
+configDownloadBtn?.addEventListener('click', async () => {
+  try {
+    let text = configTextarea?.value.trim() ?? '';
+    let isState = isSerializedSimStateInput(text);
+    if (!text) {
+      const snapshot = await captureCurrentSimState();
+      text = JSON.stringify(snapshot);
+      isState = true;
+      if (configTextarea) configTextarea.value = text;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = isState
+      ? `complex-life-state-${stamp}.json`
+      : `complex-life-config-${stamp}.json`;
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setModalStatus(`Downloaded ${filename} (${Math.round(text.length / 1024)} KB).`);
+  } catch (err) {
+    setModalStatus(err instanceof Error ? err.message : 'Download failed.', true);
+  }
+});
+
+configUploadBtn?.addEventListener('click', () => {
+  configFileInput?.click();
+});
+
+configFileInput?.addEventListener('change', async () => {
+  const file = configFileInput.files?.[0];
+  configFileInput.value = '';
+  if (!file) return;
+  try {
+    const text = await file.text();
+    if (configTextarea) configTextarea.value = text;
+    const isState = isSerializedSimStateInput(text);
+    setModalStatus(isState ? 'Applying simulation state snapshot…' : 'Applying configuration…');
+    await importConfiguration(text);
+    setModalStatus(
+      isState
+        ? `Restored simulation state from ${file.name}.`
+        : `Applied configuration from ${file.name}.`,
+    );
+  } catch (err) {
+    setModalStatus(err instanceof Error ? err.message : 'Failed to load file.', true);
+  }
+});
+
 configApplyBtn?.addEventListener('click', async () => {
   if (!configTextarea) return;
-  setModalStatus('Applying configuration…');
+  const isState = isSerializedSimStateInput(configTextarea.value);
+  setModalStatus(isState ? 'Restoring simulation state snapshot…' : 'Applying configuration…');
   try {
     await importConfiguration(configTextarea.value);
-    setModalStatus('Configuration applied & cached cleanly.');
+    setModalStatus(
+      isState
+        ? 'Simulation state restored & active GPU buffers updated.'
+        : 'Configuration applied & cached cleanly.',
+    );
   } catch (err) {
     setModalStatus(err instanceof Error ? err.message : 'Invalid configuration.', true);
   }
