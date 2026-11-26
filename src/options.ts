@@ -174,10 +174,12 @@ export const earthParams = {
   vortex: initialWindMix,
   windStrength: resolveNumber('windStrength', effectiveCachedConfig?.earth?.windStrength, FACTORY_DEFAULTS.earth.windStrength),
   windLines: parseOpacityParam('windLines', effectiveCachedConfig?.earth?.windLines, FACTORY_DEFAULTS.earth.windLines),
+  windAmp: resolveNumber('windAmp', effectiveCachedConfig?.earth?.windAmp, FACTORY_DEFAULTS.earth.windAmp, 0),
   windColors: parseOpacityParam('windColors', effectiveCachedConfig?.earth?.windColors, FACTORY_DEFAULTS.earth.windColors),
   oceanMix: resolveBool('oceanMix', effectiveCachedConfig?.earth?.oceanMix, FACTORY_DEFAULTS.earth.oceanMix),
   oceanStrength: resolveNumber('oceanStrength', effectiveCachedConfig?.earth?.oceanStrength, FACTORY_DEFAULTS.earth.oceanStrength),
   oceanLines: parseOpacityParam('oceanLines', effectiveCachedConfig?.earth?.oceanLines, FACTORY_DEFAULTS.earth.oceanLines),
+  oceanAmp: resolveNumber('oceanAmp', effectiveCachedConfig?.earth?.oceanAmp, FACTORY_DEFAULTS.earth.oceanAmp, 0),
   oceanColors: parseOpacityParam('oceanColors', effectiveCachedConfig?.earth?.oceanColors, FACTORY_DEFAULTS.earth.oceanColors),
   tempColors: parseOpacityParam('tempColors', effectiveCachedConfig?.earth?.tempColors, FACTORY_DEFAULTS.earth.tempColors),
   localTemp: resolveBool('localTemp', effectiveCachedConfig?.earth?.localTemp, FACTORY_DEFAULTS.earth.localTemp),
@@ -502,6 +504,13 @@ export const windStrengthBinding = withTooltip(
   'Wind Force Scale',
   'Multiplier scaling how strongly wind vectors accelerate atmospheric chemistry atoms.',
 );
+const ampSliderParams: BindingParams = {
+  min: 0,
+  max: 3,
+  step: 0.05,
+  format: (v: number) => `${Math.round(v * 100)}%`,
+};
+
 export const windLinesBinding = withTooltip(
   pane.addBinding(earthParams, 'windLines', {
     index: 1,
@@ -511,9 +520,18 @@ export const windLinesBinding = withTooltip(
   'Wind Streamlines Opacity',
   'Opacity (0%–100%) of animated atmospheric wind streamlines overlaid across the globe.',
 );
+export const windAmpBinding = withTooltip(
+  pane.addBinding(earthParams, 'windAmp', {
+    index: 2,
+    label: 'windAmp',
+    ...ampSliderParams,
+  }),
+  'Wind Wave Amplitude',
+  'Wave deflection amplitude (0%–300%) for atmospheric wind streamlines following high-frequency synth transients.',
+);
 export const windColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'windColors', {
-    index: 2,
+    index: 3,
     label: 'windColors',
     ...opacitySliderParams,
   }),
@@ -522,7 +540,7 @@ export const windColorsBinding = withTooltip(
 );
 export const chemOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'chemOpacity', {
-    index: 3,
+    index: 4,
     label: 'chemAlpha',
     ...opacitySliderParams,
   }),
@@ -548,16 +566,25 @@ export const oceanStrengthBinding = withTooltip(
 );
 export const oceanLinesBinding = withTooltip(
   pane.addBinding(earthParams, 'oceanLines', {
-    index: 4,
+    index: 5,
     label: 'oceanLines',
     ...opacitySliderParams,
   }),
   'Ocean Streamlines Opacity',
   'Opacity (0%–100%) of animated ocean current streamlines inside marine basins.',
 );
+export const oceanAmpBinding = withTooltip(
+  pane.addBinding(earthParams, 'oceanAmp', {
+    index: 6,
+    label: 'currentAmp',
+    ...ampSliderParams,
+  }),
+  'Current Wave Amplitude',
+  'Wave deflection amplitude (0%–300%) for ocean current streamlines following low-frequency synth beats.',
+);
 export const oceanColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'oceanColors', {
-    index: 5,
+    index: 7,
     label: 'oceanColors',
     ...opacitySliderParams,
   }),
@@ -566,7 +593,7 @@ export const oceanColorsBinding = withTooltip(
 );
 export const tempColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'tempColors', {
-    index: 6,
+    index: 8,
     label: 'tempColors',
     ...opacitySliderParams,
   }),
@@ -592,7 +619,7 @@ export const tempStrengthBinding = withTooltip(
 );
 export const uvColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'uvColors', {
-    index: 7,
+    index: 9,
     label: 'uvColors',
     ...opacitySliderParams,
   }),
@@ -618,7 +645,7 @@ export const uvStrengthBinding = withTooltip(
 );
 export const rhColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'rhColors', {
-    index: 8,
+    index: 10,
     label: 'rhColors',
     ...opacitySliderParams,
   }),
@@ -627,7 +654,7 @@ export const rhColorsBinding = withTooltip(
 );
 export const precipColorsBinding = withTooltip(
   pane.addBinding(earthParams, 'precipColors', {
-    index: 9,
+    index: 11,
     label: '3hpsColors',
     ...opacitySliderParams,
   }),
@@ -653,7 +680,7 @@ export const hydroStrengthBinding = withTooltip(
 );
 export const lifeOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'lifeOpacity', {
-    index: 10,
+    index: 12,
     label: 'lifeAlpha',
     ...opacitySliderParams,
   }),
@@ -662,7 +689,7 @@ export const lifeOpacityBinding = withTooltip(
 );
 export const mineralOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'mineralOpacity', {
-    index: 11,
+    index: 13,
     label: 'minAlpha',
     ...opacitySliderParams,
   }),
@@ -671,7 +698,7 @@ export const mineralOpacityBinding = withTooltip(
 );
 export const terrainOpacityBinding = withTooltip(
   pane.addBinding(earthParams, 'terrainOpacity', {
-    index: 12,
+    index: 14,
     label: 'terrain',
     ...opacitySliderParams,
   }),
@@ -680,7 +707,7 @@ export const terrainOpacityBinding = withTooltip(
 );
 export const nightShadingBinding = withTooltip(
   pane.addBinding(earthParams, 'nightShading', {
-    index: 13,
+    index: 15,
     label: 'nightShade',
     ...opacitySliderParams,
   }),
@@ -1034,11 +1061,13 @@ export function bindConfigPersistence(onChange: () => void) {
     windMixBinding,
     windStrengthBinding,
     windLinesBinding,
+    windAmpBinding,
     windColorsBinding,
     chemOpacityBinding,
     oceanMixBinding,
     oceanStrengthBinding,
     oceanLinesBinding,
+    oceanAmpBinding,
     oceanColorsBinding,
     tempColorsBinding,
     localTempBinding,

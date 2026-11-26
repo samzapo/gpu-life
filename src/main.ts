@@ -155,6 +155,7 @@ import {
   mouseToolBinding,
   newOceanSimBtn,
   newSimBtn,
+  oceanAmpBinding,
   oceanColorsBinding,
   oceanColourAmt as oceanColourAmtOptn,
   oceanLinesBinding,
@@ -191,6 +192,7 @@ import {
   updatePeriodicLegend,
   viewLayerSelect,
   type ViewLayerMode,
+  windAmpBinding,
   windColorsBinding,
   windLinesBinding,
   windStatusBinding,
@@ -849,11 +851,13 @@ function exportCurrentConfig(): SimConfigV1 {
       vortex: earthParams.vortex,
       windStrength: earthParams.windStrength,
       windLines: earthParams.windLines,
+      windAmp: earthParams.windAmp,
       windColors: earthParams.windColors,
       chemOpacity: earthParams.chemOpacity,
       oceanMix: earthParams.oceanMix,
       oceanStrength: earthParams.oceanStrength,
       oceanLines: earthParams.oceanLines,
+      oceanAmp: earthParams.oceanAmp,
       oceanColors: earthParams.oceanColors,
       tempColors: earthParams.tempColors,
       localTemp: earthParams.localTemp,
@@ -1031,11 +1035,13 @@ async function importConfiguration(
     if (e.vortex !== undefined) earthParams.vortex = e.vortex;
     if (e.windStrength !== undefined) earthParams.windStrength = e.windStrength;
     if (e.windLines !== undefined) earthParams.windLines = e.windLines;
+    if (e.windAmp !== undefined) earthParams.windAmp = Math.max(0, Math.min(3, e.windAmp));
     if (e.windColors !== undefined) earthParams.windColors = e.windColors;
     if (e.chemOpacity !== undefined) earthParams.chemOpacity = e.chemOpacity;
     if (e.oceanMix !== undefined) earthParams.oceanMix = e.oceanMix;
     if (e.oceanStrength !== undefined) earthParams.oceanStrength = e.oceanStrength;
     if (e.oceanLines !== undefined) earthParams.oceanLines = e.oceanLines;
+    if (e.oceanAmp !== undefined) earthParams.oceanAmp = Math.max(0, Math.min(3, e.oceanAmp));
     if (e.oceanColors !== undefined) earthParams.oceanColors = e.oceanColors;
     if (e.tempColors !== undefined) earthParams.tempColors = e.tempColors;
     if (e.localTemp !== undefined) earthParams.localTemp = e.localTemp;
@@ -1501,6 +1507,9 @@ declare global {
       setOceanLines: (val: boolean | number) => void;
       setWindColors: (val: boolean | number) => void;
       setWindLines: (val: boolean | number) => void;
+      getStreamAmps: () => { windAmp: number; oceanAmp: number };
+      setWindAmp: (val: number) => void;
+      setOceanAmp: (val: number) => void;
       setTempColors: (val: boolean | number) => void;
       setUvColors: (val: boolean | number) => void;
       getLocalTemp: () => boolean;
@@ -3349,6 +3358,18 @@ window.complexLife = {
     if (earthParams.windLines <= 0.001 && windCtx) {
       windStreamRenderer.clear(windCtx, viewState.width, viewState.height);
     }
+  },
+  getStreamAmps: () => ({
+    windAmp: earthParams.windAmp,
+    oceanAmp: earthParams.oceanAmp,
+  }),
+  setWindAmp: (val: number) => {
+    earthParams.windAmp = Math.max(0, Math.min(3, Number.isFinite(val) ? val : 1));
+    windAmpBinding.refresh();
+  },
+  setOceanAmp: (val: number) => {
+    earthParams.oceanAmp = Math.max(0, Math.min(3, Number.isFinite(val) ? val : 1));
+    oceanAmpBinding.refresh();
   },
   setTempColors: (val: boolean | number) => {
     earthParams.tempColors = clampOpacity(val);
@@ -5290,6 +5311,7 @@ function update() {
             beatPulse: synthSpecSnapshot.lowBandTransient,
             bassEnergy: synthSpecSnapshot.lowBassEnergy,
             cutoffNorm: bassCutoffNorm,
+            ampScale: earthParams.oceanAmp,
             isOcean: true,
           }
         : undefined,
@@ -5316,6 +5338,7 @@ function update() {
             beatPulse: synthSpecSnapshot.highBandTransient,
             bassEnergy: synthSpecSnapshot.highBandEnergy,
             cutoffNorm: bassCutoffNorm,
+            ampScale: earthParams.windAmp,
             isOcean: false,
           }
         : undefined,

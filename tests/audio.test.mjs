@@ -7,7 +7,14 @@ import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '..
 import { GLOBE_SYNTH_CORE_SOURCE, GLOBE_SYNTH_WORKLET_NAME } from '../src/audio/synthWorklet.ts';
 import { describeSynthEffects, SYNTH_EFFECT_SPECS, SynthSpectrogramOverlay } from '../src/audio/spectrogram.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
-import { CONFIG_STORAGE_KEY, invalidateLegacyBrowserCaches, loadCachedConfig } from '../src/config.ts';
+import {
+  buildUrlPartsFromConfig,
+  CONFIG_STORAGE_KEY,
+  FACTORY_DEFAULTS,
+  invalidateLegacyBrowserCaches,
+  loadCachedConfig,
+  parseConfigInput,
+} from '../src/config.ts';
 
 function packMeta(phase, bioSp, graduated = 0) {
   if (phase === 0) return 0;
@@ -1193,5 +1200,38 @@ test('SynthSpectrogramOverlay removes canvas display and toggles synth motif sou
     globalThis.document = prevDocument;
     globalThis.Node = prevNode;
     globalThis.getComputedStyle = prevGetComputedStyle;
+  }
+});
+
+test('windAmp and oceanAmp persist cleanly across config JSON and share URL parameters', () => {
+  const prevWindow = globalThis.window;
+  globalThis.window = { location: { origin: 'https://example.test' } };
+  try {
+    assert.equal(FACTORY_DEFAULTS.earth.windAmp, 1.0);
+    assert.equal(FACTORY_DEFAULTS.earth.oceanAmp, 1.0);
+
+    const parsed = parseConfigInput({
+      v: 1,
+      earth: { windAmp: 2.25, oceanAmp: 0.45 },
+    });
+    assert.equal(parsed.earth?.windAmp, 2.25);
+    assert.equal(parsed.earth?.oceanAmp, 0.45);
+
+    const clamped = parseConfigInput({
+      v: 1,
+      earth: { windAmp: 99, oceanAmp: -5 },
+    });
+    assert.equal(clamped.earth?.windAmp, 3);
+    assert.equal(clamped.earth?.oceanAmp, 0);
+
+    const parts = buildUrlPartsFromConfig(parsed);
+    assert.ok(parts.search.includes('windAmp=2.25'));
+    assert.ok(parts.search.includes('oceanAmp=0.45'));
+
+    const roundTripped = parseConfigInput(`${parts.search}${parts.hash}`);
+    assert.equal(roundTripped.earth?.windAmp, 2.25);
+    assert.equal(roundTripped.earth?.oceanAmp, 0.45);
+  } finally {
+    globalThis.window = prevWindow;
   }
 });

@@ -82,11 +82,13 @@ export const FACTORY_DEFAULTS = {
     vortex: true,
     windStrength: 1.0,
     windLines: 1.0,
+    windAmp: 1.0,
     windColors: 0.0,
     chemOpacity: 0.6,
     oceanMix: true,
     oceanStrength: 0.85,
     oceanLines: 1.0,
+    oceanAmp: 1.0,
     oceanColors: 0.0,
     tempColors: 0.15,
     localTemp: true,
@@ -161,11 +163,13 @@ export const CONFIG_URL_KEYS: ReadonlySet<string> = new Set([
   'vortex',
   'windStrength',
   'windLines',
+  'windAmp',
   'windColors',
   'chemOpacity',
   'oceanMix',
   'oceanStrength',
   'oceanLines',
+  'oceanAmp',
   'oceanColors',
   'tempColors',
   'localTemp',
@@ -257,11 +261,13 @@ export interface SimConfigV1 {
     vortex?: boolean;
     windStrength?: number;
     windLines?: number;
+    windAmp?: number;
     windColors?: number;
     chemOpacity?: number;
     oceanMix?: boolean;
     oceanStrength?: number;
     oceanLines?: number;
+    oceanAmp?: number;
     oceanColors?: number;
     tempColors?: number;
     localTemp?: boolean;
@@ -429,8 +435,10 @@ function parseFromUrlString(text: string): SimConfigV1 | null {
     cfg.earth!.windStrength = numParam('windStrength') ?? FACTORY_DEFAULTS.earth.windStrength;
     cfg.earth!.oceanStrength = numParam('oceanStrength') ?? FACTORY_DEFAULTS.earth.oceanStrength;
     cfg.earth!.windLines = opParam('windLines') ?? FACTORY_DEFAULTS.earth.windLines;
+    cfg.earth!.windAmp = numParam('windAmp') ?? FACTORY_DEFAULTS.earth.windAmp;
     cfg.earth!.windColors = opParam('windColors') ?? FACTORY_DEFAULTS.earth.windColors;
     cfg.earth!.oceanLines = opParam('oceanLines') ?? FACTORY_DEFAULTS.earth.oceanLines;
+    cfg.earth!.oceanAmp = numParam('oceanAmp') ?? FACTORY_DEFAULTS.earth.oceanAmp;
     cfg.earth!.oceanColors = opParam('oceanColors') ?? FACTORY_DEFAULTS.earth.oceanColors;
     cfg.earth!.tempColors = opParam('tempColors') ?? FACTORY_DEFAULTS.earth.tempColors;
     if (sp.has('localTemp')) cfg.earth!.localTemp = sp.get('localTemp') !== 'false';
@@ -561,11 +569,13 @@ export function buildUrlPartsFromConfig(
     setBool('windMix', e.vortex, FACTORY_DEFAULTS.earth.vortex);
     setNum('windStrength', e.windStrength, FACTORY_DEFAULTS.earth.windStrength);
     setNum('windLines', e.windLines, FACTORY_DEFAULTS.earth.windLines);
+    setNum('windAmp', e.windAmp, FACTORY_DEFAULTS.earth.windAmp);
     setNum('windColors', e.windColors, FACTORY_DEFAULTS.earth.windColors);
     setNum('chemOpacity', e.chemOpacity, FACTORY_DEFAULTS.earth.chemOpacity);
     setBool('oceanMix', e.oceanMix, FACTORY_DEFAULTS.earth.oceanMix);
     setNum('oceanStrength', e.oceanStrength, FACTORY_DEFAULTS.earth.oceanStrength);
     setNum('oceanLines', e.oceanLines, FACTORY_DEFAULTS.earth.oceanLines);
+    setNum('oceanAmp', e.oceanAmp, FACTORY_DEFAULTS.earth.oceanAmp);
     setNum('oceanColors', e.oceanColors, FACTORY_DEFAULTS.earth.oceanColors);
     setNum('tempColors', e.tempColors, FACTORY_DEFAULTS.earth.tempColors);
     setBool('localTemp', e.localTemp, FACTORY_DEFAULTS.earth.localTemp);
@@ -678,11 +688,13 @@ function sanitizeParsedObject(rawObj: Record<string, unknown>): SimConfigV1 {
     vortex: boolVal(earthRaw.vortex),
     windStrength: finiteNum(earthRaw.windStrength),
     windLines: unitOpacity(earthRaw.windLines),
+    windAmp: finiteNum(earthRaw.windAmp) !== undefined ? Math.max(0, Math.min(3, finiteNum(earthRaw.windAmp)!)) : undefined,
     windColors: unitOpacity(earthRaw.windColors),
     chemOpacity: unitOpacity(earthRaw.chemOpacity),
     oceanMix: boolVal(earthRaw.oceanMix),
     oceanStrength: finiteNum(earthRaw.oceanStrength),
     oceanLines: unitOpacity(earthRaw.oceanLines),
+    oceanAmp: finiteNum(earthRaw.oceanAmp) !== undefined ? Math.max(0, Math.min(3, finiteNum(earthRaw.oceanAmp)!)) : undefined,
     oceanColors: unitOpacity(earthRaw.oceanColors),
     tempColors: unitOpacity(earthRaw.tempColors),
     localTemp: boolVal(earthRaw.localTemp),

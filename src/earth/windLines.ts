@@ -22,6 +22,8 @@ export interface SynthStreamModulation {
   bassEnergy: number;
   /** 0..1 normalized lowpass bass cutoff opening */
   cutoffNorm: number;
+  /** Streamline wave amplitude multiplier (0..3, default 1) */
+  ampScale?: number;
   isOcean: boolean;
 }
 
@@ -580,9 +582,13 @@ export class WindStreamRenderer {
       !isOrthographic && cameraMoving ? proj.invert?.([tx, ty]) : null;
 
     let synthBandHit = 0;
+    let synthAmpScale = 1;
+    let synthVisualHit = 0;
     if (useSynthFx && synthMod) {
       const rawLevel = Math.max(0, Math.min(1, synthMod.beatPulse * 0.82 + synthMod.bassEnergy * 0.26));
       synthBandHit = rawLevel <= 0.08 ? 0 : Math.pow((rawLevel - 0.08) / 0.92, 1.45);
+      synthAmpScale = Math.max(0, Math.min(4, synthMod.ampScale ?? 1));
+      synthVisualHit = synthAmpScale > 0.001 ? Math.min(1.4, synthBandHit * Math.min(1.5, synthAmpScale)) : 0;
     }
 
     for (let i = 0; i < this.particles.length; i++) {
@@ -730,20 +736,20 @@ export class WindStreamRenderer {
                 const prevOff = this.prevWaveOff[i];
                 const speedFrac = Math.min(1, mag / Math.max(sampler.streamMax, 0.25));
                 let nextOff = 0;
-                if (synthBandHit > 0.004) {
+                if (synthBandHit > 0.004 && synthAmpScale > 0.001) {
                   // Ocean (~68 Hz): wide slow beat swells; Wind (~4.2 kHz): crisp fast high-band flutter
                   const waveFreq = synthMod.isOcean
                     ? 0.085 + 0.065 * synthBandHit
                     : 0.24 + 0.24 * synthBandHit;
-                  const surfaceAmpRad = (synthMod.isOcean ? 0.00072 : 0.00060) * synthBandHit;
-                  const waveAmp = Math.min(36, surfaceAmpRad * scale) * (0.28 + 0.72 * speedFrac);
+                  const surfaceAmpRad = (synthMod.isOcean ? 0.00072 : 0.00060) * synthBandHit * synthAmpScale;
+                  const waveAmp = Math.min(48, surfaceAmpRad * scale) * (0.28 + 0.72 * speedFrac);
                   nextOff = Math.sin(p.age * waveFreq + i * 1.37 + synthMod.phase) * waveAmp;
                 } else {
                   nextOff = prevOff * 0.35;
                 }
                 this.prevWaveOff[i] = nextOff;
 
-                const pulseBoost = synthBandHit > 0.34 && speedFrac > 0.24 ? 1 : 0;
+                const pulseBoost = synthVisualHit > 0.34 && speedFrac > 0.24 ? 1 : 0;
                 const drawBucket = Math.min(INTENSITY_BUCKETS - 1, bIdx + pulseBoost);
                 this.segPools[drawBucket].push(
                   scr0x + nx * prevOff,
@@ -842,7 +848,7 @@ export class WindStreamRenderer {
           : styles;
       ctx.lineWidth =
         useSynthFx && synthMod
-          ? sampler.lineWidth + 0.72 * synthBandHit
+          ? sampler.lineWidth + 0.72 * synthVisualHit
           : sampler.lineWidth;
       ctx.lineCap = 'round';
       for (let i = 0; i < INTENSITY_BUCKETS; i++) {
@@ -850,9 +856,9 @@ export class WindStreamRenderer {
         if (segs.length === 0) continue;
         ctx.beginPath();
         ctx.strokeStyle = activeStyles[i];
-        if (useSynthFx && synthMod && i === INTENSITY_BUCKETS - 1 && synthBandHit > 0.12) {
+        if (useSynthFx && synthMod && i === INTENSITY_BUCKETS - 1 && synthVisualHit > 0.12) {
           ctx.shadowColor = synthMod.isOcean ? 'rgba(40, 235, 225, 0.72)' : 'rgba(245, 72, 165, 0.70)';
-          ctx.shadowBlur = 1.5 + synthBandHit * 6.5;
+          ctx.shadowBlur = 1.5 + synthVisualHit * 6.5;
         } else {
           ctx.shadowBlur = 0;
         }
