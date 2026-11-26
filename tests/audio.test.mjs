@@ -15,6 +15,12 @@ import {
   loadCachedConfig,
   parseConfigInput,
 } from '../src/config.ts';
+import {
+  isFullscreenActive,
+  isFullscreenSupported,
+  toggleFullscreen,
+  wireFullscreenToggle,
+} from '../src/fullscreen.ts';
 
 function packMeta(phase, bioSp, graduated = 0) {
   if (phase === 0) return 0;
@@ -1234,4 +1240,89 @@ test('windAmp and oceanAmp persist cleanly across config JSON and share URL para
   } finally {
     globalThis.window = prevWindow;
   }
+});
+
+test('fullscreen helper toggles standard/webkit fullscreen, falls back safely without options, and syncs toggle button', async () => {
+  const docListeners = new Map();
+  let fullscreenElement = null;
+  const calls = [];
+  const doc = {
+    fullscreenEnabled: true,
+    get fullscreenElement() { return fullscreenElement; },
+    addEventListener(type, fn) {
+      const arr = docListeners.get(type) || [];
+      arr.push(fn);
+      docListeners.set(type, arr);
+    },
+    async exitFullscreen() {
+      calls.push('exit');
+      fullscreenElement = null;
+    },
+  };
+  const target = {
+    async requestFullscreen(opts) {
+      calls.push(['req', opts]);
+      if (opts) throw new TypeError('options unsupported');
+      fullscreenElement = target;
+    },
+  };
+  const labelEl = { textContent: 'Fullscreen' };
+  const btnListeners = new Map();
+  const attrs = new Map();
+  const btn = {
+    hidden: false,
+    dataset: {},
+    title: '',
+    textContent: '',
+    querySelector(sel) { return sel === '.switch-label' ? labelEl : null; },
+    setAttribute(k, v) { attrs.set(k, String(v)); },
+    getAttribute(k) { return attrs.get(k); },
+    addEventListener(type, fn) {
+      const arr = btnListeners.get(type) || [];
+      arr.push(fn);
+      btnListeners.set(type, arr);
+    },
+  };
+
+  const changeEvents = [];
+  wireFullscreenToggle(btn, { doc, target, onChange: (a) => changeEvents.push(a) });
+  assert.equal(btn.hidden, false);
+  assert.equal(attrs.get('aria-pressed'), 'false');
+  assert.equal(labelEl.textContent, 'Fullscreen');
+
+  // Click triggers requestFullscreen -> retries without options when options throws -> sets active
+  for (const fn of btnListeners.get('click') || []) fn();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(calls.length, 2);
+  assert.equal(isFullscreenActive(doc), true);
+  assert.equal(attrs.get('aria-pressed'), 'true');
+  assert.equal(labelEl.textContent, 'Exit full');
+
+  for (const fn of docListeners.get('fullscreenchange') || []) fn();
+  assert.deepEqual(changeEvents, [true]);
+
+  await toggleFullscreen(doc, target);
+  assert.equal(calls.at(-1), 'exit');
+  assert.equal(isFullscreenActive(doc), false);
+
+  // WebKit fallback + unsupported check
+  let wkActive = false;
+  const wkDoc = {
+    webkitFullscreenEnabled: true,
+    get webkitFullscreenElement() { return wkActive ? wkTarget : null; },
+    webkitExitFullscreen() { wkActive = false; },
+    addEventListener() {},
+  };
+  const wkTarget = {
+    webkitRequestFullscreen() { wkActive = true; },
+  };
+  assert.equal(isFullscreenSupported(wkDoc, wkTarget), true);
+  await toggleFullscreen(wkDoc, wkTarget);
+  assert.equal(isFullscreenActive(wkDoc), true);
+  await toggleFullscreen(wkDoc, wkTarget);
+  assert.equal(isFullscreenActive(wkDoc), false);
+
+  const unsupportedBtn = { ...btn, hidden: false, dataset: {}, setAttribute() {}, querySelector() { return null; }, addEventListener() {} };
+  wireFullscreenToggle(unsupportedBtn, { doc: { fullscreenEnabled: false, addEventListener() {} }, target: {} });
+  assert.equal(unsupportedBtn.hidden, true);
 });

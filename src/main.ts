@@ -8,6 +8,11 @@ import {
 } from './audio/engine';
 import { SynthSpectrogramOverlay } from './audio/spectrogram';
 import {
+  isFullscreenActive,
+  toggleFullscreen,
+  wireFullscreenToggle,
+} from './fullscreen';
+import {
   observeScreenAudioState,
   type ScreenAudioObservation,
   type ScreenEnvObservation,
@@ -1489,6 +1494,8 @@ declare global {
       setMineralRate: (rate: number) => void;
       getTooltips: () => boolean;
       setTooltips: (on: boolean) => void;
+      isFullscreen: () => boolean;
+      toggleFullscreen: () => Promise<boolean>;
       getOpacities: () => {
         windLines: number;
         windColors: number;
@@ -2957,6 +2964,13 @@ document.getElementById('tour-toggle')!.onclick = () => {
 };
 displayCamera();
 
+wireFullscreenToggle(document.getElementById('fullscreen-toggle') as HTMLButtonElement | null, {
+  onChange: () => {
+    syncCanvasDimensions();
+    window.dispatchEvent(new Event('resize'));
+  },
+});
+
 const cyberSynth = new GlobeCyberSynth();
 cyberSynth.setVolume(params.synthVol);
 cyberSynth.setEnabled(modeEnabled('music'), false);
@@ -3312,6 +3326,8 @@ window.complexLife = {
     tooltipsBinding.refresh();
     tooltipManager.syncEnabledState();
   },
+  isFullscreen: () => isFullscreenActive(),
+  toggleFullscreen: () => toggleFullscreen(),
   getOpacities: () => ({
     windLines: earthParams.windLines,
     windColors: earthParams.windColors,

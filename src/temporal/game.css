@@ -51,6 +51,12 @@
   margin-right: 4px;
 }
 
+.game-switch .switch-label {
+  font-size: inherit;
+  vertical-align: baseline;
+  margin-right: 0;
+}
+
 .game-switch[aria-pressed='true'] {
   color: var(--cyber-cyan);
   border-color: var(--cyber-cyan);
@@ -67,7 +73,7 @@
   top: max(6px, env(safe-area-inset-top));
   left: 38px;
   display: grid;
-  grid-template-columns: auto auto auto;
+  grid-template-columns: auto auto auto auto;
   align-items: start;
   gap: 4px;
 }
@@ -789,6 +795,9 @@ body:is(
   }
   .tp-dfwv {
     width: min(210px, calc(100vw - 150px)) !important;
+  }
+  .tp-dfwv:has(.tp-rotv:not(.tp-rotv-expanded)) {
+    width: min(172px, calc(100vw - 216px)) !important;
   }
   #temporal-panel {
     width: calc(100vw - 16px);
