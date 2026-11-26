@@ -96,40 +96,19 @@
   top: max(6px, env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);
-  width: min(50vw, calc(100vw - 24px));
-  height: 96px;
-  background: transparent;
-  border: none;
-  pointer-events: none;
-}
-
-#synth-spec.minimized {
   width: auto;
   height: 22px;
+  background: transparent;
+  border: none;
+  pointer-events: auto;
 }
 
 #synth-spec[hidden] {
   display: none !important;
 }
 
-#synth-spec-canvas {
-  position: static;
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: transparent;
-  pointer-events: auto;
-}
-
-#synth-spec.minimized #synth-spec-canvas {
-  display: none;
-}
-
 .synth-spec-controls {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  z-index: 2;
+  position: static;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -177,9 +156,12 @@
 }
 
 #synth-spec-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
+  height: 20px;
+  padding: 0 8px;
   color: rgba(0, 240, 255, 0.85);
   background: rgba(5, 10, 20, 0.52);
   border: 1px solid rgba(0, 240, 255, 0.34);
@@ -192,31 +174,22 @@
   transition: border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
-#synth-spec-toggle:hover {
+#synth-spec-toggle:hover,
+#synth-spec-toggle[aria-expanded='true'] {
   color: #ffffff;
   border-color: var(--cyber-cyan);
   box-shadow: 0 0 10px rgba(0, 240, 255, 0.35);
 }
 
-#synth-spec.minimized .synth-spec-controls {
-  position: static;
-}
-
-#synth-spec.minimized #synth-spec-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 20px;
-  padding: 0 8px;
-}
-
 #synth-spec-tooltip {
   position: fixed;
   z-index: 120;
-  top: calc(max(6px, env(safe-area-inset-top)) + 82px);
+  top: calc(max(6px, env(safe-area-inset-top)) + 34px);
   left: 50%;
   transform: translateX(-50%);
   width: min(560px, calc(100vw - 24px));
+  max-height: min(68vh, 480px);
+  overflow-y: auto;
   box-sizing: border-box;
   padding: 10px 14px 12px;
   color: #e4f8ff;
@@ -230,7 +203,7 @@
   clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
   font:
     500 11px/1.38 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 #synth-spec-tooltip[hidden] {

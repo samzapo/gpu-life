@@ -5,7 +5,7 @@ import { generateScoreEvents, lineageMotif } from '../src/audio/score.ts';
 import { SYNTH_RATE } from '../src/audio/synthBank.ts';
 import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '../src/audio/engine.ts';
 import { GLOBE_SYNTH_CORE_SOURCE, GLOBE_SYNTH_WORKLET_NAME } from '../src/audio/synthWorklet.ts';
-import { describeSynthEffects, SYNTH_EFFECT_SPECS } from '../src/audio/spectrogram.ts';
+import { describeSynthEffects, SYNTH_EFFECT_SPECS, SynthSpectrogramOverlay } from '../src/audio/spectrogram.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
 import { CONFIG_STORAGE_KEY, invalidateLegacyBrowserCaches, loadCachedConfig } from '../src/config.ts';
 
@@ -655,7 +655,7 @@ test('SynthDspCore renders continuous sample-accurate stereo audio below real-ti
   const blockLen = 128;
   const outL = new Float32Array(blockLen);
   const outR = new Float32Array(blockLen);
-  const telemetry = new Float32Array(16);
+  const telemetry = new Float32Array(20);
   const quanta = 2500; // 2500 * 128 = 320,000 samples (6.667s across bars 0..3)
 
   // Warmup 16 quanta before benchmarking JIT speed
@@ -667,9 +667,20 @@ test('SynthDspCore renders continuous sample-accurate stereo audio below real-ti
   let sumSq = 0;
   let maxAbs = 0;
   let maxAbsDiff = 0;
+  let lowTrMin = 1;
+  let lowTrMax = 0;
+  let highTrMin = 1;
+  let highTrMax = 0;
   const t0 = performance.now();
   for (let q = 0; q < quanta; q++) {
     core.process(outL, outR);
+    if ((q & 7) === 0 && q > 64) {
+      core.fillTelemetry(telemetry);
+      lowTrMin = Math.min(lowTrMin, telemetry[17]);
+      lowTrMax = Math.max(lowTrMax, telemetry[17]);
+      highTrMin = Math.min(highTrMin, telemetry[18]);
+      highTrMax = Math.max(highTrMax, telemetry[18]);
+    }
     for (let i = 0; i < blockLen; i++) {
       const l = outL[i];
       const r = outR[i];
@@ -694,6 +705,8 @@ test('SynthDspCore renders continuous sample-accurate stereo audio below real-ti
   assert.ok(maxAbs <= 1.0, `peak exceeded 1.0: ${maxAbs}`);
   assert.ok(rms > 0.04, `expected strong audible stereo RMS > 0.04, got ${rms}`);
   assert.ok(maxAbsDiff > 0.01, `expected true stereo separation > 0.01, got ${maxAbsDiff}`);
+  assert.ok(lowTrMax - lowTrMin > 0.45, `expected crisp narrow low-band beat contrast, got [${lowTrMin}, ${lowTrMax}]`);
+  assert.ok(highTrMax - highTrMin > 0.30, `expected crisp narrow high-band beat contrast, got [${highTrMin}, ${highTrMax}]`);
   assert.equal(telemetry[7], expectedSamples, `expected exact sampleCursor=${expectedSamples}`);
   assert.equal(telemetry[8], sampleRate);
   assert.equal(telemetry[15], expectedStep, `expected sample-accurate step=${expectedStep}`);
@@ -826,7 +839,7 @@ test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-t
       this.core = new SynthDspCore(ctx.sampleRate);
       this.outL = new Float32Array(128);
       this.outR = new Float32Array(128);
-      this.telemetry = new Float32Array(16);
+      this.telemetry = new Float32Array(20);
       this.quantum = 0;
       this.port = {
         onmessage: null,
@@ -844,7 +857,7 @@ test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-t
         this.core.process(this.outL, this.outR);
         fakeTime += 128 / this.ctx.sampleRate;
         this.quantum++;
-        if ((this.quantum & 31) === 0) {
+        if ((this.quantum & 7) === 0) {
           this.core.fillTelemetry(this.telemetry);
           this.port.onmessage?.({ data: { type: 'telemetry', data: new Float32Array(this.telemetry) } });
         }
@@ -892,7 +905,7 @@ test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-t
     assert.ok(rms > 0.04, `expected live worklet RMS > 0.04, got ${rms}`);
 
     const snap = createSpectrogramSnapshot();
-    synth.readSpectrogram(snap, true);
+    synth.readSpectrogram(snap, false);
     assert.equal(snap.running, true);
     assert.equal(snap.section, 'drive');
     assert.ok(snap.rms > 0.04);
@@ -901,6 +914,7 @@ test('GlobeCyberSynth uses unified single AudioWorklet pipeline with zero main-t
     assert.ok(snap.chorusLevel > 0);
     assert.ok(snap.delayLevel > 0);
     assert.ok(snap.lowBassEnergy > 0);
+    assert.ok(snap.highBandEnergy > 0);
     assert.ok(snap.downbeatPulse > 0);
     assert.equal(snap.curves.length, 6);
     assert.equal(snap.curves[0].length, SPECTROGRAM_BINS);
@@ -1052,5 +1066,132 @@ test('GlobeCyberSynth unlocks cleanly on touchend/click even after an earlier no
     globalThis.window = prevWindow;
     globalThis.document = prevDocument;
     globalThis.AudioWorkletNode = prevAudioWorkletNode;
+  }
+});
+
+test('SynthSpectrogramOverlay removes canvas display and toggles synth motif source explanation popup on button click', () => {
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevNode = globalThis.Node;
+  const prevGetComputedStyle = globalThis.getComputedStyle;
+
+  class MockNode {
+    constructor(tag = 'div') {
+      this.tag = tag;
+      this.children = [];
+      this.listeners = new Map();
+      this.attrs = new Map();
+      this.style = {};
+      this.hidden = true;
+      this.checked = true;
+      this.textContent = '';
+      this.className = '';
+      this.title = '';
+    }
+    append(...nodes) {
+      this.children.push(...nodes);
+    }
+    appendChild(n) {
+      this.children.push(n);
+      return n;
+    }
+    replaceChildren(...nodes) {
+      this.children = [...nodes];
+    }
+    addEventListener(type, fn) {
+      const list = this.listeners.get(type) || [];
+      list.push(fn);
+      this.listeners.set(type, list);
+    }
+    dispatch(type, ev = {}) {
+      for (const fn of this.listeners.get(type) || []) fn({ stopPropagation() {}, ...ev });
+    }
+    setAttribute(k, v) {
+      this.attrs.set(k, String(v));
+    }
+    getAttribute(k) {
+      return this.attrs.get(k) ?? null;
+    }
+    contains(target) {
+      return target === this || this.children.some((c) => c === target || c.contains?.(target));
+    }
+    getBoundingClientRect() {
+      return { left: 100, right: 180, top: 8, bottom: 28, width: 80, height: 20 };
+    }
+    querySelectorAll() {
+      return [];
+    }
+  }
+
+  const container = new MockNode('div');
+  const tooltip = new MockNode('div');
+  const toggleBtn = new MockNode('button');
+  const streamCheckbox = new MockNode('input');
+  const docListeners = new Map();
+
+  globalThis.Node = MockNode;
+  globalThis.getComputedStyle = () => ({ display: 'block' });
+  globalThis.window = {
+    innerWidth: 1280,
+    addEventListener() {},
+  };
+  globalThis.document = {
+    hidden: false,
+    getElementById(id) {
+      if (id === 'synth-spec') return container;
+      if (id === 'synth-spec-tooltip') return tooltip;
+      if (id === 'synth-spec-toggle') return toggleBtn;
+      if (id === 'synth-stream-toggle') return streamCheckbox;
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    createElement(tag) {
+      return new MockNode(tag);
+    },
+    addEventListener(type, fn) {
+      const list = docListeners.get(type) || [];
+      list.push(fn);
+      docListeners.set(type, list);
+    },
+  };
+
+  try {
+    const overlay = new SynthSpectrogramOverlay();
+    const snap = createSpectrogramSnapshot();
+    snap.enabled = true;
+    snap.running = true;
+    overlay.render(snap, 200);
+
+    assert.equal(container.hidden, false);
+    assert.equal(tooltip.hidden, true);
+    assert.equal(overlay.isInfoOpen(), false);
+    assert.equal(toggleBtn.getAttribute('aria-expanded'), 'false');
+
+    // Click button -> shows motif source explanations popover
+    toggleBtn.dispatch('click');
+    assert.equal(overlay.isInfoOpen(), true);
+    assert.equal(tooltip.hidden, false);
+    assert.equal(toggleBtn.getAttribute('aria-expanded'), 'true');
+    assert.ok(tooltip.children.length >= 2, 'expected populated header + source rows inside motif popover');
+
+    // Clicking outside closes popover cleanly
+    const outsideTarget = new MockNode('canvas');
+    for (const fn of docListeners.get('pointerdown') || []) fn({ target: outsideTarget });
+    assert.equal(overlay.isInfoOpen(), false);
+    assert.equal(tooltip.hidden, true);
+
+    // Clicking button toggles back open, and Escape dismisses it
+    toggleBtn.dispatch('click');
+    assert.equal(overlay.isInfoOpen(), true);
+    for (const fn of docListeners.get('keydown') || []) fn({ key: 'Escape' });
+    assert.equal(overlay.isInfoOpen(), false);
+    assert.equal(tooltip.hidden, true);
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+    globalThis.Node = prevNode;
+    globalThis.getComputedStyle = prevGetComputedStyle;
   }
 });

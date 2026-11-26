@@ -5261,10 +5261,7 @@ function update() {
   tooltipManager.tick();
   observeGlobeAudioCenter(start);
   const rmsAudio = cyberSynth.tick(start);
-  cyberSynth.readSpectrogram(
-    synthSpecSnapshot,
-    cyberSynth.isEnabled() && !synthSpectrogram.isMinimized(),
-  );
+  cyberSynth.readSpectrogram(synthSpecSnapshot, false);
   synthSpectrogram.render(synthSpecSnapshot, start);
   if ((frameCount & 3) === 0) syncMusicButtonUi(rmsAudio);
 
@@ -5290,7 +5287,7 @@ function update() {
         ? {
             enabled: true,
             phase: synthSpecSnapshot.lowBassPhase,
-            beatPulse: synthSpecSnapshot.downbeatPulse,
+            beatPulse: synthSpecSnapshot.lowBandTransient,
             bassEnergy: synthSpecSnapshot.lowBassEnergy,
             cutoffNorm: bassCutoffNorm,
             isOcean: true,
@@ -5315,9 +5312,9 @@ function update() {
       streamModActive
         ? {
             enabled: true,
-            phase: synthSpecSnapshot.lowBassPhase + Math.PI * 0.5,
-            beatPulse: synthSpecSnapshot.offbeatPulse,
-            bassEnergy: synthSpecSnapshot.lowBassEnergy,
+            phase: synthSpecSnapshot.lowBassPhase * 2.0 + Math.PI * 0.5,
+            beatPulse: synthSpecSnapshot.highBandTransient,
+            bassEnergy: synthSpecSnapshot.highBandEnergy,
             cutoffNorm: bassCutoffNorm,
             isOcean: false,
           }

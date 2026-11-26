@@ -47,6 +47,9 @@ export interface SynthSpectrogramSnapshot {
   offbeatPulse: number;
   lowBassPhase: number;
   lowBassEnergy: number;
+  highBandEnergy: number;
+  lowBandTransient: number;
+  highBandTransient: number;
   streamlinesEnabled: boolean;
   streamlineEnergy: number;
   /** 6 distinct effect rows × SPECTROGRAM_BINS normalized [0..1] current spectral amplitudes */
@@ -84,6 +87,9 @@ export function createSpectrogramSnapshot(): SynthSpectrogramSnapshot {
     offbeatPulse: 0,
     lowBassPhase: 0,
     lowBassEnergy: 0,
+    highBandEnergy: 0,
+    lowBandTransient: 0,
+    highBandTransient: 0,
     streamlinesEnabled: true,
     streamlineEnergy: 0,
     curves: [
@@ -176,6 +182,9 @@ export class GlobeCyberSynth {
   private workletDelayLevel = 0;
   private workletSidechainDepth = 0;
   private workletLowBassEnergy = 0;
+  private workletHighBandEnergy = 0;
+  private workletLowBandTransient = 0;
+  private workletHighBandTransient = 0;
   private workletSampleCursor = 0;
   private workletSampleRate = 48000;
   private workletBar = 0;
@@ -288,6 +297,15 @@ export class GlobeCyberSynth {
     this.curDelayFeedback = d[11] ?? this.curDelayFeedback;
     this.curAcidDrive = d[12] ?? this.curAcidDrive;
     this.workletBar = Math.max(0, Math.floor(d[14] || 0));
+    if (d.length >= 19) {
+      this.workletHighBandEnergy = d[16] || 0;
+      this.workletLowBandTransient = d[17] || 0;
+      this.workletHighBandTransient = d[18] || 0;
+    } else {
+      this.workletHighBandEnergy = this.workletPolyLevel;
+      this.workletLowBandTransient = this.workletSidechainDepth;
+      this.workletHighBandTransient = this.workletPolyLevel * 0.6;
+    }
     this.workletTelemetryCtxTime = this.ctx ? this.ctx.currentTime : 0;
   }
 
@@ -951,6 +969,9 @@ export class GlobeCyberSynth {
       out.offbeatPulse = 0;
       out.lowBassPhase = 0;
       out.lowBassEnergy = 0;
+      out.highBandEnergy = 0;
+      out.lowBandTransient = 0;
+      out.highBandTransient = 0;
       for (let c = 0; c < out.curves.length; c++) out.curves[c].fill(0);
       return;
     }
@@ -962,6 +983,9 @@ export class GlobeCyberSynth {
       out.rms = this.workletRms;
       out.sidechainDepth = this.workletSidechainDepth;
       out.lowBassEnergy = this.workletLowBassEnergy;
+      out.highBandEnergy = this.workletHighBandEnergy;
+      out.lowBandTransient = this.workletLowBandTransient;
+      out.highBandTransient = this.workletHighBandTransient;
 
       if (computeCurves) {
         this.analyser.getByteFrequencyData(this.masterBins);
@@ -1058,6 +1082,9 @@ export class GlobeCyberSynth {
       out.offbeatPulse = 0;
       out.lowBassPhase = 0;
       out.lowBassEnergy = 0;
+      out.highBandEnergy = 0;
+      out.lowBandTransient = 0;
+      out.highBandTransient = 0;
       for (let c = 0; c < out.curves.length; c++) out.curves[c].fill(0);
       return;
     }
@@ -1085,6 +1112,8 @@ export class GlobeCyberSynth {
         if (v > acidPeak) acidPeak = v;
       }
       out.acidLevel = acidPeak;
+    } else {
+      this.analyser.getByteFrequencyData(this.masterBins);
     }
 
     const duckVal = this.duckGain ? this.duckGain.gain.value : 1;
@@ -1104,10 +1133,19 @@ export class GlobeCyberSynth {
     out.offbeatPulse = Math.exp(-offPhase * 4.6) * backEmphasis;
 
     out.lowBassPhase = beatCount * Math.PI;
-    let subSum = 0;
-    const subBins = 16;
-    for (let i = 0; i < subBins; i++) subSum += out.curves[0][i] ?? 0;
-    out.lowBassEnergy = Math.max(0, Math.min(1, (subSum / subBins) * 1.35));
+    const binHz = Math.max(8000, sr * 0.5) / Math.max(1, this.masterBins.length);
+    const loBin = Math.min(this.masterBins.length - 1, Math.max(0, Math.round(70 / binHz)));
+    const hiStart = Math.min(this.masterBins.length - 1, Math.max(1, Math.floor(3300 / binHz)));
+    const hiEnd = Math.min(this.masterBins.length - 1, Math.max(hiStart, Math.ceil(5200 / binHz)));
+    let hiSum = 0;
+    for (let b = hiStart; b <= hiEnd; b++) hiSum += this.masterBins[b] ?? 0;
+    const hiNorm = Math.min(1, (hiSum / Math.max(1, hiEnd - hiStart + 1) / 255) * 1.45);
+    const loNorm = Math.min(1, ((this.masterBins[loBin] ?? 0) / 255) * 1.25);
+
+    out.lowBassEnergy = Math.max(0, Math.min(1, loNorm * (0.45 + 0.55 * out.downbeatPulse)));
+    out.lowBandTransient = Math.max(0, Math.min(1, loNorm * out.downbeatPulse));
+    out.highBandEnergy = Math.max(0, Math.min(1, hiNorm * (0.40 + 0.60 * out.offbeatPulse)));
+    out.highBandTransient = Math.max(0, Math.min(1, hiNorm * out.offbeatPulse));
   }
 
   private applyDspModulation(now: number): void {

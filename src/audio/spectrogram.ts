@@ -1,7 +1,4 @@
-import {
-  SPECTROGRAM_BINS,
-  type SynthSpectrogramSnapshot,
-} from './engine.ts';
+import type { SynthSpectrogramSnapshot } from './engine.ts';
 
 export interface SynthEffectSpec {
   id: 'bass' | 'acid' | 'chorus' | 'delay' | 'poly' | 'pulse';
@@ -70,24 +67,6 @@ export const SYNTH_EFFECT_SPECS: readonly SynthEffectSpec[] = [
   },
 ] as const;
 
-const INTENSITY_BUCKETS = 5;
-
-function buildStreamStyles(rgb: readonly [number, number, number]): string[] {
-  const styles: string[] = [];
-  for (let i = 0; i < INTENSITY_BUCKETS; i++) {
-    const t = i / (INTENSITY_BUCKETS - 1);
-    const scale = (120 + 100 * t) / 255;
-    const alpha = (0.34 + 0.44 * t).toFixed(2);
-    const r = Math.min(255, Math.round(rgb[0] * scale));
-    const g = Math.min(255, Math.round(rgb[1] * scale));
-    const b = Math.min(255, Math.round(rgb[2] * scale));
-    styles.push(`rgba(${r}, ${g}, ${b}, ${alpha})`);
-  }
-  return styles;
-}
-
-const STREAM_BUCKET_STYLES: readonly string[][] = SYNTH_EFFECT_SPECS.map((s) => buildStreamStyles(s.rgb));
-
 export interface EffectProvenanceEntry {
   spec: SynthEffectSpec;
   level: number;
@@ -140,50 +119,28 @@ export function describeSynthEffects(snap: SynthSpectrogramSnapshot): EffectProv
   ];
 }
 
-// Curve indices matching SYNTH_EFFECT_SPECS order above:
-// 0: pulse -> curves[5], 1: bass -> curves[0], 2: acid -> curves[1],
-// 3: chorus -> curves[2], 4: delay -> curves[3], 5: poly -> curves[4]
-const CURVE_INDEX_ORDER = [5, 0, 1, 2, 3, 4] as const;
-
 export class SynthSpectrogramOverlay {
   private container: HTMLElement | null;
-  private canvas: HTMLCanvasElement | null;
-  private ctx: CanvasRenderingContext2D | null;
   private toggleBtn: HTMLButtonElement | null;
   private streamCheckbox: HTMLInputElement | null;
   private streamToggleCb: ((enabled: boolean) => void) | null = null;
   private tooltip: HTMLElement | null;
-  private hovered = false;
-  private minimized = false;
+  private infoOpen = false;
   private lastTooltipMs = 0;
   private lastBoundsMs = -1000;
-  private tipTopPx = 108;
-  private segPools: number[][] = Array.from({ length: INTENSITY_BUCKETS }, () => []);
+  private tipTopPx = 36;
+  private lastSnap: SynthSpectrogramSnapshot | null = null;
 
   constructor(
     containerId = 'synth-spec',
-    canvasId = 'synth-spec-canvas',
     tooltipId = 'synth-spec-tooltip',
     toggleId = 'synth-spec-toggle',
     streamCheckboxId = 'synth-stream-toggle',
   ) {
     this.container = document.getElementById(containerId);
-    this.canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
-    this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
     this.tooltip = document.getElementById(tooltipId);
     this.toggleBtn = document.getElementById(toggleId) as HTMLButtonElement | null;
     this.streamCheckbox = document.getElementById(streamCheckboxId) as HTMLInputElement | null;
-
-    if (this.container) {
-      this.container.addEventListener('pointerenter', () => {
-        this.hovered = true;
-        if (this.tooltip) this.tooltip.hidden = false;
-      });
-      this.container.addEventListener('pointerleave', () => {
-        this.hovered = false;
-        if (this.tooltip) this.tooltip.hidden = true;
-      });
-    }
 
     if (this.streamCheckbox) {
       this.streamCheckbox.addEventListener('change', () => {
@@ -195,9 +152,25 @@ export class SynthSpectrogramOverlay {
     if (this.toggleBtn) {
       this.toggleBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        this.setMinimized(!this.minimized);
+        this.setInfoOpen(!this.infoOpen);
       });
     }
+
+    document.addEventListener('pointerdown', (ev) => {
+      if (!this.infoOpen) return;
+      const target = ev.target;
+      if (target instanceof Node) {
+        if (this.container?.contains(target) || this.tooltip?.contains(target)) return;
+      }
+      this.setInfoOpen(false);
+    });
+
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && this.infoOpen) {
+        this.setInfoOpen(false);
+      }
+    });
+
     this.syncToggleUi();
     this.syncClearanceBounds(0);
     window.addEventListener('resize', () => {
@@ -215,22 +188,30 @@ export class SynthSpectrogramOverlay {
     return this.streamCheckbox ? this.streamCheckbox.checked : true;
   }
 
-  isMinimized(): boolean {
-    return this.minimized;
+  isInfoOpen(): boolean {
+    return this.infoOpen;
   }
 
-  setMinimized(min: boolean): void {
-    this.minimized = min;
+  setInfoOpen(open: boolean): void {
+    this.infoOpen = open;
     this.syncToggleUi();
-    this.lastBoundsMs = -1000;
+    if (this.tooltip) {
+      this.tooltip.hidden = !open;
+      this.tooltip.style.top = `${this.tipTopPx}px`;
+      if (open && this.lastSnap) {
+        this.lastTooltipMs = performance.now();
+        this.updateTooltip(this.lastSnap);
+      }
+    }
   }
 
   private syncToggleUi(): void {
-    if (!this.container || !this.toggleBtn) return;
-    this.container.classList.toggle('minimized', this.minimized);
-    this.toggleBtn.textContent = this.minimized ? '∿ +' : '−';
-    this.toggleBtn.setAttribute('aria-expanded', String(!this.minimized));
-    const label = this.minimized ? 'Expand synth spectrogram' : 'Minimize synth spectrogram';
+    if (!this.toggleBtn) return;
+    this.toggleBtn.textContent = this.infoOpen ? '∿ ×' : '∿ ?';
+    this.toggleBtn.setAttribute('aria-expanded', String(this.infoOpen));
+    const label = this.infoOpen
+      ? 'Hide synth motif source explanations'
+      : 'Show synth motif source explanations';
     this.toggleBtn.setAttribute('aria-label', label);
     this.toggleBtn.title = label;
   }
@@ -240,11 +221,9 @@ export class SynthSpectrogramOverlay {
     this.lastBoundsMs = nowMs;
 
     const winW = Math.max(240, window.innerWidth || 1280);
-    let specW = this.minimized
-      ? (this.container.getBoundingClientRect().width || 68)
-      : Math.min(winW * 0.5, winW - 24);
-    let centerLeft = (winW - specW) * 0.5;
-    let centerRight = (winW + specW) * 0.5;
+    const pillW = this.container.getBoundingClientRect().width || 68;
+    const centerLeft = (winW - pillW) * 0.5;
+    const centerRight = (winW + pillW) * 0.5;
 
     let safeTop = 6;
     const checkOverlap = (el: Element | null, maxBottom = 140) => {
@@ -268,151 +247,46 @@ export class SynthSpectrogramOverlay {
     checkOverlap(document.getElementById('githubBtn'));
 
     const tpEl = document.querySelector('.tp-dfwv');
+    let shiftedForPanel = false;
     if (tpEl && getComputedStyle(tpEl).display !== 'none') {
       const tr = tpEl.getBoundingClientRect();
       if (tr.width > 0 && tr.height > 0) {
         if (tr.bottom <= 72) {
           checkOverlap(tpEl, 72);
         } else if (tr.left - 8 < centerRight && tr.bottom > safeTop) {
-          // Keep right edge strictly left of an expanded Display panel so toggles remain clickable
-          const maxRight = Math.max(centerLeft + 110, tr.left - 8);
-          specW = Math.min(specW, Math.max(96, maxRight - 10));
-          const maxLeft = Math.max(10, maxRight - specW);
-          centerLeft = Math.min(centerLeft, maxLeft);
-          centerRight = centerLeft + specW;
-          this.container.style.left = `${Math.round(centerLeft)}px`;
+          const maxRight = Math.max(pillW + 10, tr.left - 8);
+          const shiftedLeft = Math.max(10, Math.min(centerLeft, maxRight - pillW));
+          this.container.style.left = `${Math.round(shiftedLeft)}px`;
           this.container.style.transform = 'none';
-          if (!this.minimized) this.container.style.width = `${Math.round(specW)}px`;
+          shiftedForPanel = true;
         }
       }
     }
-    if (!tpEl || tpEl.getBoundingClientRect().bottom <= 72 || tpEl.getBoundingClientRect().left - 8 >= (winW + specW) * 0.5) {
+    if (!shiftedForPanel) {
       this.container.style.left = '50%';
       this.container.style.transform = 'translateX(-50%)';
-      if (!this.minimized) this.container.style.width = '';
     }
 
     this.container.style.top = `${safeTop}px`;
-    const activeHeight = this.minimized ? 22 : 96;
-    this.tipTopPx = safeTop + activeHeight + 6;
+    this.tipTopPx = safeTop + 28;
     if (this.tooltip) {
       this.tooltip.style.top = `${this.tipTopPx}px`;
     }
   }
 
   render(snap: SynthSpectrogramSnapshot, nowMs: number): void {
-    if (!this.container || !this.canvas || !this.ctx) return;
+    this.lastSnap = snap;
+    if (!this.container) return;
 
     this.container.hidden = !snap.enabled;
     if (!snap.enabled) {
-      this.hovered = false;
-      if (this.tooltip) this.tooltip.hidden = true;
+      if (this.infoOpen) this.setInfoOpen(false);
       return;
     }
 
     this.syncClearanceBounds(nowMs);
 
-    if (!this.minimized) {
-      const cssW = Math.max(120, this.container.clientWidth || window.innerWidth * 0.5);
-      const cssH = Math.max(64, this.container.clientHeight || 96);
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const targetW = Math.round(cssW * dpr);
-      const targetH = Math.round(cssH * dpr);
-
-      if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
-        this.canvas.width = targetW;
-        this.canvas.height = targetH;
-      }
-
-      const ctx = this.ctx;
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      // Zero fade trail, zero background: strictly current-frame streamline wave segments
-      ctx.clearRect(0, 0, cssW, cssH);
-
-      const yBase = cssH - 6;
-      const ampSpan = Math.max(28, cssH - 14);
-      const kickBoost = snap.running ? snap.sidechainDepth : 0;
-      const flowShift = snap.running ? (nowMs * 0.022) : 0;
-
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.globalCompositeOperation = 'source-over';
-
-      for (let sIdx = 0; sIdx < SYNTH_EFFECT_SPECS.length; sIdx++) {
-        const spec = SYNTH_EFFECT_SPECS[sIdx];
-        const curve = snap.curves[CURVE_INDEX_ORDER[sIdx]];
-        const bucketStyles = STREAM_BUCKET_STYLES[sIdx];
-        for (let b = 0; b < INTENSITY_BUCKETS; b++) this.segPools[b].length = 0;
-
-        let prevX = 0;
-        let prevAmp = Math.max(0, Math.min(1, (curve[0] ?? 0) * 0.72));
-        let prevY = yBase - prevAmp * ampSpan;
-
-        for (let i = 1; i < SPECTROGRAM_BINS; i++) {
-          const amp = Math.max(0, Math.min(1, (curve[i] ?? 0) * 0.72));
-          const x = (i / (SPECTROGRAM_BINS - 1)) * cssW;
-          const y = yBase - amp * ampSpan;
-
-          const segAmp = Math.max(prevAmp, amp);
-          const dashPhase = (i * 0.72 + flowShift * (0.65 + sIdx * 0.14) + sIdx * 1.9) % 3.0;
-          const drawGap = snap.running && segAmp < 0.08 && dashPhase > 2.25;
-
-          if (!drawGap) {
-            const slopeBoost = Math.min(0.24, Math.abs(amp - prevAmp) * 1.4);
-            const energy = Math.min(1, segAmp * 0.92 + slopeBoost);
-            const bIdx = Math.min(
-              INTENSITY_BUCKETS - 1,
-              Math.floor((snap.running ? energy : 0.25) * (INTENSITY_BUCKETS - 1)),
-            );
-            this.segPools[bIdx].push(prevX, prevY, x, y);
-          }
-
-          prevX = x;
-          prevY = y;
-          prevAmp = amp;
-        }
-
-        // Render muted color-preserving segments without additive blowout
-        ctx.lineWidth = spec.lineWidth;
-        for (let b = 0; b < INTENSITY_BUCKETS; b++) {
-          const segs = this.segPools[b];
-          if (segs.length === 0) continue;
-          ctx.beginPath();
-          ctx.strokeStyle = bucketStyles[b];
-          if (b >= INTENSITY_BUCKETS - 2 && snap.running) {
-            ctx.shadowColor = spec.glow;
-            ctx.shadowBlur = b === INTENSITY_BUCKETS - 1 ? 5 + kickBoost * 3 : 2.5;
-          } else {
-            ctx.shadowBlur = 0;
-          }
-          for (let k = 0; k < segs.length; k += 4) {
-            ctx.moveTo(segs[k], segs[k + 1]);
-            ctx.lineTo(segs[k + 2], segs[k + 3]);
-          }
-          ctx.stroke();
-        }
-      }
-
-      // Current-frame kick sidechain anchor ticks on edges
-      if (snap.running && kickBoost > 0.1) {
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
-        ctx.shadowColor = 'rgba(0, 240, 255, 0.95)';
-        ctx.shadowBlur = 8;
-        ctx.lineWidth = 1.2;
-        const tickSpan = Math.min(cssW * 0.14, 10 + kickBoost * 24);
-        ctx.beginPath();
-        ctx.moveTo(0, yBase);
-        ctx.lineTo(tickSpan, yBase);
-        ctx.moveTo(cssW, yBase);
-        ctx.lineTo(cssW - tickSpan, yBase);
-        ctx.stroke();
-      }
-
-      ctx.restore();
-    }
-
-    if (this.hovered && this.tooltip) {
+    if (this.infoOpen && this.tooltip) {
       this.tooltip.hidden = false;
       this.tooltip.style.top = `${this.tipTopPx}px`;
       if (nowMs - this.lastTooltipMs >= 90) {
@@ -434,7 +308,7 @@ export class SynthSpectrogramOverlay {
     const header = document.createElement('div');
     header.className = 'synth-tip-head';
     const titleSpan = document.createElement('strong');
-    titleSpan.textContent = 'GLOBE SYNTH SPECTROGRAM';
+    titleSpan.textContent = 'GLOBE SYNTH MOTIF & SOURCES';
     const stateSpan = document.createElement('span');
     stateSpan.className = 'synth-tip-status';
     stateSpan.textContent = statusText;
@@ -495,7 +369,7 @@ export class SynthSpectrogramOverlay {
     const streamProv = document.createElement('div');
     streamProv.className = 'synth-tip-prov';
     streamProv.textContent =
-      '16-band AudioWorklet harmonic resonator + live wave ripple modulation along all visible wind & ocean lines.';
+      'Narrow-band beat motion (~68 Hz kick/sub ocean swells & ~4.2 kHz transient wind ripples) + 16-band AudioWorklet harmonic resonator.';
     streamRow.append(streamTop, streamProv);
     list.appendChild(streamRow);
 

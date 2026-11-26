@@ -350,6 +350,35 @@ class SynthDspCore {
     this.lowBassEnergy = 0.0;
     this.sidechainDepth = 0.0;
 
+    // Narrow-band bandpass filters for rhythmic streamline animation:
+    // Low BPF (~68 Hz, Q=2.2) isolates kick & deep sub hits for Ocean currents;
+    // High BPF (~4.2 kHz, Q=2.6) isolates hats, snares & crisp upper transients for Wind lines.
+    var w0Low = (Math.PI * 2.0 * 68.0) * this.invSr;
+    var alphaLow = Math.sin(w0Low) / (2.0 * 2.2);
+    var invA0Low = 1.0 / (1.0 + alphaLow);
+    this.lowBpB0 = alphaLow * invA0Low;
+    this.lowBpA1 = (-2.0 * Math.cos(w0Low)) * invA0Low;
+    this.lowBpA2 = (1.0 - alphaLow) * invA0Low;
+    this.lowBpZ1 = 0.0;
+    this.lowBpZ2 = 0.0;
+
+    var fcHigh = clampNum(4200.0, 1200.0, this.sampleRate * 0.40);
+    var w0High = (Math.PI * 2.0 * fcHigh) * this.invSr;
+    var alphaHigh = Math.sin(w0High) / (2.0 * 2.6);
+    var invA0High = 1.0 / (1.0 + alphaHigh);
+    this.highBpB0 = alphaHigh * invA0High;
+    this.highBpA1 = (-2.0 * Math.cos(w0High)) * invA0High;
+    this.highBpA2 = (1.0 - alphaHigh) * invA0High;
+    this.highBpZ1 = 0.0;
+    this.highBpZ2 = 0.0;
+
+    this.lowBandEnv = 0.0;
+    this.lowBandBase = 0.0;
+    this.lowBandTransient = 0.0;
+    this.highBandEnergy = 0.0;
+    this.highBandBase = 0.0;
+    this.highBandTransient = 0.0;
+
     this.syncModulationTargets();
     this.updateStreamTargetFreqs();
   }
@@ -412,6 +441,17 @@ class SynthDspCore {
     this.streamAmps.fill(0);
     this.streamMasterAmp = 0.0;
     this.playGain = 0.0;
+    this.lowBpZ1 = 0.0;
+    this.lowBpZ2 = 0.0;
+    this.highBpZ1 = 0.0;
+    this.highBpZ2 = 0.0;
+    this.lowBandEnv = 0.0;
+    this.lowBandBase = 0.0;
+    this.lowBandTransient = 0.0;
+    this.lowBassEnergy = 0.0;
+    this.highBandEnergy = 0.0;
+    this.highBandBase = 0.0;
+    this.highBandTransient = 0.0;
     this.updateStreamTargetFreqs();
   }
 
@@ -853,7 +893,11 @@ class SynthDspCore {
       this.polyLevel *= 0.7;
       this.chorusLevel *= 0.7;
       this.delayLevel *= 0.7;
+      this.lowBandEnv *= 0.7;
       this.lowBassEnergy *= 0.7;
+      this.lowBandTransient *= 0.7;
+      this.highBandEnergy *= 0.7;
+      this.highBandTransient *= 0.7;
       this.sidechainDepth *= 0.7;
       return;
     }
@@ -874,6 +918,18 @@ class SynthDspCore {
     var polySqAcc = 0.0;
     var chorusSqAcc = 0.0;
     var delaySqAcc = 0.0;
+    var lowBandSqAcc = 0.0;
+    var highBandSqAcc = 0.0;
+    var lowBpB0 = this.lowBpB0;
+    var lowBpA1 = this.lowBpA1;
+    var lowBpA2 = this.lowBpA2;
+    var lowZ1 = this.lowBpZ1;
+    var lowZ2 = this.lowBpZ2;
+    var highBpB0 = this.highBpB0;
+    var highBpA1 = this.highBpA1;
+    var highBpA2 = this.highBpA2;
+    var highZ1 = this.highBpZ1;
+    var highZ2 = this.highBpZ2;
 
     var invSr = this.invSr;
     var sr = this.sampleRate;
@@ -1130,16 +1186,33 @@ class SynthDspCore {
       var sOutL = fastTanh(mixL * 1.15) * 0.92 * this.playGain;
       var sOutR = fastTanh(mixR * 1.15) * 0.92 * this.playGain;
 
+      var monoOut = 0.5 * (sOutL + sOutR);
       if (stereo) {
         outL[n] = sOutL;
         outR[n] = sOutR;
       } else {
-        outL[n] = 0.5 * (sOutL + sOutR);
+        outL[n] = monoOut;
       }
+
+      // Narrow-band frequency extraction for ocean currents (~68 Hz) & wind lines (~4.2 kHz)
+      var bpLow = lowBpB0 * monoOut + lowZ1;
+      lowZ1 = lowZ2 - lowBpA1 * bpLow;
+      lowZ2 = -lowBpB0 * monoOut - lowBpA2 * bpLow;
+      lowBandSqAcc += bpLow * bpLow;
+
+      var bpHigh = highBpB0 * monoOut + highZ1;
+      highZ1 = highZ2 - highBpA1 * bpHigh;
+      highZ2 = -highBpB0 * monoOut - highBpA2 * bpHigh;
+      highBandSqAcc += bpHigh * bpHigh;
 
       masterSqAcc += 0.5 * (sOutL * sOutL + sOutR * sOutR);
       this.sampleCursor++;
     }
+
+    this.lowBpZ1 = (lowZ1 > 1e-18 || lowZ1 < -1e-18) ? lowZ1 : 0.0;
+    this.lowBpZ2 = (lowZ2 > 1e-18 || lowZ2 < -1e-18) ? lowZ2 : 0.0;
+    this.highBpZ1 = (highZ1 > 1e-18 || highZ1 < -1e-18) ? highZ1 : 0.0;
+    this.highBpZ2 = (highZ2 > 1e-18 || highZ2 < -1e-18) ? highZ2 : 0.0;
 
     // Update smoothed per-bus meters (scaled consistently into [0..1])
     var invLen = 1.0 / Math.max(1, len);
@@ -1149,7 +1222,31 @@ class SynthDspCore {
     var instChorus = Math.min(1.0, Math.sqrt(chorusSqAcc * invLen) * 3.4);
     var instDelay = Math.min(1.0, Math.sqrt(delaySqAcc * invLen) * 4.0);
     var instDuck = clamp01((1.0 - this.duckVal) / 0.64);
-    var instLowBass = Math.min(1.0, instBass * 0.72 + instDuck * 0.35);
+
+    // Narrow low band (~68 Hz) fast attack / musical beat decay + transient peak contrast
+    var rawLow = Math.min(1.0, Math.sqrt(lowBandSqAcc * invLen) * 2.75);
+    var lowDec = 1.0 - Math.exp(-len * invSr / 0.058);
+    if (rawLow > this.lowBandEnv) {
+      this.lowBandEnv += (rawLow - this.lowBandEnv) * 0.72;
+    } else {
+      this.lowBandEnv += (rawLow - this.lowBandEnv) * lowDec;
+    }
+    var lowBaseAlpha = 1.0 - Math.exp(-len * invSr / 0.36);
+    this.lowBandBase += (this.lowBandEnv - this.lowBandBase) * lowBaseAlpha;
+    this.lowBassEnergy = this.lowBandEnv;
+    this.lowBandTransient = clamp01((this.lowBandEnv - this.lowBandBase * 0.76) * 2.5);
+
+    // Narrow high band (~4.2 kHz) snappy hat/snare attack & fast decay + transient contrast
+    var rawHigh = Math.min(1.0, Math.sqrt(highBandSqAcc * invLen) * 11.5);
+    var highDec = 1.0 - Math.exp(-len * invSr / 0.032);
+    if (rawHigh > this.highBandEnergy) {
+      this.highBandEnergy += (rawHigh - this.highBandEnergy) * 0.82;
+    } else {
+      this.highBandEnergy += (rawHigh - this.highBandEnergy) * highDec;
+    }
+    var highBaseAlpha = 1.0 - Math.exp(-len * invSr / 0.26);
+    this.highBandBase += (this.highBandEnergy - this.highBandBase) * highBaseAlpha;
+    this.highBandTransient = clamp01((this.highBandEnergy - this.highBandBase * 0.62) * 2.4);
 
     this.rms += (instRms - this.rms) * 0.35;
     this.bassLevel += (instBass - this.bassLevel) * 0.38;
@@ -1157,7 +1254,6 @@ class SynthDspCore {
     this.chorusLevel += (instChorus - this.chorusLevel) * 0.35;
     this.delayLevel += (instDelay - this.delayLevel) * 0.35;
     this.sidechainDepth += (instDuck - this.sidechainDepth) * 0.45;
-    this.lowBassEnergy += (instLowBass - this.lowBassEnergy) * 0.38;
   }
 
   fillTelemetry(out) {
@@ -1177,6 +1273,11 @@ class SynthDspCore {
     out[13] = this.streamEnergyAvg;
     out[14] = this.currentBar;
     out[15] = this.currentStep;
+    if (out.length >= 19) {
+      out[16] = this.highBandEnergy;
+      out[17] = this.lowBandTransient;
+      out[18] = this.highBandTransient;
+    }
   }
 }
 `;
@@ -1186,7 +1287,7 @@ class GlobeSynthProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.core = new SynthDspCore(sampleRate);
-    this.telemetry = new Float32Array(16);
+    this.telemetry = new Float32Array(20);
     this.quantumCount = 0;
     var po = options && options.processorOptions;
     if (po) {
@@ -1218,7 +1319,7 @@ class GlobeSynthProcessor extends AudioWorkletProcessor {
     var outR = output[1] || outL;
     this.core.process(outL, outR);
     this.quantumCount++;
-    if ((this.quantumCount & 31) === 0) {
+    if ((this.quantumCount & 7) === 0) {
       this.core.fillTelemetry(this.telemetry);
       this.port.postMessage({ type: 'telemetry', data: this.telemetry });
     }

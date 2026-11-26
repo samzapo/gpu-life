@@ -1,5 +1,4 @@
-<div id="synth-spec" aria-label="Synth Spectrogram">
-  <canvas id="synth-spec-canvas"></canvas>
+<div id="synth-spec" aria-label="Synth motif controls">
   <div class="synth-spec-controls">
     <input
       id="synth-stream-toggle"
@@ -11,13 +10,13 @@
     <button
       id="synth-spec-toggle"
       type="button"
-      aria-expanded="true"
-      aria-label="Minimize synth spectrogram"
-      title="Minimize synth spectrogram"
-    >−</button>
+      aria-expanded="false"
+      aria-label="Show synth motif source explanations"
+      title="Show synth motif source explanations"
+    >∿ ?</button>
   </div>
 </div>
-<div id="synth-spec-tooltip" role="tooltip" hidden></div>
+<div id="synth-spec-tooltip" role="dialog" aria-label="Synth motif source explanations" hidden></div>
 
 <div id="webgpu-notice" role="status" hidden>
   <span id="webgpu-notice-text"></span>
