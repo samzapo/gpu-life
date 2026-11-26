@@ -6,10 +6,10 @@ import {
   dequantizeMdpQ,
   evalActionLeverProfileJs,
   evalCombinedMdpPolicyJs,
-  MDP_ACTION_COMPACT,
-  MDP_ACTION_DISPERSE,
-  MDP_ACTION_EXPAND,
-  MDP_ACTION_PROPEL,
+  MDP_ACTION_ANCHOR,
+  MDP_ACTION_CHASE,
+  MDP_ACTION_EVADE,
+  MDP_ACTION_FORAGE,
   MDP_PAD_TAG,
   MDP_SPECIES_STRIDE,
   MDP_STATE_ABUNDANT,
@@ -62,13 +62,13 @@ test('3-MDP pad bit packing and combined lever blend math round-trip accurately 
     assert.ok(Math.abs(q - val) < 0.015, `expected ${val} ~= ${q}`);
   }
 
-  for (const pAct of [MDP_ACTION_EXPAND, MDP_ACTION_PROPEL, MDP_ACTION_DISPERSE, MDP_ACTION_COMPACT]) {
-    for (const bAct of [MDP_ACTION_EXPAND, MDP_ACTION_PROPEL]) {
+  for (const pAct of [MDP_ACTION_ANCHOR, MDP_ACTION_FORAGE, MDP_ACTION_CHASE, MDP_ACTION_EVADE]) {
+    for (const bAct of [MDP_ACTION_ANCHOR, MDP_ACTION_FORAGE]) {
       for (const hasBlob of [false, true]) {
         const packedF32 = packThreeMdpPad(
           pAct,
           bAct,
-          MDP_ACTION_DISPERSE,
+          MDP_ACTION_EVADE,
           hasBlob,
           MDP_STATE_HAZARD,
           MDP_STATE_ABUNDANT,
@@ -79,7 +79,7 @@ test('3-MDP pad bit packing and combined lever blend math round-trip accurately 
         assert.equal(decoded.valid, true);
         assert.equal(decoded.pAct, pAct);
         assert.equal(decoded.bAct, bAct);
-        assert.equal(decoded.sAct, MDP_ACTION_DISPERSE);
+        assert.equal(decoded.sAct, MDP_ACTION_EVADE);
         assert.equal(decoded.hasBlob, hasBlob);
         assert.equal(decoded.pState, MDP_STATE_HAZARD);
         assert.equal(decoded.bState, MDP_STATE_ABUNDANT);
@@ -90,21 +90,26 @@ test('3-MDP pad bit packing and combined lever blend math round-trip accurately 
   }
 
   // Verify weighted blend math (solitary 0.65P + 0.35S vs blob 0.35P + 0.40B + 0.25S)
-  const solitaryMix = evalCombinedMdpPolicyJs(MDP_ACTION_COMPACT, MDP_ACTION_PROPEL, MDP_ACTION_DISPERSE, false);
-  const pC = evalActionLeverProfileJs(MDP_ACTION_COMPACT);
-  const sD = evalActionLeverProfileJs(MDP_ACTION_DISPERSE);
-  assert.ok(Math.abs(solitaryMix.dSameKin - (0.65 * pC.dSameKin + 0.35 * sD.dSameKin)) < 1e-9);
+  const solitaryMix = evalCombinedMdpPolicyJs(MDP_ACTION_ANCHOR, MDP_ACTION_FORAGE, MDP_ACTION_EVADE, false);
+  const aP = evalActionLeverProfileJs(MDP_ACTION_ANCHOR);
+  const fP = evalActionLeverProfileJs(MDP_ACTION_FORAGE);
+  const cP = evalActionLeverProfileJs(MDP_ACTION_CHASE);
+  const eP = evalActionLeverProfileJs(MDP_ACTION_EVADE);
+  assert.ok(Math.abs(solitaryMix.dSameKin - (0.65 * aP.dSameKin + 0.35 * eP.dSameKin)) < 1e-9);
+  assert.equal(aP.swimThrust, 0);
+  assert.ok(aP.fixation > 0.7 && aP.dDrag > 0.5);
+  assert.ok(fP.swimThrust > 0.5 && fP.dChemNutr > aP.dChemNutr);
+  assert.ok(cP.swimThrust > 0.8 && cP.dForeignBio > 1.0);
+  assert.ok(eP.swimThrust > 0.8 && eP.dForeignBio < -1.0 && eP.dChemHalogen < -1.0);
 
-  const blobMix = evalCombinedMdpPolicyJs(MDP_ACTION_EXPAND, MDP_ACTION_PROPEL, MDP_ACTION_COMPACT, true);
-  const eP = evalActionLeverProfileJs(MDP_ACTION_EXPAND);
-  const prP = evalActionLeverProfileJs(MDP_ACTION_PROPEL);
-  assert.ok(Math.abs(blobMix.chiralTwist - (0.35 * eP.chiralTwist + 0.40 * prP.chiralTwist + 0.25 * pC.chiralTwist)) < 1e-9);
-  assert.ok(blobMix.dForeignBio > 0.25);
+  const blobMix = evalCombinedMdpPolicyJs(MDP_ACTION_FORAGE, MDP_ACTION_CHASE, MDP_ACTION_ANCHOR, true);
+  assert.ok(Math.abs(blobMix.chiralTwist - (0.35 * fP.chiralTwist + 0.40 * cP.chiralTwist + 0.25 * aP.chiralTwist)) < 1e-9);
+  assert.ok(blobMix.dForeignBio > 0.4 && blobMix.swimThrust > 0.55);
 
-  const ctrlBits = MDP_STATE_DARK_CROWDED | (MDP_ACTION_COMPACT << 2) | (20 << 4) | (1 << 12);
+  const ctrlBits = MDP_STATE_DARK_CROWDED | (MDP_ACTION_CHASE << 2) | (20 << 4) | (1 << 12);
   const decodedCtrl = unpackMdpCtrl(ctrlBits);
   assert.equal(decodedCtrl.prevState, MDP_STATE_DARK_CROWDED);
-  assert.equal(decodedCtrl.action, MDP_ACTION_COMPACT);
+  assert.equal(decodedCtrl.action, MDP_ACTION_CHASE);
   assert.equal(decodedCtrl.dwell, 20);
   assert.equal(decodedCtrl.initialized, true);
 });
@@ -123,9 +128,9 @@ test('summarizeAndClassifyBlob tracks all 3 MDP levels cleanly', () => {
   const particles = [];
   const lifeState = [];
   const padTriplet = packThreeMdpPad(
-    MDP_ACTION_EXPAND,
-    MDP_ACTION_PROPEL,
-    MDP_ACTION_COMPACT,
+    MDP_ACTION_FORAGE,
+    MDP_ACTION_CHASE,
+    MDP_ACTION_ANCHOR,
     true,
     MDP_STATE_LOW_ENERGY,
     MDP_STATE_ABUNDANT,
@@ -141,9 +146,9 @@ test('summarizeAndClassifyBlob tracks all 3 MDP levels cleanly', () => {
 
   const summary = summarizeAndClassifyBlob(members, particles, lifeState, elements, speciesTraits, 0);
   assert.equal(summary.role, 'consumer', `expected consumer, got ${summary.role}`);
-  assert.equal(summary.blobMdpAction, MDP_ACTION_PROPEL);
-  assert.equal(summary.speciesMdpAction, MDP_ACTION_COMPACT);
-  assert.equal(summary.cellMdpAction, MDP_ACTION_EXPAND);
-  assert.equal(summary.mdpAction, MDP_ACTION_PROPEL);
-  assert.equal(summary.mdpTripletLabel, 'Blob:Propel · Sp:Compact · Cell:Expand');
+  assert.equal(summary.blobMdpAction, MDP_ACTION_CHASE);
+  assert.equal(summary.speciesMdpAction, MDP_ACTION_ANCHOR);
+  assert.equal(summary.cellMdpAction, MDP_ACTION_FORAGE);
+  assert.equal(summary.mdpAction, MDP_ACTION_CHASE);
+  assert.equal(summary.mdpTripletLabel, 'Blob:Chase · Sp:Anchor · Cell:Forage');
 });

@@ -14,10 +14,10 @@ export const MDP_STATE_HAZARD = 1;
 export const MDP_STATE_ABUNDANT = 2;
 export const MDP_STATE_DARK_CROWDED = 3;
 
-export const MDP_ACTION_EXPAND = 0;
-export const MDP_ACTION_PROPEL = 1;
-export const MDP_ACTION_DISPERSE = 2;
-export const MDP_ACTION_COMPACT = 3;
+export const MDP_ACTION_ANCHOR = 0;
+export const MDP_ACTION_FORAGE = 1;
+export const MDP_ACTION_CHASE = 2;
+export const MDP_ACTION_EVADE = 3;
 
 export const MDP_PAD_TAG = 2097152; // 1 << 21
 
@@ -25,17 +25,17 @@ export type MdpStateId = 0 | 1 | 2 | 3;
 export type MdpActionId = 0 | 1 | 2 | 3;
 
 export const MDP_ACTION_LABELS: readonly string[] = [
-  'Expand / Absorb',
-  'Swirl / Propel',
-  'Disperse / Repel',
-  'Compact / Shell',
+  'Anchor / Fix',
+  'Glide / Forage',
+  'Chase / Hunt',
+  'Evade / Dart',
 ] as const;
 
 export const MDP_ACTION_SHORT_LABELS: readonly string[] = [
-  'Expand',
-  'Propel',
-  'Disperse',
-  'Compact',
+  'Anchor',
+  'Forage',
+  'Chase',
+  'Evade',
 ] as const;
 
 export const MDP_STATE_LABELS: readonly string[] = [
@@ -55,71 +55,71 @@ export interface MdpLeverProfile {
   dBeta: number;
   dDrag: number;
   chiralTwist: number;
-  agitation: number;
+  swimThrust: number;
   lipidAlloc: number;
-  torpor: number;
+  fixation: number;
 }
 
 const ACTION_LEVER_PROFILES: readonly MdpLeverProfile[] = [
   {
-    // 0: Expand / Absorb
-    dSameKin: 0.18,
-    dForeignBio: 0.45,
+    // 0: Anchor / Fix — sessile autotrophic biofilm harvesting light, moisture & air chemistry
+    dSameKin: 0.38,
+    dForeignBio: -0.10,
     dChemNutr: 0.62,
-    dChemHalogen: -0.30,
-    dLipid: 0.18,
-    dMineral: 0.32,
-    dBeta: -0.05,
-    dDrag: -0.08,
-    chiralTwist: 0.22,
-    agitation: 0.25,
-    lipidAlloc: 0.25,
-    torpor: 0.0,
-  },
-  {
-    // 1: Swirl / Propel
-    dSameKin: 0.05,
-    dForeignBio: 0.70,
-    dChemNutr: 0.30,
-    dChemHalogen: -0.55,
-    dLipid: -0.05,
-    dMineral: 0.10,
-    dBeta: -0.08,
-    dDrag: -0.22,
-    chiralTwist: 0.48,
-    agitation: 0.42,
-    lipidAlloc: 0.12,
-    torpor: 0.0,
-  },
-  {
-    // 2: Disperse / Repel
-    dSameKin: -0.28,
-    dForeignBio: -0.75,
-    dChemNutr: 0.15,
-    dChemHalogen: -0.85,
-    dLipid: -0.22,
-    dMineral: -0.35,
-    dBeta: 0.12,
-    dDrag: -0.28,
-    chiralTwist: -0.30,
-    agitation: 0.78,
-    lipidAlloc: 0.05,
-    torpor: 0.0,
-  },
-  {
-    // 3: Compact / Shell
-    dSameKin: 0.52,
-    dForeignBio: -0.22,
-    dChemNutr: 0.28,
-    dChemHalogen: -0.45,
-    dLipid: 0.62,
-    dMineral: 0.38,
-    dBeta: -0.04,
-    dDrag: 0.42,
+    dChemHalogen: -0.35,
+    dLipid: 0.58,
+    dMineral: 0.76,
+    dBeta: 0.0,
+    dDrag: 0.78,
     chiralTwist: 0.0,
-    agitation: 0.0,
-    lipidAlloc: 0.85,
-    torpor: 0.45,
+    swimThrust: 0.0,
+    lipidAlloc: 0.80,
+    fixation: 0.92,
+  },
+  {
+    // 1: Glide / Forage — persistent smooth motility grazing nutrients, moisture & detritus
+    dSameKin: 0.22,
+    dForeignBio: -0.06,
+    dChemNutr: 0.96,
+    dChemHalogen: -0.65,
+    dLipid: 0.16,
+    dMineral: 0.30,
+    dBeta: 0.0,
+    dDrag: -0.24,
+    chiralTwist: 0.34,
+    swimThrust: 0.64,
+    lipidAlloc: 0.16,
+    fixation: 0.14,
+  },
+  {
+    // 2: Chase / Hunt — fast persistent pursuit along foreign-matrix attraction & predation
+    dSameKin: 0.18,
+    dForeignBio: 1.30,
+    dChemNutr: 0.12,
+    dChemHalogen: -0.40,
+    dLipid: -0.22,
+    dMineral: -0.10,
+    dBeta: -0.02,
+    dDrag: -0.34,
+    chiralTwist: 0.10,
+    swimThrust: 1.06,
+    lipidAlloc: 0.05,
+    fixation: 0.0,
+  },
+  {
+    // 3: Evade / Dart — emergency threat/halogen escape (suppresses grazing while bolting)
+    dSameKin: 0.05,
+    dForeignBio: -1.18,
+    dChemNutr: 0.0,
+    dChemHalogen: -1.18,
+    dLipid: -0.28,
+    dMineral: -0.32,
+    dBeta: 0.02,
+    dDrag: -0.32,
+    chiralTwist: -0.42,
+    swimThrust: 0.92,
+    lipidAlloc: 0.02,
+    fixation: 0.0,
   },
 ] as const;
 
@@ -149,9 +149,9 @@ export function evalCombinedMdpPolicyJs(
     dBeta: wp * lp.dBeta + wb * lb.dBeta + ws * ls.dBeta,
     dDrag: wp * lp.dDrag + wb * lb.dDrag + ws * ls.dDrag,
     chiralTwist: wp * lp.chiralTwist + wb * lb.chiralTwist + ws * ls.chiralTwist,
-    agitation: wp * lp.agitation + wb * lb.agitation + ws * ls.agitation,
+    swimThrust: wp * lp.swimThrust + wb * lb.swimThrust + ws * ls.swimThrust,
     lipidAlloc: wp * lp.lipidAlloc + wb * lb.lipidAlloc + ws * ls.lipidAlloc,
-    torpor: wp * lp.torpor + wb * lb.torpor + ws * ls.torpor,
+    fixation: wp * lp.fixation + wb * lb.fixation + ws * ls.fixation,
   };
 }
 
@@ -203,9 +203,9 @@ export function unpackThreeMdpFromPad(padVal: number): DecodedThreeMdp {
   if (!(padVal >= 2097151.5)) {
     return {
       valid: false,
-      pAct: MDP_ACTION_EXPAND,
-      bAct: MDP_ACTION_EXPAND,
-      sAct: MDP_ACTION_EXPAND,
+      pAct: MDP_ACTION_ANCHOR,
+      bAct: MDP_ACTION_ANCHOR,
+      sAct: MDP_ACTION_ANCHOR,
       pState: MDP_STATE_ABUNDANT,
       bState: MDP_STATE_ABUNDANT,
       hasBlob: false,
@@ -216,9 +216,9 @@ export function unpackThreeMdpFromPad(padVal: number): DecodedThreeMdp {
   if ((packed & MDP_PAD_TAG) === 0) {
     return {
       valid: false,
-      pAct: MDP_ACTION_EXPAND,
-      bAct: MDP_ACTION_EXPAND,
-      sAct: MDP_ACTION_EXPAND,
+      pAct: MDP_ACTION_ANCHOR,
+      bAct: MDP_ACTION_ANCHOR,
+      sAct: MDP_ACTION_ANCHOR,
       pState: MDP_STATE_ABUNDANT,
       bState: MDP_STATE_ABUNDANT,
       hasBlob: false,
@@ -239,7 +239,7 @@ export function unpackThreeMdpFromPad(padVal: number): DecodedThreeMdp {
 
 export function unpackMdpActionFromPad(padVal: number): MdpActionId {
   const dec = unpackThreeMdpFromPad(padVal);
-  if (!dec.valid) return MDP_ACTION_EXPAND;
+  if (!dec.valid) return MDP_ACTION_ANCHOR;
   return dec.hasBlob ? dec.bAct : dec.pAct;
 }
 

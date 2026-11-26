@@ -1268,15 +1268,16 @@ test('fullscreen helper toggles standard/webkit fullscreen, falls back safely wi
   };
   const labelEl = { textContent: 'Fullscreen' };
   const btnListeners = new Map();
-  const attrs = new Map();
+  const attrs = new Map([['title', 'old']]);
   const btn = {
     hidden: false,
     dataset: {},
-    title: '',
-    textContent: '',
+    title: 'old',
+    textContent: '⛶',
     querySelector(sel) { return sel === '.switch-label' ? labelEl : null; },
     setAttribute(k, v) { attrs.set(k, String(v)); },
     getAttribute(k) { return attrs.get(k); },
+    removeAttribute(k) { attrs.delete(k); },
     addEventListener(type, fn) {
       const arr = btnListeners.get(type) || [];
       arr.push(fn);
@@ -1288,7 +1289,11 @@ test('fullscreen helper toggles standard/webkit fullscreen, falls back safely wi
   wireFullscreenToggle(btn, { doc, target, onChange: (a) => changeEvents.push(a) });
   assert.equal(btn.hidden, false);
   assert.equal(attrs.get('aria-pressed'), 'false');
-  assert.equal(labelEl.textContent, 'Fullscreen');
+  assert.equal(btn.dataset.fullscreen, 'off');
+  assert.equal(labelEl.textContent, '');
+  assert.equal(btn.title, '');
+  assert.equal(attrs.has('title'), false);
+  assert.equal(btn.textContent, '⛶');
 
   // Click triggers requestFullscreen -> retries without options when options throws -> sets active
   for (const fn of btnListeners.get('click') || []) fn();
@@ -1296,7 +1301,11 @@ test('fullscreen helper toggles standard/webkit fullscreen, falls back safely wi
   assert.equal(calls.length, 2);
   assert.equal(isFullscreenActive(doc), true);
   assert.equal(attrs.get('aria-pressed'), 'true');
-  assert.equal(labelEl.textContent, 'Exit full');
+  assert.equal(btn.dataset.fullscreen, 'on');
+  assert.equal(labelEl.textContent, '');
+  assert.equal(btn.title, '');
+  assert.equal(attrs.has('title'), false);
+  assert.equal(btn.textContent, '⛶');
 
   for (const fn of docListeners.get('fullscreenchange') || []) fn();
   assert.deepEqual(changeEvents, [true]);

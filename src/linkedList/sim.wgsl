@@ -174,7 +174,7 @@ fn getBioForce(pi: u32, p: Particle, myPhase: u32, bioSp: u32, myKin: f32, packe
         }
     }
 
-    return ForceResult(finalizeOceanForce(acc, oceanSim), acc.torque);
+    return ForceResult(finalizeOceanForce(acc, oceanSim), finalizeOceanTorque(acc, p, myPhase, pol));
 }
 
 @compute @workgroup_size(128)

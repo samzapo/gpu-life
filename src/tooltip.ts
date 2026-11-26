@@ -5,7 +5,7 @@ import type { LocalHydroSample } from './earth/hydroData.ts';
 import { getElementName, getElementSymbol, type Element2D } from './periodicTable2D.ts';
 import type { ViewLayerMode } from './options.ts';
 import {
-  MDP_ACTION_EXPAND,
+  MDP_ACTION_ANCHOR,
   MDP_ACTION_LABELS,
   MDP_ACTION_SHORT_LABELS,
   type MdpActionId,
@@ -377,7 +377,7 @@ export function summarizeAndClassifyBlob(
   }
 
   const pickArgmax = (counts: number[]): MdpActionId => {
-    let bestAct: MdpActionId = MDP_ACTION_EXPAND;
+    let bestAct: MdpActionId = MDP_ACTION_ANCHOR;
     let bestC = -1;
     for (let a = 0; a < 4; a++) {
       if (counts[a] > bestC) {
@@ -391,9 +391,9 @@ export function summarizeAndClassifyBlob(
   const blobMdpAction = pickArgmax(blobActCounts);
   const speciesMdpAction = pickArgmax(spActCounts);
   const dominantAct = blobMdpAction;
-  const bShort = MDP_ACTION_SHORT_LABELS[blobMdpAction] ?? 'Expand';
-  const sShort = MDP_ACTION_SHORT_LABELS[speciesMdpAction] ?? 'Expand';
-  const cShort = MDP_ACTION_SHORT_LABELS[cellMdpAction] ?? 'Expand';
+  const bShort = MDP_ACTION_SHORT_LABELS[blobMdpAction] ?? 'Anchor';
+  const sShort = MDP_ACTION_SHORT_LABELS[speciesMdpAction] ?? 'Anchor';
+  const cShort = MDP_ACTION_SHORT_LABELS[cellMdpAction] ?? 'Anchor';
 
   return {
     size: memberIndices.length,
@@ -420,7 +420,7 @@ export function summarizeAndClassifyBlob(
     haloTol,
     role,
     mdpAction: dominantAct,
-    mdpPolicyLabel: MDP_ACTION_LABELS[dominantAct] ?? 'Expand / Absorb',
+    mdpPolicyLabel: MDP_ACTION_LABELS[dominantAct] ?? 'Anchor / Fix',
     cellMdpAction,
     blobMdpAction,
     speciesMdpAction,

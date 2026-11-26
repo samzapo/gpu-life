@@ -83,15 +83,12 @@ export function wireFullscreenToggle(
     const active = isFullscreenActive(doc);
     btn.setAttribute('aria-pressed', String(active));
     btn.dataset.fullscreen = active ? 'on' : 'off';
-    const label = active ? 'Exit full' : 'Fullscreen';
-    const tip = active ? 'Exit fullscreen mode' : 'Enter fullscreen mode to hide the browser bar';
-    btn.title = tip;
-    btn.setAttribute('aria-label', tip);
+    btn.title = '';
+    btn.removeAttribute?.('title');
+    btn.setAttribute('aria-label', 'Toggle immersive view');
     const labelEl = btn.querySelector('.switch-label');
     if (labelEl) {
-      labelEl.textContent = label;
-    } else {
-      btn.textContent = `⛶ ${label}`;
+      labelEl.textContent = '';
     }
   };
 

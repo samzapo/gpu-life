@@ -827,9 +827,9 @@ fn accumulateBioUnifiedNeighbor(
 
     (*acc).nearForeignBio += wDist;
 
-    // Pure physical close-contact competition/engulfment (`r < 0.44 * catRadius`):
+    // Pure physical close-contact competition/engulfment (`r < 0.54 * catRadius`):
     // Driven purely by whether the combined attractor matrix physically compresses foreign cells into overlap.
-    let engulfR = bio.catRadius * 0.44;
+    let engulfR = bio.catRadius * 0.54;
     if (r < engulfR) {
         let myPol = evalCombinedMdpPolicy(myBlobZ);
         let nbPol = evalCombinedMdpPolicy(nbBlob.z);
@@ -1401,7 +1401,8 @@ fn finalizeBioUnified(
                 }
                 let childGene = mutateGene(acc.contactBestGene, pi, frameU, 17u, 0.05);
                 let childGrad = select(0u, 1u, hostGrad && acc.nearLipidCount >= 1.0);
-                let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, 0u, 12u, 1u)));
+                let childInitAct = u32(floor(hashFloat(pi, frameU, 18u) * 4.0)) & 3u;
+                let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, childInitAct, 6u, 1u)));
                 return BioStepResult(
                     vec4f(0.68, 0.06, 0.0, packLifeMetaGrad(1u, nextSp, acc.contactBestKin, childGene, childGrad)),
                     vec4f(0.0),
@@ -1576,21 +1577,28 @@ fn finalizeBioUnified(
     let o2RespireBoost = clamp(0.76 + 0.16 * min(acc.nearOxygenGas + ridgeVentMask * 1.4, 2.5), 0.72, 1.25);
     let coastalMoisture = smoothstep(0.08, 0.45, oc.w) * 0.42;
     let landFertilityScale = clamp(mix(1.0, rawLandMoisture + coastalMoisture, hBlend), 0.08, 1.32) * (1.0 - 0.34 * smoothstep(2.2, 5.2, elevKm));
-    let activeFeedScale = 1.0 - 0.35 * curPol.torpor;
+    let calmFactor = 1.0 - clamp(motility / 0.45, 0.0, 1.0);
+    let calmFixBoost = 1.0 + 0.48 * curPol.fixation * calmFactor;
+    let lightShade = 1.0 / (1.0 + 0.068 * max(acc.nearTotalBio - 8.0, 0.0));
+    let chemReceptor = clamp(curPol.dChemNutr, 0.05, 1.0);
+    let huntSweep = clamp(curPol.dForeignBio * 0.5, 0.0, 0.65);
+    let swimSweep = 1.0 + 0.82 * clamp(motility, 0.0, 1.4) * max(chemReceptor, huntSweep);
 
     let solarElem = elemSolarWeight(atomicNum);
     let redoxElem = elemRedoxWeight(atomicNum);
-    let solarGain = 0.58 * q10Bio * solar * (0.20 + 0.85 * solarElem) * mix(0.55 + 0.75 * upwell, landFertilityScale, landFrac) * moistureFactor * carbWaterBoost * activeFeedScale;
-    let engulfGain = 0.55 * min(acc.contactPreyHarvest, 2.5) * o2RespireBoost * activeFeedScale;
-    let detritusGain = 0.24 * min(acc.nearStressedBio, 2.5) * (0.25 + 0.75 * redoxElem) * o2RespireBoost * activeFeedScale;
-    let chemBonus = 0.26 * acc.dE * normChem * q10Bio;
+    let solarGain = 0.52 * q10Bio * solar * lightShade * (0.20 + 0.85 * solarElem) * mix(0.55 + 0.75 * upwell, landFertilityScale, landFrac) * moistureFactor * carbWaterBoost * calmFixBoost;
+    let engulfGain = 1.35 * min(acc.contactPreyHarvest, 2.5) * o2RespireBoost;
+    let detritusGain = 0.30 * min(acc.nearStressedBio, 2.5) * (0.25 + 0.75 * redoxElem) * o2RespireBoost * swimSweep;
+    let chemBonus = 0.36 * acc.dE * normChem * q10Bio * swimSweep;
 
-    let coldTorpor = mix(1.0, clamp(0.56 + 0.44 * smoothstep(270.0, 297.0, tHabK), 0.46, 1.15), tBlend);
-    let basalBurn = (0.11 + 0.055 * motility * motility + 0.036 * curPol.agitation + 0.018 * curPol.lipidAlloc)
-        * coldTorpor * (1.0 - 0.48 * curPol.torpor) * (1.0 - 0.16 * membraneShield - 0.18 * select(0.0, 1.0, isGradNow));
+    let coldTorpor = mix(1.0, clamp(0.58 + 0.42 * smoothstep(270.0, 297.0, tHabK), 0.48, 1.15), tBlend);
+    let feedDrive = clamp(max(curPol.dChemNutr, curPol.dForeignBio), 0.0, 1.0);
+    let panicCost = 0.068 * curPol.swimThrust * curPol.swimThrust * (1.0 - feedDrive);
+    let basalBurn = (0.11 + 0.014 * motility + 0.022 * curPol.swimThrust * curPol.swimThrust + panicCost + 0.016 * curPol.lipidAlloc)
+        * coldTorpor * (1.0 - 0.16 * membraneShield - 0.18 * select(0.0, 1.0, isGradNow));
 
     // Pure physical steric crowding (no arbitrary own-blob cap or foreign bonus tricks)
-    let crowdPenalty = 0.018 * max(0.0, acc.nearTotalBio - 42.0) * (1.0 - 0.45 * membraneShield);
+    let crowdPenalty = 0.022 * max(0.0, acc.nearTotalBio - 26.0) * (1.0 - 0.45 * membraneShield);
     let poisonPenalty = 0.26 * poi;
     let heatShock = smoothstep(305.0, 321.0, tHabK) * tBlend + 0.55 * oceanBleachBoost;
     let frostShock = smoothstep(271.0, 249.0, tHabK) * tBlend;
@@ -1598,7 +1606,7 @@ fn finalizeBioUnified(
     let uvStressPenalty = 0.14 * uvStress * (1.0 - 0.72 * membraneShield);
     let oceanEvapOsmotic = max(0.0, seaEvapFlux - precipMm * 0.25) * smoothstep(0.36, 0.54, oc.w) * 0.018 * hBlend;
     let landPenalty = (0.055 * landFrac * mix(1.0, clamp(0.24 + 1.35 * aridStress - 0.35 * landHydration, 0.10, 2.0), hBlend) + oceanEvapOsmotic)
-        * (1.0 - 0.68 * membraneShield) * (1.0 - 0.35 * curPol.torpor);
+        * (1.0 - 0.68 * membraneShield) * (1.0 - 0.28 * curPol.fixation);
 
     let netDE = solarGain + engulfGain + detritusGain + 0.06 * vit + chemBonus
         - basalBurn - crowdPenalty - poisonPenalty - landPenalty - thermStressPenalty - uvStressPenalty;
@@ -1723,9 +1731,9 @@ fn finalizeBioUnified(
     }
 
     // Natural decomposition / lysis of dying cells (`poi >= 0.90` or starved below decayThreshold)
-    let decayThreshold = select(0.075, 0.042, isGradNow || curPol.torpor > 0.25);
+    let decayThreshold = select(0.075, 0.042, isGradNow || curPol.fixation > 0.35);
     if (nextEnergy <= decayThreshold || poi >= 0.90) {
-        let pDecay = clamp(select(0.42, 0.14, isGradNow || curPol.torpor > 0.25) * dtBio, 0.0, 0.14);
+        let pDecay = clamp(select(0.42, 0.14, isGradNow || curPol.fixation > 0.35) * dtBio, 0.0, 0.14);
         if (hashFloat(pi, frameU, 24u) < pDecay) {
             let depletion = energyDeath(eDiffused + netDE * dtVit, eDiffused, decayThreshold, dtVit, crowdPenalty,
                 vec4f(poisonPenalty, thermStressPenalty, uvStressPenalty, landPenalty));

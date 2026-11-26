@@ -217,10 +217,10 @@ const MDP_STATE_HAZARD: u32 = 1u;
 const MDP_STATE_ABUNDANT: u32 = 2u;
 const MDP_STATE_DARK_CROWDED: u32 = 3u;
 
-const MDP_ACT_EXPAND: u32 = 0u;
-const MDP_ACT_PROPEL: u32 = 1u;
-const MDP_ACT_DISPERSE: u32 = 2u;
-const MDP_ACT_COMPACT: u32 = 3u;
+const MDP_ACT_ANCHOR: u32 = 0u;
+const MDP_ACT_FORAGE: u32 = 1u;
+const MDP_ACT_CHASE: u32 = 2u;
+const MDP_ACT_EVADE: u32 = 3u;
 
 const MAX_LEADER_HOPS: u32 = 24u;
 const NO_LEADER: u32 = 0xffffffffu;
@@ -253,9 +253,9 @@ struct MdpLeverProfile {
     dBeta: f32,
     dDrag: f32,
     chiralTwist: f32,
-    agitation: f32,
+    swimThrust: f32,
     lipidAlloc: f32,
-    torpor: f32,
+    fixation: f32,
 }
 
 fn emptyMdpState() -> MdpState {
@@ -330,16 +330,16 @@ fn packThreeMdpPadFromZ(packedBlobZ: u32) -> f32 {
 
 fn actionLeverProfile(act: u32) -> MdpLeverProfile {
     let a = act & 3u;
-    if (a == MDP_ACT_EXPAND) {
-        return MdpLeverProfile(0.18, 0.45, 0.62, -0.30, 0.18, 0.32, -0.05, -0.08, 0.22, 0.25, 0.25, 0.0);
+    if (a == MDP_ACT_ANCHOR) {
+        return MdpLeverProfile(0.38, -0.10, 0.62, -0.35, 0.58, 0.76, 0.0, 0.78, 0.0, 0.0, 0.80, 0.92);
     }
-    if (a == MDP_ACT_PROPEL) {
-        return MdpLeverProfile(0.05, 0.70, 0.30, -0.55, -0.05, 0.10, -0.08, -0.22, 0.48, 0.42, 0.12, 0.0);
+    if (a == MDP_ACT_FORAGE) {
+        return MdpLeverProfile(0.22, -0.06, 0.96, -0.65, 0.16, 0.30, 0.0, -0.24, 0.34, 0.64, 0.16, 0.14);
     }
-    if (a == MDP_ACT_DISPERSE) {
-        return MdpLeverProfile(-0.28, -0.75, 0.15, -0.85, -0.22, -0.35, 0.12, -0.28, -0.30, 0.78, 0.05, 0.0);
+    if (a == MDP_ACT_CHASE) {
+        return MdpLeverProfile(0.18, 1.30, 0.12, -0.40, -0.22, -0.10, -0.02, -0.34, 0.10, 1.06, 0.05, 0.0);
     }
-    return MdpLeverProfile(0.52, -0.22, 0.28, -0.45, 0.62, 0.38, -0.04, 0.42, 0.0, 0.0, 0.85, 0.45);
+    return MdpLeverProfile(0.05, -1.18, 0.0, -1.18, -0.28, -0.32, 0.02, -0.32, -0.42, 0.92, 0.02, 0.0);
 }
 
 fn evalCombinedMdpPolicy(packedBlobZ: u32) -> MdpLeverProfile {
@@ -363,8 +363,8 @@ fn evalCombinedMdpPolicy(packedBlobZ: u32) -> MdpLeverProfile {
         wp * lp.dBeta + wb * lb.dBeta + ws * ls.dBeta,
         wp * lp.dDrag + wb * lb.dDrag + ws * ls.dDrag,
         wp * lp.chiralTwist + wb * lb.chiralTwist + ws * ls.chiralTwist,
-        wp * lp.agitation + wb * lb.agitation + ws * ls.agitation,
+        wp * lp.swimThrust + wb * lb.swimThrust + ws * ls.swimThrust,
         wp * lp.lipidAlloc + wb * lb.lipidAlloc + ws * ls.lipidAlloc,
-        wp * lp.torpor + wb * lb.torpor + ws * ls.torpor,
+        wp * lp.fixation + wb * lb.fixation + ws * ls.fixation,
     );
 }

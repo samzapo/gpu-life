@@ -51,9 +51,8 @@
   margin-right: 4px;
 }
 
-.game-switch .switch-label {
-  font-size: inherit;
-  vertical-align: baseline;
+#fullscreen-toggle span {
+  font-size: 12px;
   margin-right: 0;
 }
 

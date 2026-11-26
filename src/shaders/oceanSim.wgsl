@@ -5,6 +5,8 @@
 struct OceanForceAccum {
     total: vec3f,
     avoid: vec3f,
+    sense: vec3f,
+    flockVec: vec3f,
     div: f32,
     torque: f32,
 }
@@ -100,6 +102,12 @@ fn accumulateUnifiedEmergentNeighbor(
             let fChem = oceanForceCurve(rNorm, aChem, betaEff);
             (*acc).total += dI * fChem.x;
         }
+        let sChem = select(
+            clamp(pol.dChemNutr, -0.4, 1.2) * (1.0 - rNorm) * 0.36,
+            clamp(pol.dChemHalogen, -1.2, 0.4) * (1.0 - rNorm * 0.55) * 0.95,
+            nbChemRole == 4u,
+        );
+        (*acc).sense += dI * sChem;
         return;
     }
 
@@ -109,11 +117,22 @@ fn accumulateUnifiedEmergentNeighbor(
         let aEff = clamp(aBioBio + select(pol.dForeignBio, pol.dSameKin, sameKin), -1.5, 1.5);
         let f = oceanForceCurve(rNorm, aEff, betaEff);
         let tPerp = cross(p.pos, dI);
-        let twist = pol.chiralTwist * clamp(abs(aEff), 0.20, 1.0);
+        let twist = pol.chiralTwist * clamp(abs(aEff), 0.18, 1.0);
         let dTwist = dI * cos(twist) + tPerp * sin(twist);
         (*acc).total += dTwist * f.x;
-        (*acc).avoid += dI * f.y;
+        let coreSoft = select(1.0, 0.35, !sameKin && aEff > 0.35);
+        (*acc).avoid += dI * (f.y * coreSoft);
         (*acc).div += max(0.0, -f.y) / 10.0 * sim.avoidance;
+        if (sameKin) {
+            if (pol.swimThrust > 0.04) {
+                let flockW = clamp(1.15 - rNorm, 0.25, 1.0);
+                (*acc).flockVec += orthoBasis(p.pos, ipOrient) * flockW;
+            }
+        } else {
+            let closeMag = (1.0 - rNorm * 0.65) * clamp(abs(aEff), 0.0, 1.5);
+            let fSense = select(f.x, select(-1.0, 1.0, aEff > 0.0) * max(abs(f.x), 0.36 * closeMag), abs(aEff) > 0.25);
+            (*acc).sense += dTwist * fSense;
+        }
         return;
     }
 
@@ -125,6 +144,9 @@ fn accumulateUnifiedEmergentNeighbor(
         (*acc).total += dI * fMin.x;
         (*acc).avoid += dI * (fMin.y * 1.6);
         (*acc).div += 0.20;
+        if (myPhase == 1u) {
+            (*acc).sense += dI * (pol.dMineral * (1.0 - rNorm) * 0.34);
+        }
         return;
     }
 
@@ -202,13 +224,42 @@ fn accumulateUnifiedEmergentNeighbor(
         (*acc).total += fBound * 0.60;
     } else if (aLipForeign < 0.0) {
         (*acc).avoid += siteForce(dIJ, dI, 0.62 * sim.rMax, sim.rMax, -aLipForeign * 1.15, 0.0);
+        (*acc).sense += dI * (aLipForeign * (1.0 - rNorm * 0.6) * 0.42);
     } else {
         (*acc).total += siteForce(dIJ, dI, 0.48 * sim.rMax, 0.96 * sim.rMax, 0.8, aLipForeign * 0.95);
+        (*acc).sense += dI * (aLipForeign * (1.0 - rNorm * 0.6) * 0.42);
     }
 }
 
 fn finalizeOceanForce(acc: OceanForceAccum, sim: OceanSim) -> vec3f {
     return acc.total * (sim.rMax * sim.force / (1.0 + min(acc.div, 6.0))) + acc.avoid;
+}
+
+fn finalizeOceanTorque(acc: OceanForceAccum, p: Particle, myPhase: u32, pol: MdpLeverProfile) -> f32 {
+    if (myPhase != 1u) {
+        return acc.torque;
+    }
+    if (pol.swimThrust <= 0.04) {
+        return 0.0;
+    }
+    let uI = orthoBasis(p.pos, p.orient);
+    let bI = cross(p.pos, uI);
+    var tOut = 0.0;
+    let flockLen = length(acc.flockVec);
+    if (flockLen > 1e-4) {
+        let fDir = orthoBasis(p.pos, acc.flockVec);
+        tOut += dot(bI, fDir) * 5.2;
+    }
+    let sLen = length(acc.sense);
+    if (sLen > 1e-4) {
+        let sDir = orthoBasis(p.pos, acc.sense);
+        let fwd = dot(uI, sDir);
+        let perp = dot(bI, sDir);
+        let turnSin = select(perp, perp + select(-0.65, 0.65, perp >= 0.0), fwd < -0.15);
+        let sGain = sLen / (0.20 + sLen);
+        tOut += turnSin * sGain * 14.0;
+    }
+    return tOut;
 }
 
 fn integrateOceanParticle(
@@ -248,16 +299,20 @@ fn integrateOceanParticle(
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
     let substrateAvail = clamp(
         max(landFrac, smoothstep(0.30, 0.58, oc.w) * (1.0 - 0.55 * smoothstep(0.60, 0.95, oc.w))),
-        0.15,
+        0.58,
         1.0,
     );
-    let grip = select(0.15, clamp(0.28 + pol.dDrag, 0.02, 0.88) * substrateAvail, myPhase == 1u);
+    let activeSwim = clamp(pol.swimThrust, 0.0, 1.2);
+    let anchorHold = clamp(pol.dDrag, 0.0, 1.0) * (1.0 - smoothstep(0.16, 0.48, activeSwim));
+    let rawGrip = clamp(0.22 * (1.0 - smoothstep(0.18, 0.55, activeSwim)) + anchorHold, 0.0, 0.94);
+    let grip = select(0.15, rawGrip * substrateAvail, myPhase == 1u);
+    let glideSlip = select(0.0, clamp(-pol.dDrag * 1.4, 0.0, 0.58) * smoothstep(0.15, 0.50, activeSwim), myPhase == 1u);
 
     var cTarget = vec3f(0.0);
     if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
         let cur3D = oc.x * eEast + oc.y * eNorth;
         cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * smoothstep(0.35, 0.55, oc.w);
-        cTarget *= (1.0 - 0.82 * grip);
+        cTarget *= (1.0 - 0.92 * grip);
         let cLen = length(cTarget);
         if (cLen > 1.15) {
             cTarget *= 1.15 / cLen;
@@ -277,36 +332,37 @@ fn integrateOceanParticle(
     let vitality = baseVitality * thermFluid;
     let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
-    let velDamp = clamp(sim.friction * (1.0 - 0.36 * grip) * toxicDrag * frostDrag, 0.25, 0.99);
+    let baseDamp = mix(sim.friction, 0.90, glideSlip);
+    let velDamp = clamp(baseDamp * (1.0 - 0.48 * grip) * toxicDrag * frostDrag, 0.20, 0.95);
     let slopeResist = select(
         vec3f(0.0),
         -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.05 * smoothstep(0.4, 3.0, elevKm)) * (1.0 - 0.85 * grip),
         landFrac > 0.40,
     );
 
-    // Klinokinesis (run-and-tumble agitation coherent at leader scale) — zero gradient-steering!
-    var kForce = vec3f(0.0);
-    if (myPhase == 1u && pol.agitation > 0.005) {
-        let eEpoch = u32(floor(max(frameF, 0.0) / 14.0));
-        let lAng = hashFloat(leaderId, eEpoch, 91u) * TWO_PI;
-        let pAng = hashFloat(pi, eEpoch, 92u) * TWO_PI;
-        let dLeader = eEast * cos(lAng) + eNorth * sin(lAng);
-        let dSelf = eEast * cos(pAng) + eNorth * sin(pAng);
-        let hasSharedLeader = ((packedBlobZ >> 10u) & 1u) != 0u;
-        let tMix = select(dSelf, dLeader * 0.78 + dSelf * 0.22, hasSharedLeader);
-        let tLen = length(tMix);
-        let tumbleDir = select(eEast, tMix / tLen, tLen > 1e-5);
-        kForce = tumbleDir * (pol.agitation * 0.42 * vitality * (1.0 - 0.55 * grip));
-    }
-
-    let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
-    let vRel = vTang - cTarget;
-    p.vel = cTarget + vRel * velDamp + (netForce * vitality + kForce + slopeResist) * sim.dt;
-
-    p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
-
     var uBody = orthoBasis(p.pos, p.orient);
-    if (myPhase == 2u) {
+    var kForce = vec3f(0.0);
+    if (myPhase == 1u) {
+        // Persistent active swimming driven cleanly by body heading uBody, sensory torque, and MDP thrust
+        if (activeSwim > 0.04) {
+            let eEpoch = u32(floor(max(frameF, 0.0) / 56.0));
+            let lBias = hashFloat(leaderId, eEpoch, 91u) * 2.0 - 1.0;
+            let pBias = hashFloat(pi, eEpoch, 92u) * 2.0 - 1.0;
+            let hasSharedLeader = ((packedBlobZ >> 10u) & 1u) != 0u;
+            let lockSuppress = 1.0 - 0.72 * clamp(abs(accTorque) / 6.0, 0.0, 1.0);
+            let wanderTurn = select(pBias, lBias * 0.72 + pBias * 0.28, hasSharedLeader) * (1.9 * activeSwim * lockSuppress);
+            let chiralCurve = pol.chiralTwist * (1.55 * activeSwim);
+            let angFric = pow(0.5, sim.dt / 0.08);
+            let rawOmega = (accTorque + chiralCurve + wanderTurn) * vitality;
+            p.omega = clamp(p.omega * angFric + rawOmega * (1.0 - angFric), -14.0, 14.0);
+        } else {
+            p.omega = 0.0;
+        }
+        if (activeSwim > 0.02) {
+            let hydroEase = mix(1.0, 0.82, landFrac * (1.0 - 0.35 * grip));
+            kForce = uBody * (activeSwim * 3.65 * vitality * hydroEase * (1.0 - 0.88 * grip));
+        }
+    } else if (myPhase == 2u) {
         if (bioSteer.w > 1.5 && length(bioSteer.xyz) > 1e-4) {
             uBody = orthoBasis(p.pos, bioSteer.xyz);
             p.omega = 0.0;
@@ -317,6 +373,12 @@ fn integrateOceanParticle(
     } else {
         p.omega = 0.0;
     }
+
+    let vTang = p.vel - dot(p.vel, p.pos) * p.pos;
+    let vRel = vTang - cTarget;
+    p.vel = cTarget + vRel * velDamp + (netForce * vitality + kForce + slopeResist) * sim.dt;
+
+    p.vel += mouseSphereImpulse(p.pos, sim.rMax, R, mouseSphere);
 
     let stepRes = stepGeodesicOnSphere(
         p.pos,
