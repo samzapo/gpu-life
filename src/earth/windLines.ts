@@ -1,4 +1,5 @@
 import * as d3Geo from 'd3-geo';
+import { computeSynthStreamWaveAmplitude } from '../audio/streamWave.ts';
 import { buildD3RotationMatrixColMajor } from './projections';
 import { sampleWindLonLatInto, WIND_LEVELS, type WindGrid } from './windData';
 import { OCEAN_CURRENTS_SPEC, sampleOceanLonLatInto, type OceanGrid } from './oceanData';
@@ -741,8 +742,13 @@ export class WindStreamRenderer {
                   const waveFreq = synthMod.isOcean
                     ? 0.085 + 0.065 * synthBandHit
                     : 0.24 + 0.24 * synthBandHit;
-                  const surfaceAmpRad = (synthMod.isOcean ? 0.00072 : 0.00060) * synthBandHit * synthAmpScale;
-                  const waveAmp = Math.min(48, surfaceAmpRad * scale) * (0.28 + 0.72 * speedFrac);
+                  const waveAmp = computeSynthStreamWaveAmplitude(
+                    scale,
+                    speedFrac,
+                    synthBandHit,
+                    synthAmpScale,
+                    synthMod.isOcean,
+                  );
                   nextOff = Math.sin(p.age * waveFreq + i * 1.37 + synthMod.phase) * waveAmp;
                 } else {
                   nextOff = prevOff * 0.35;

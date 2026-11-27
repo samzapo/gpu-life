@@ -6,6 +6,11 @@ import { SYNTH_RATE } from '../src/audio/synthBank.ts';
 import { createSpectrogramSnapshot, GlobeCyberSynth, SPECTROGRAM_BINS } from '../src/audio/engine.ts';
 import { GLOBE_SYNTH_CORE_SOURCE, GLOBE_SYNTH_WORKLET_NAME } from '../src/audio/synthWorklet.ts';
 import { describeSynthEffects, SYNTH_EFFECT_SPECS, SynthSpectrogramOverlay } from '../src/audio/spectrogram.ts';
+import {
+  computeSynthStreamWaveAmplitude,
+  SYNTH_OCEAN_WAVE_BASE_RAD,
+  SYNTH_WIND_WAVE_BASE_RAD,
+} from '../src/audio/streamWave.ts';
 import { buildPackedChemistryBuffer } from '../src/periodicTable2D.ts';
 import {
   buildUrlPartsFromConfig,
@@ -1334,4 +1339,16 @@ test('fullscreen helper toggles standard/webkit fullscreen, falls back safely wi
   const unsupportedBtn = { ...btn, hidden: false, dataset: {}, setAttribute() {}, querySelector() { return null; }, addEventListener() {} };
   wireFullscreenToggle(unsupportedBtn, { doc: { fullscreenEnabled: false, addEventListener() {} }, target: {} });
   assert.equal(unsupportedBtn.hidden, true);
+});
+
+test('computeSynthStreamWaveAmplitude uses 5x nominal base radii for wind and ocean streamlines', () => {
+  assert.ok(Math.abs(SYNTH_OCEAN_WAVE_BASE_RAD - 0.00072 * 5) < 1e-12);
+  assert.ok(Math.abs(SYNTH_WIND_WAVE_BASE_RAD - 0.00060 * 5) < 1e-12);
+
+  const oceanNominal = computeSynthStreamWaveAmplitude(1000, 1.0, 1.0, 1.0, true);
+  const windNominal = computeSynthStreamWaveAmplitude(1000, 1.0, 1.0, 1.0, false);
+  assert.ok(Math.abs(oceanNominal - 3.6) < 1e-9);
+  assert.ok(Math.abs(windNominal - 3.0) < 1e-9);
+  assert.equal(computeSynthStreamWaveAmplitude(1000, 1.0, 0.004, 1.0, true), 0);
+  assert.equal(computeSynthStreamWaveAmplitude(1000, 1.0, 1.0, 0, false), 0);
 });
