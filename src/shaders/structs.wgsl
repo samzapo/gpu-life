@@ -334,12 +334,12 @@ fn actionLeverProfile(act: u32) -> MdpLeverProfile {
         return MdpLeverProfile(0.38, -0.10, 0.62, -0.35, 0.58, 0.76, 0.0, 0.78, 0.0, 0.0, 0.80, 0.92);
     }
     if (a == MDP_ACT_FORAGE) {
-        return MdpLeverProfile(0.22, -0.06, 0.96, -0.65, 0.16, 0.30, 0.0, -0.24, 0.34, 0.64, 0.16, 0.14);
+        return MdpLeverProfile(0.22, -0.06, 0.96, -0.65, 0.16, 0.30, 0.0, -0.18, 0.34, 0.42, 0.16, 0.14);
     }
     if (a == MDP_ACT_CHASE) {
-        return MdpLeverProfile(0.18, 1.30, 0.12, -0.40, -0.22, -0.10, -0.02, -0.34, 0.10, 1.06, 0.05, 0.0);
+        return MdpLeverProfile(0.18, 1.30, 0.12, -0.40, -0.22, -0.10, -0.02, -0.34, 0.10, 1.08, 0.05, 0.0);
     }
-    return MdpLeverProfile(0.05, -1.18, 0.0, -1.18, -0.28, -0.32, 0.02, -0.32, -0.42, 0.92, 0.02, 0.0);
+    return MdpLeverProfile(0.05, -1.18, 0.0, -1.18, -0.28, -0.32, 0.02, -0.30, -0.42, 0.84, 0.02, 0.0);
 }
 
 fn evalCombinedMdpPolicy(packedBlobZ: u32) -> MdpLeverProfile {

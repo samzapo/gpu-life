@@ -98,13 +98,13 @@ test('3-MDP pad bit packing and combined lever blend math round-trip accurately 
   assert.ok(Math.abs(solitaryMix.dSameKin - (0.65 * aP.dSameKin + 0.35 * eP.dSameKin)) < 1e-9);
   assert.equal(aP.swimThrust, 0);
   assert.ok(aP.fixation > 0.7 && aP.dDrag > 0.5);
-  assert.ok(fP.swimThrust > 0.5 && fP.dChemNutr > aP.dChemNutr);
-  assert.ok(cP.swimThrust > 0.8 && cP.dForeignBio > 1.0);
-  assert.ok(eP.swimThrust > 0.8 && eP.dForeignBio < -1.0 && eP.dChemHalogen < -1.0);
+  assert.ok(fP.swimThrust > 0.35 && fP.dChemNutr > aP.dChemNutr);
+  assert.ok(cP.swimThrust > fP.swimThrust * 2.0 && cP.dForeignBio > 1.0);
+  assert.ok(eP.swimThrust > fP.swimThrust && eP.dForeignBio < -1.0 && eP.dChemHalogen < -1.0);
 
   const blobMix = evalCombinedMdpPolicyJs(MDP_ACTION_FORAGE, MDP_ACTION_CHASE, MDP_ACTION_ANCHOR, true);
   assert.ok(Math.abs(blobMix.chiralTwist - (0.35 * fP.chiralTwist + 0.40 * cP.chiralTwist + 0.25 * aP.chiralTwist)) < 1e-9);
-  assert.ok(blobMix.dForeignBio > 0.4 && blobMix.swimThrust > 0.55);
+  assert.ok(blobMix.dForeignBio > 0.4 && blobMix.swimThrust > 0.50);
 
   const ctrlBits = MDP_STATE_DARK_CROWDED | (MDP_ACTION_CHASE << 2) | (20 << 4) | (1 << 12);
   const decodedCtrl = unpackMdpCtrl(ctrlBits);

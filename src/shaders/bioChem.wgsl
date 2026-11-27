@@ -275,10 +275,12 @@ fn evalLifeFromAtomPair(
         let fuelReady = clamp(atomLoad + 0.35, 0.35, 1.5);
         if (energy < 1.45) {
             dE += (0.20 + 0.10 * vit) * fuelReady * w;
+            dVit += 0.08 * w;
         }
     } else if (kind == 2u) {
         let foodRich = clamp(atomLoad + 0.25, 0.25, 2.2);
         dE += (0.14 + 0.10 * vit) * foodRich * w;
+        dVit += 0.06 * w;
     } else if (atomicNum == 6u) {
         if (atomLoad > 0.05 && atomLoad < 1.35) {
             dE += 0.09 * w;
@@ -1401,7 +1403,7 @@ fn finalizeBioUnified(
                 }
                 let childGene = mutateGene(acc.contactBestGene, pi, frameU, 17u, 0.05);
                 let childGrad = select(0u, 1u, hostGrad && acc.nearLipidCount >= 1.0);
-                let childInitAct = u32(floor(hashFloat(pi, frameU, 18u) * 4.0)) & 3u;
+                let childInitAct = u32(floor(hashFloat(pi, frameU, 18u) * 2.0)) & 1u;
                 let childMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, nextSp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, childInitAct, 6u, 1u)));
                 return BioStepResult(
                     vec4f(0.68, 0.06, 0.0, packLifeMetaGrad(1u, nextSp, acc.contactBestKin, childGene, childGrad)),
@@ -1421,7 +1423,7 @@ fn finalizeBioUnified(
                 let sp = u32(floor(hashFloat(pi, frameU, 14u) * f32(nBio))) % nBio;
                 let freshKin = hashFloat(pi, frameU, 15u) * TWO_PI;
                 let freshGene = u32(floor(hashFloat(pi, frameU, 16u) * 16.0)) & 15u;
-                let initAct = u32(floor(hashFloat(pi, frameU, 18u) * 4.0)) & 3u;
+                let initAct = u32(floor(hashFloat(pi, frameU, 18u) * 2.0)) & 1u;
                 let sporeMdp = MdpState(getSpeciesMdpPriorPack(nChem, nBio, sp), vec4f(0.68, 0.0, 0.0, packMdpCtrl(MDP_STATE_ABUNDANT, initAct, 8u, 1u)));
                 return BioStepResult(
                     vec4f(0.68, 0.06, 0.0, packLifeMeta(1u, sp, freshKin, freshGene)),
@@ -1521,8 +1523,9 @@ fn finalizeBioUnified(
 
     // Phase 1: Living Cytoplasm (`myPhase == 1u`)
     let curVel = evalOceanCurrentVel(pos, oc, bio.oceanCurrentScale);
-    let mySelfSpeed = length(vel - curVel);
-    let motility = clamp(mySelfSpeed / 0.16, 0.0, 1.5);
+    let windFlow = select(windSim * (0.31 * landFrac), windSim * (0.21 * smoothstep(0.35, 0.55, oc.w)), oc.w >= 0.35);
+    let mySelfSpeed = length(vel - (curVel + windFlow));
+    let motility = clamp(mySelfSpeed / 0.10, 0.0, 1.5);
     let curPol = evalCombinedMdpPolicy(curBlob.z);
 
     let nMembers = 1.0 + acc.blobCount;
@@ -1543,7 +1546,7 @@ fn finalizeBioUnified(
     );
 
     let normChem = select(0.0, 1.0 / (1.0 + 0.35 * max(acc.bioChemCount - 1.0, 0.0)), acc.bioChemCount > 0.0);
-    let vitRaw = curLifeState.y + (acc.dVit * normChem - 0.13 * rate * curLifeState.y) * dtVit;
+    let vitRaw = curLifeState.y + (acc.dVit * normChem + 0.03 * q10Bio * solar - 0.12 * rate * curLifeState.y) * dtVit;
     let vitDiffAlpha = select(0.0, clamp(2.4 * dtBio, 0.0, 0.26), acc.blobCount > 0.0);
     let vit = clamp(mix(vitRaw, avgBlobVit, vitDiffAlpha), 0.0, 1.0);
     let detoxRate = 0.22 + 0.48 * vit;
@@ -1587,14 +1590,14 @@ fn finalizeBioUnified(
     let solarElem = elemSolarWeight(atomicNum);
     let redoxElem = elemRedoxWeight(atomicNum);
     let solarGain = 0.52 * q10Bio * solar * lightShade * (0.20 + 0.85 * solarElem) * mix(0.55 + 0.75 * upwell, landFertilityScale, landFrac) * moistureFactor * carbWaterBoost * calmFixBoost;
-    let engulfGain = 1.35 * min(acc.contactPreyHarvest, 2.5) * o2RespireBoost;
-    let detritusGain = 0.30 * min(acc.nearStressedBio, 2.5) * (0.25 + 0.75 * redoxElem) * o2RespireBoost * swimSweep;
-    let chemBonus = 0.36 * acc.dE * normChem * q10Bio * swimSweep;
+    let engulfGain = 1.55 * min(acc.contactPreyHarvest, 2.5) * o2RespireBoost;
+    let detritusGain = 0.28 * min(acc.nearStressedBio, 2.5) * (0.25 + 0.75 * redoxElem) * o2RespireBoost * swimSweep;
+    let chemBonus = 0.34 * acc.dE * normChem * q10Bio * swimSweep;
 
     let coldTorpor = mix(1.0, clamp(0.58 + 0.42 * smoothstep(270.0, 297.0, tHabK), 0.48, 1.15), tBlend);
     let feedDrive = clamp(max(curPol.dChemNutr, curPol.dForeignBio), 0.0, 1.0);
     let panicCost = 0.068 * curPol.swimThrust * curPol.swimThrust * (1.0 - feedDrive);
-    let basalBurn = (0.11 + 0.014 * motility + 0.022 * curPol.swimThrust * curPol.swimThrust + panicCost + 0.016 * curPol.lipidAlloc)
+    let basalBurn = (0.11 + 0.012 * motility + 0.016 * curPol.swimThrust * curPol.swimThrust + panicCost + 0.016 * curPol.lipidAlloc)
         * coldTorpor * (1.0 - 0.16 * membraneShield - 0.18 * select(0.0, 1.0, isGradNow));
 
     // Pure physical steric crowding (no arbitrary own-blob cap or foreign bonus tricks)
@@ -1620,7 +1623,7 @@ fn finalizeBioUnified(
     let mdpInit = (mdpBits & 4096u) != 0u;
     var qPack = select(priorQPack, curMdp.qPack, mdpInit);
     let prevState = select(MDP_STATE_ABUNDANT, mdpBits & 3u, mdpInit);
-    let prevAction = select(u32(floor(hashFloat(pi, frameU, 45u) * 4.0)) & 3u, (mdpBits >> 2u) & 3u, mdpInit);
+    let prevAction = select(u32(floor(hashFloat(pi, frameU, 45u) * 2.0)) & 1u, (mdpBits >> 2u) & 3u, mdpInit);
     var prevDwell = select(10u, (mdpBits >> 4u) & 255u, mdpInit);
     let prevMdpE = select(curLifeState.x, curMdp.ctrl.x, mdpInit);
     let prevMdpPoi = select(curLifeState.z, curMdp.ctrl.y, mdpInit);

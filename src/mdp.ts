@@ -77,7 +77,7 @@ const ACTION_LEVER_PROFILES: readonly MdpLeverProfile[] = [
     fixation: 0.92,
   },
   {
-    // 1: Glide / Forage — persistent smooth motility grazing nutrients, moisture & detritus
+    // 1: Glide / Forage — gentle smooth motility carried easily by currents & winds while grazing
     dSameKin: 0.22,
     dForeignBio: -0.06,
     dChemNutr: 0.96,
@@ -85,14 +85,14 @@ const ACTION_LEVER_PROFILES: readonly MdpLeverProfile[] = [
     dLipid: 0.16,
     dMineral: 0.30,
     dBeta: 0.0,
-    dDrag: -0.24,
+    dDrag: -0.18,
     chiralTwist: 0.34,
-    swimThrust: 0.64,
+    swimThrust: 0.42,
     lipidAlloc: 0.16,
     fixation: 0.14,
   },
   {
-    // 2: Chase / Hunt — fast persistent pursuit along foreign-matrix attraction & predation
+    // 2: Chase / Hunt — deliberate pursuit along foreign-matrix attraction & predation
     dSameKin: 0.18,
     dForeignBio: 1.30,
     dChemNutr: 0.12,
@@ -102,7 +102,7 @@ const ACTION_LEVER_PROFILES: readonly MdpLeverProfile[] = [
     dBeta: -0.02,
     dDrag: -0.34,
     chiralTwist: 0.10,
-    swimThrust: 1.06,
+    swimThrust: 1.08,
     lipidAlloc: 0.05,
     fixation: 0.0,
   },
@@ -115,9 +115,9 @@ const ACTION_LEVER_PROFILES: readonly MdpLeverProfile[] = [
     dLipid: -0.28,
     dMineral: -0.32,
     dBeta: 0.02,
-    dDrag: -0.32,
+    dDrag: -0.30,
     chiralTwist: -0.42,
-    swimThrust: 0.92,
+    swimThrust: 0.84,
     lipidAlloc: 0.02,
     fixation: 0.0,
   },

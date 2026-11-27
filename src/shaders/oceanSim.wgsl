@@ -255,9 +255,9 @@ fn finalizeOceanTorque(acc: OceanForceAccum, p: Particle, myPhase: u32, pol: Mdp
         let sDir = orthoBasis(p.pos, acc.sense);
         let fwd = dot(uI, sDir);
         let perp = dot(bI, sDir);
-        let turnSin = select(perp, perp + select(-0.65, 0.65, perp >= 0.0), fwd < -0.15);
-        let sGain = sLen / (0.20 + sLen);
-        tOut += turnSin * sGain * 14.0;
+        let turnSin = select(perp, perp + select(-0.60, 0.60, perp >= 0.0), fwd < -0.15);
+        let sGain = sLen / (0.22 + sLen);
+        tOut += turnSin * sGain * 10.5;
     }
     return tOut;
 }
@@ -283,9 +283,6 @@ fn integrateOceanParticle(
     leaderId: u32,
     packedBlobZ: u32,
 ) -> Particle {
-    _ = windRaw;
-    _ = windStrength;
-    _ = windRefSpeed;
     var p = pIn;
     let R = max(sim.worldSize, 0.25);
 
@@ -297,31 +294,37 @@ fn integrateOceanParticle(
 
     let pol = evalCombinedMdpPolicy(packedBlobZ);
     let landFrac = clamp(1.0 - smoothstep(0.18, 0.48, oc.w), 0.0, 1.0);
-    let substrateAvail = clamp(
-        max(landFrac, smoothstep(0.30, 0.58, oc.w) * (1.0 - 0.55 * smoothstep(0.60, 0.95, oc.w))),
-        0.58,
-        1.0,
-    );
+    let coastalFloor = smoothstep(0.30, 0.56, oc.w) * (1.0 - 0.85 * smoothstep(0.54, 0.82, oc.w));
+    let substrateAvail = clamp(max(landFrac, coastalFloor), 0.10, 1.0);
     let activeSwim = clamp(pol.swimThrust, 0.0, 1.2);
     let anchorHold = clamp(pol.dDrag, 0.0, 1.0) * (1.0 - smoothstep(0.16, 0.48, activeSwim));
-    let rawGrip = clamp(0.22 * (1.0 - smoothstep(0.18, 0.55, activeSwim)) + anchorHold, 0.0, 0.94);
+    let rawGrip = clamp(0.20 * (1.0 - smoothstep(0.18, 0.52, activeSwim)) + anchorHold, 0.0, 0.94);
     let grip = select(0.15, rawGrip * substrateAvail, myPhase == 1u);
-    let glideSlip = select(0.0, clamp(-pol.dDrag * 1.4, 0.0, 0.58) * smoothstep(0.15, 0.50, activeSwim), myPhase == 1u);
+    let glideSlip = select(0.0, clamp(-pol.dDrag * 1.15, 0.0, 0.42) * smoothstep(0.15, 0.50, activeSwim), myPhase == 1u);
 
     var cTarget = vec3f(0.0);
+    let wRef = max(windRefSpeed, 10.0);
+    let wind3D = windRaw.x * eEast + windRaw.y * eNorth;
+    let windUnit = select(vec3f(0.0), (wind3D / wRef) * windStrength, sim.vortex > 0.0 && windStrength > 0.0);
     if (sim.vortex > 0.0 && sim.currentStrength > 0.0 && oc.w >= 0.35) {
         let cur3D = oc.x * eEast + oc.y * eNorth;
-        cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * smoothstep(0.35, 0.55, oc.w);
-        cTarget *= (1.0 - 0.92 * grip);
-        let cLen = length(cTarget);
-        if (cLen > 1.15) {
-            cTarget *= 1.15 / cLen;
-        }
+        let oceanMask = smoothstep(0.35, 0.55, oc.w);
+        cTarget = (cur3D / 0.7) * (0.30 * sim.currentStrength) * oceanMask + windUnit * (0.095 * oceanMask);
+    } else if (landFrac > 0.05) {
+        let hillRunoff = -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.08 * smoothstep(0.3, 2.5, elevKm));
+        cTarget = windUnit * (0.14 * landFrac) + hillRunoff;
+    }
+    cTarget *= (1.0 - 0.90 * grip);
+    let cLen = length(cTarget);
+    if (cLen > 1.15) {
+        cTarget *= 1.15 / cLen;
     }
 
+    let cofactorReady = smoothstep(0.03, 0.18, oceanState.y);
+    let fuelReady = smoothstep(0.20, 0.78, oceanState.x);
     let baseVitality = select(
-        clamp(0.65 + 0.50 * oceanState.x - oceanState.z * 0.35, 0.35, 1.30),
-        clamp(0.75 + 0.35 * oceanState.x, 0.45, 1.15),
+        clamp(0.18 + 0.44 * cofactorReady + 0.42 * fuelReady - oceanState.z * 0.30, 0.15, 1.05),
+        clamp(0.55 + 0.40 * fuelReady, 0.35, 1.0),
         myPhase == 2u,
     );
     let thermFluid = mix(
@@ -332,8 +335,8 @@ fn integrateOceanParticle(
     let vitality = baseVitality * thermFluid;
     let frostDrag = mix(1.0, 0.90, smoothstep(271.5, 250.0, tHabK) * landFrac * tBlend);
     let toxicDrag = max(0.68, 1.0 - 0.20 * oceanState.z);
-    let baseDamp = mix(sim.friction, 0.90, glideSlip);
-    let velDamp = clamp(baseDamp * (1.0 - 0.48 * grip) * toxicDrag * frostDrag, 0.20, 0.95);
+    let baseDamp = mix(sim.friction, 0.80, glideSlip);
+    let velDamp = clamp(baseDamp * (1.0 - 0.48 * grip) * toxicDrag * frostDrag, 0.20, 0.92);
     let slopeResist = select(
         vec3f(0.0),
         -(terrainSample.y * eEast + terrainSample.z * eNorth) * (0.05 * smoothstep(0.4, 3.0, elevKm)) * (1.0 - 0.85 * grip),
@@ -345,22 +348,22 @@ fn integrateOceanParticle(
     if (myPhase == 1u) {
         // Persistent active swimming driven cleanly by body heading uBody, sensory torque, and MDP thrust
         if (activeSwim > 0.04) {
-            let eEpoch = u32(floor(max(frameF, 0.0) / 56.0));
+            let eEpoch = u32(floor(max(frameF, 0.0) / 72.0));
             let lBias = hashFloat(leaderId, eEpoch, 91u) * 2.0 - 1.0;
             let pBias = hashFloat(pi, eEpoch, 92u) * 2.0 - 1.0;
             let hasSharedLeader = ((packedBlobZ >> 10u) & 1u) != 0u;
-            let lockSuppress = 1.0 - 0.72 * clamp(abs(accTorque) / 6.0, 0.0, 1.0);
-            let wanderTurn = select(pBias, lBias * 0.72 + pBias * 0.28, hasSharedLeader) * (1.9 * activeSwim * lockSuppress);
-            let chiralCurve = pol.chiralTwist * (1.55 * activeSwim);
-            let angFric = pow(0.5, sim.dt / 0.08);
+            let lockSuppress = 1.0 - 0.72 * clamp(abs(accTorque) / 5.0, 0.0, 1.0);
+            let wanderTurn = select(pBias, lBias * 0.72 + pBias * 0.28, hasSharedLeader) * (1.20 * activeSwim * lockSuppress);
+            let chiralCurve = pol.chiralTwist * (1.05 * activeSwim);
+            let angFric = pow(0.5, sim.dt / 0.10);
             let rawOmega = (accTorque + chiralCurve + wanderTurn) * vitality;
-            p.omega = clamp(p.omega * angFric + rawOmega * (1.0 - angFric), -14.0, 14.0);
+            p.omega = clamp(p.omega * angFric + rawOmega * (1.0 - angFric), -9.0, 9.0);
         } else {
             p.omega = 0.0;
         }
         if (activeSwim > 0.02) {
             let hydroEase = mix(1.0, 0.82, landFrac * (1.0 - 0.35 * grip));
-            kForce = uBody * (activeSwim * 3.65 * vitality * hydroEase * (1.0 - 0.88 * grip));
+            kForce = uBody * (activeSwim * 1.98 * vitality * hydroEase * (1.0 - 0.88 * grip));
         }
     } else if (myPhase == 2u) {
         if (bioSteer.w > 1.5 && length(bioSteer.xyz) > 1e-4) {
